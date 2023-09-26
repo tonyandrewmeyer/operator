@@ -22,7 +22,7 @@ import tempfile
 import types
 import unittest
 from collections import OrderedDict
-from test.test_helpers import fake_script, fake_script_calls
+from test.test_helpers import FakeScriptTestCase
 from textwrap import dedent
 from unittest.mock import patch
 
@@ -35,7 +35,7 @@ from ops._private import yaml
 from ops.model import _ModelBackend
 
 
-class TestModel(unittest.TestCase):
+class TestModel(FakeScriptTestCase):
     def setUp(self):
         self.harness = ops.testing.Harness(ops.CharmBase, meta='''
             name: myapp
@@ -866,14 +866,14 @@ class TestModel(unittest.TestCase):
         meta.storages = {'disks': None, 'data': None}
         model = ops.Model(meta, _ModelBackend('myapp/0'))
 
-        fake_script(self, 'storage-list', '''
+        self.fake_script('storage-list', '''
             if [ "$1" = disks ]; then
                 echo '["disks/0", "disks/1"]'
             else
                 echo '[]'
             fi
         ''')
-        fake_script(self, 'storage-get', '''
+        self.fake_script('storage-get', '''
             if [ "$2" = disks/0 ]; then
                 echo '"/var/srv/disks/0"'
             elif [ "$2" = disks/1 ]; then
@@ -882,7 +882,7 @@ class TestModel(unittest.TestCase):
                 exit 2
             fi
         ''')
-        fake_script(self, 'storage-add', '')
+        self.fake_script('storage-add', '')
 
         self.assertEqual(len(model.storages), 2)
         self.assertEqual(model.storages.keys(), meta.storages.keys())
@@ -901,7 +901,7 @@ class TestModel(unittest.TestCase):
             self.assertEqual(storage.name, test_cases[storage.id]['name'])
             self.assertEqual(storage.location, test_cases[storage.id]['location'])
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['storage-list', 'disks', '--format=json'],
             ['storage-get', '-s', 'disks/0', 'location', '--format=json'],
             ['storage-get', '-s', 'disks/1', 'location', '--format=json'],
@@ -909,7 +909,7 @@ class TestModel(unittest.TestCase):
 
         self.assertSequenceEqual(model.storages['data'], [])
         model.storages.request('data', count=3)
-        self.assertEqual(fake_script_calls(self), [
+        self.assertEqual(self.fake_script_calls(), [
             ['storage-list', 'data', '--format=json'],
             ['storage-add', 'data=3'],
         ])
@@ -935,7 +935,7 @@ class TestModel(unittest.TestCase):
 
     def test_run_error(self):
         model = ops.Model(ops.CharmMeta(), _ModelBackend('myapp/0'))
-        fake_script(self, 'status-get', """echo 'ERROR cannot get status' >&2; exit 1""")
+        self.fake_script('status-get', """echo 'ERROR cannot get status' >&2; exit 1""")
         with self.assertRaises(ops.ModelError) as cm:
             _ = model.unit.status.message
         self.assertEqual(str(cm.exception), 'ERROR cannot get status\n')
@@ -1916,7 +1916,7 @@ class MockPebbleClient:
         self.requests.append(('send_signal', signal, service_names))
 
 
-class TestModelBindings(unittest.TestCase):
+class TestModelBindings(FakeScriptTestCase):
 
     def setUp(self):
         meta = ops.CharmMeta()
@@ -1931,9 +1931,9 @@ class TestModelBindings(unittest.TestCase):
         self.backend = _ModelBackend('myapp/0')
         self.model = ops.Model(meta, self.backend)
 
-        fake_script(self, 'relation-ids',
-                    """([ "$1" = db0 ] && echo '["db0:4"]') || echo '[]'""")
-        fake_script(self, 'relation-list', """[ "$2" = 4 ] && echo '["remoteapp1/0"]' || exit 2""")
+        self.fake_script('relation-ids',
+                         """([ "$1" = db0 ] && echo '["db0:4"]') || echo '[]'""")
+        self.fake_script('relation-list', """[ "$2" = 4 ] && echo '["remoteapp1/0"]' || exit 2""")
         self.network_get_out = '''{
   "bind-addresses": [
     {
@@ -2025,8 +2025,7 @@ class TestModelBindings(unittest.TestCase):
                 self.model.get_binding(name)
 
     def test_dead_relations(self):
-        fake_script(
-            self,
+        self.fake_script(
             'network-get',
             f'''
                 if [ "$1" = db0 ] && [ "$2" = --format=json ]; then
@@ -2039,24 +2038,24 @@ class TestModelBindings(unittest.TestCase):
         # Validate the behavior for dead relations.
         binding = ops.Binding('db0', 42, self.model._backend)
         self.assertEqual(binding.network.bind_address, ipaddress.ip_address('192.0.2.2'))
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['network-get', 'db0', '-r', '42', '--format=json'],
             ['network-get', 'db0', '--format=json'],
         ])
 
     def test_binding_by_relation_name(self):
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{self.network_get_out}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{self.network_get_out}' || exit 1''')
         binding_name = 'db0'
         expected_calls = [['network-get', 'db0', '--format=json']]
 
         binding = self.model.get_binding(binding_name)
         self._check_binding_data(binding_name, binding)
-        self.assertEqual(fake_script_calls(self, clear=True), expected_calls)
+        self.assertEqual(self.fake_script_calls(clear=True), expected_calls)
 
     def test_binding_by_relation(self):
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{self.network_get_out}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{self.network_get_out}' || exit 1''')
         binding_name = 'db0'
         expected_calls = [
             ['relation-ids', 'db0', '--format=json'],
@@ -2066,7 +2065,7 @@ class TestModelBindings(unittest.TestCase):
         ]
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self._check_binding_data(binding_name, binding)
-        self.assertEqual(fake_script_calls(self, clear=True), expected_calls)
+        self.assertEqual(self.fake_script_calls(clear=True), expected_calls)
 
     def test_binding_no_iface_name(self):
         network_get_out_obj = {
@@ -2091,8 +2090,8 @@ class TestModelBindings(unittest.TestCase):
             ]
         }
         network_get_out = json.dumps(network_get_out_obj)
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_get_out}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_get_out}' || exit 1''')
         binding_name = 'db0'
         expected_calls = [['network-get', 'db0', '--format=json']]
 
@@ -2100,28 +2099,28 @@ class TestModelBindings(unittest.TestCase):
         self.assertEqual(binding.name, 'db0')
         self.assertEqual(binding.network.bind_address, ipaddress.ip_address('10.1.89.35'))
         self.assertEqual(binding.network.ingress_address, ipaddress.ip_address('10.152.183.158'))
-        self.assertEqual(fake_script_calls(self, clear=True), expected_calls)
+        self.assertEqual(self.fake_script_calls(clear=True), expected_calls)
 
     def test_missing_bind_addresses(self):
         network_data = json.dumps({})
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
         binding_name = 'db0'
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self.assertEqual(binding.network.interfaces, [])
 
     def test_empty_bind_addresses(self):
         network_data = json.dumps({'bind-addresses': [{}]})
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
         binding_name = 'db0'
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self.assertEqual(binding.network.interfaces, [])
 
     def test_no_bind_addresses(self):
         network_data = json.dumps({'bind-addresses': [{'addresses': None}]})
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
         binding_name = 'db0'
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self.assertEqual(binding.network.interfaces, [])
@@ -2133,8 +2132,8 @@ class TestModelBindings(unittest.TestCase):
                 'addresses': [{}],
             }],
         })
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
         binding_name = 'db0'
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self.assertEqual(len(binding.network.interfaces), 1)
@@ -2146,8 +2145,8 @@ class TestModelBindings(unittest.TestCase):
         network_data = json.dumps({
             'bind-addresses': [],
         })
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
         binding_name = 'db0'
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self.assertEqual(binding.network.ingress_addresses, [])
@@ -2158,8 +2157,8 @@ class TestModelBindings(unittest.TestCase):
             'bind-addresses': [],
             'ingress-addresses': [],
         })
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
         binding_name = 'db0'
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self.assertEqual(binding.network.egress_subnets, [])
@@ -2172,14 +2171,14 @@ class TestModelBindings(unittest.TestCase):
                 'foo.bar.baz.com'
             ],
         })
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = db0 ] && echo '{network_data}' || exit 1''')
         binding_name = 'db0'
         binding = self.model.get_binding(self.model.get_relation(binding_name))
         self.assertEqual(binding.network.ingress_addresses, ['foo.bar.baz.com'])
 
 
-class TestModelBackend(unittest.TestCase):
+class TestModelBackend(FakeScriptTestCase):
 
     def setUp(self):
         self._backend = None
@@ -2211,11 +2210,11 @@ class TestModelBackend(unittest.TestCase):
             name: myapp
         ''')
         model = ops.Model(meta, self.backend)
-        fake_script(self, 'is-leader', 'echo false')
+        self.fake_script('is-leader', 'echo false')
         self.assertFalse(model.unit.is_leader())
 
         # Change the leadership status
-        fake_script(self, 'is-leader', 'echo true')
+        self.fake_script('is-leader', 'echo true')
         # If you don't force it, we don't check, so we won't see the change
         self.assertFalse(model.unit.is_leader())
         # If we force a recheck, then we notice
@@ -2223,7 +2222,7 @@ class TestModelBackend(unittest.TestCase):
         self.assertTrue(model.unit.is_leader())
 
         # Force a recheck without changing the leadership status.
-        fake_script(self, 'is-leader', 'echo true')
+        self.fake_script('is-leader', 'echo true')
         self.backend._leader_check_time = None
         self.assertTrue(model.unit.is_leader())
 
@@ -2233,22 +2232,22 @@ class TestModelBackend(unittest.TestCase):
         err_msg = 'ERROR invalid value "$2" for option -r: relation not found'
 
         test_cases = [(
-            lambda: fake_script(self, 'relation-list', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('relation-list', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.relation_list(3),
             ops.ModelError,
             [['relation-list', '-r', '3', '--format=json']],
         ), (
-            lambda: fake_script(self, 'relation-list', f'echo {err_msg} >&2 ; exit 2'),
+            lambda: self.fake_script('relation-list', f'echo {err_msg} >&2 ; exit 2'),
             lambda: self.backend.relation_list(3),
             ops.RelationNotFoundError,
             [['relation-list', '-r', '3', '--format=json']],
         ), (
-            lambda: fake_script(self, 'relation-set', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('relation-set', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.relation_set(3, 'foo', 'bar', is_app=False),
             ops.ModelError,
             [['relation-set', '-r', '3', '--file', '-']],
         ), (
-            lambda: fake_script(self, 'relation-set', f'echo {err_msg} >&2 ; exit 2'),
+            lambda: self.fake_script('relation-set', f'echo {err_msg} >&2 ; exit 2'),
             lambda: self.backend.relation_set(3, 'foo', 'bar', is_app=False),
             ops.RelationNotFoundError,
             [['relation-set', '-r', '3', '--file', '-']],
@@ -2258,12 +2257,12 @@ class TestModelBackend(unittest.TestCase):
             ops.RelationNotFoundError,
             [['relation-set', '-r', '3', '--app', '--file', '-']],
         ), (
-            lambda: fake_script(self, 'relation-get', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('relation-get', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.relation_get(3, 'remote/0', is_app=False),
             ops.ModelError,
             [['relation-get', '-r', '3', '-', 'remote/0', '--format=json']],
         ), (
-            lambda: fake_script(self, 'relation-get', f'echo {err_msg} >&2 ; exit 2'),
+            lambda: self.fake_script('relation-get', f'echo {err_msg} >&2 ; exit 2'),
             lambda: self.backend.relation_get(3, 'remote/0', is_app=False),
             ops.RelationNotFoundError,
             [['relation-get', '-r', '3', '-', 'remote/0', '--format=json']],
@@ -2279,12 +2278,12 @@ class TestModelBackend(unittest.TestCase):
                 do_fake()
                 with self.assertRaises(exception):
                     run()
-                self.assertEqual(fake_script_calls(self, clear=True), calls)
+                self.assertEqual(self.fake_script_calls(clear=True), calls)
 
     def test_relation_get_juju_version_quirks(self):
         self.addCleanup(os.environ.pop, 'JUJU_VERSION', None)
 
-        fake_script(self, 'relation-get', '''echo '{"foo": "bar"}' ''')
+        self.fake_script('relation-get', '''echo '{"foo": "bar"}' ''')
 
         # on 2.7.0+, things proceed as expected
         for v in ['2.8.0', '2.7.0']:
@@ -2292,14 +2291,14 @@ class TestModelBackend(unittest.TestCase):
                 os.environ['JUJU_VERSION'] = v
                 rel_data = self.backend.relation_get(1, 'foo/0', is_app=True)
                 self.assertEqual(rel_data, {"foo": "bar"})
-                calls = [' '.join(i) for i in fake_script_calls(self, clear=True)]
+                calls = [' '.join(i) for i in self.fake_script_calls(clear=True)]
                 self.assertEqual(calls, ['relation-get -r 1 - foo/0 --app --format=json'])
 
         # before 2.7.0, it just fails (no --app support)
         os.environ['JUJU_VERSION'] = '2.6.9'
         with self.assertRaisesRegex(RuntimeError, 'not supported on Juju version 2.6.9'):
             self.backend.relation_get(1, 'foo/0', is_app=True)
-        self.assertEqual(fake_script_calls(self), [])
+        self.assertEqual(self.fake_script_calls(), [])
 
     def test_relation_set_juju_version_quirks(self):
         self.addCleanup(os.environ.pop, 'JUJU_VERSION', None)
@@ -2309,12 +2308,12 @@ class TestModelBackend(unittest.TestCase):
             with self.subTest(v):
                 t = tempfile.NamedTemporaryFile()
                 try:
-                    fake_script(self, 'relation-set', dedent("""
+                    self.fake_script('relation-set', dedent("""
                         cat >> {}
                         """).format(pathlib.Path(t.name).as_posix()))
                     os.environ['JUJU_VERSION'] = v
                     self.backend.relation_set(1, 'foo', 'bar', is_app=True)
-                    calls = [' '.join(i) for i in fake_script_calls(self, clear=True)]
+                    calls = [' '.join(i) for i in self.fake_script_calls(clear=True)]
                     self.assertEqual(calls, ['relation-set -r 1 --app --file -'])
                     t.seek(0)
                     content = t.read()
@@ -2327,12 +2326,12 @@ class TestModelBackend(unittest.TestCase):
         os.environ['JUJU_VERSION'] = '2.6.9'
         with self.assertRaisesRegex(RuntimeError, 'not supported on Juju version 2.6.9'):
             self.backend.relation_set(1, 'foo', 'bar', is_app=True)
-        self.assertEqual(fake_script_calls(self), [])
+        self.assertEqual(self.fake_script_calls(), [])
 
     def test_status_get(self):
         # taken from actual Juju output
         content = '{"message": "", "status": "unknown", "status-data": {}}'
-        fake_script(self, 'status-get', f"echo '{content}'")
+        self.fake_script('status-get', f"echo '{content}'")
         s = self.backend.status_get(is_app=False)
         self.assertEqual(s['status'], "unknown")
         self.assertEqual(s['message'], "")
@@ -2353,18 +2352,18 @@ class TestModelBackend(unittest.TestCase):
                 }
             }
             """)
-        fake_script(self, 'status-get', f"echo '{content}'")
+        self.fake_script('status-get', f"echo '{content}'")
         s = self.backend.status_get(is_app=True)
         self.assertEqual(s['status'], "maintenance")
         self.assertEqual(s['message'], "installing")
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['status-get', '--include-data', '--application=False', '--format=json'],
             ['status-get', '--include-data', '--application=True', '--format=json'],
         ])
 
     def test_status_is_app_forced_kwargs(self):
-        fake_script(self, 'status-get', 'exit 1')
-        fake_script(self, 'status-set', 'exit 1')
+        self.fake_script('status-get', 'exit 1')
+        self.fake_script('status-set', 'exit 1')
 
         test_cases = (
             lambda: self.backend.status_get(False),
@@ -2383,15 +2382,15 @@ class TestModelBackend(unittest.TestCase):
             name: myapp
         ''')
         model = ops.Model(meta, self.backend)
-        fake_script(self, 'status-set', 'exit 1')
-        fake_script(self, 'is-leader', 'echo true')
+        self.fake_script('status-set', 'exit 1')
+        self.fake_script('is-leader', 'echo true')
 
         with self.assertRaises(ops.ModelError):
             model.unit.status = ops.UnknownStatus()
         with self.assertRaises(ops.ModelError):
             model.unit.status = ops.ErrorStatus()
 
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['status-set', '--application=False', 'unknown', ''],
             ['status-set', '--application=False', 'error', ''],
         ])
@@ -2402,7 +2401,7 @@ class TestModelBackend(unittest.TestCase):
             model.app.status = ops.ErrorStatus()
 
         # A leadership check is needed for application status.
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['is-leader', '--format=json'],
             ['status-set', '--application=True', 'unknown', ''],
             ['status-set', '--application=True', 'error', ''],
@@ -2427,7 +2426,7 @@ class TestModelBackend(unittest.TestCase):
                     "status": name,
                     "status-data": {},
                 })
-                fake_script(self, 'status-get', f"echo '{content}'")
+                self.fake_script('status-get', f"echo '{content}'")
 
                 self.assertIsInstance(model.unit.status, expected_cls)
                 self.assertEqual(model.unit.status.name, name)
@@ -2440,8 +2439,8 @@ class TestModelBackend(unittest.TestCase):
                         "status-data": {},
                     }
                 })
-                fake_script(self, 'status-get', f"echo '{content}'")
-                fake_script(self, 'is-leader', 'echo true')
+                self.fake_script('status-get', f"echo '{content}'")
+                self.fake_script('is-leader', 'echo true')
 
                 self.assertIsInstance(model.app.status, expected_cls)
                 self.assertEqual(model.app.status.name, name)
@@ -2454,27 +2453,27 @@ class TestModelBackend(unittest.TestCase):
 
     def test_storage_tool_errors(self):
         test_cases = [(
-            lambda: fake_script(self, 'storage-list', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('storage-list', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.storage_list('foobar'),
             ops.ModelError,
             [['storage-list', 'foobar', '--format=json']],
         ), (
-            lambda: fake_script(self, 'storage-get', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('storage-get', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.storage_get('foobar', 'someattr'),
             ops.ModelError,
             [['storage-get', '-s', 'foobar', 'someattr', '--format=json']],
         ), (
-            lambda: fake_script(self, 'storage-add', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('storage-add', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.storage_add('foobar', count=2),
             ops.ModelError,
             [['storage-add', 'foobar=2']],
         ), (
-            lambda: fake_script(self, 'storage-add', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('storage-add', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.storage_add('foobar', count=object),
             TypeError,
             [],
         ), (
-            lambda: fake_script(self, 'storage-add', 'echo fooerror >&2 ; exit 1'),
+            lambda: self.fake_script('storage-add', 'echo fooerror >&2 ; exit 1'),
             lambda: self.backend.storage_add('foobar', count=True),
             TypeError,
             [],
@@ -2483,7 +2482,7 @@ class TestModelBackend(unittest.TestCase):
             do_fake()
             with self.assertRaises(exception):
                 run()
-            self.assertEqual(fake_script_calls(self, clear=True), calls)
+            self.assertEqual(self.fake_script_calls(clear=True), calls)
 
     def test_network_get(self):
         network_get_out = '''{
@@ -2507,16 +2506,16 @@ class TestModelBackend(unittest.TestCase):
     "192.0.2.2"
   ]
 }'''
-        fake_script(self, 'network-get',
-                    f'''[ "$1" = deadbeef ] && echo '{network_get_out}' || exit 1''')
+        self.fake_script('network-get',
+                         f'''[ "$1" = deadbeef ] && echo '{network_get_out}' || exit 1''')
         network_info = self.backend.network_get('deadbeef')
         self.assertEqual(network_info, json.loads(network_get_out))
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['network-get', 'deadbeef', '--format=json']])
 
         network_info = self.backend.network_get('deadbeef', 1)
         self.assertEqual(network_info, json.loads(network_get_out))
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['network-get', 'deadbeef', '-r', '1', '--format=json']])
 
     def test_network_get_errors(self):
@@ -2524,13 +2523,13 @@ class TestModelBackend(unittest.TestCase):
         err_no_rel = 'ERROR invalid value "$3" for option -r: relation not found'
 
         test_cases = [(
-            lambda: fake_script(self, 'network-get',
-                                f'echo {err_no_endpoint} >&2 ; exit 1'),
+            lambda: self.fake_script('network-get',
+                                     f'echo {err_no_endpoint} >&2 ; exit 1'),
             lambda: self.backend.network_get("deadbeef"),
             ops.ModelError,
             [['network-get', 'deadbeef', '--format=json']],
         ), (
-            lambda: fake_script(self, 'network-get', f'echo {err_no_rel} >&2 ; exit 2'),
+            lambda: self.fake_script('network-get', f'echo {err_no_rel} >&2 ; exit 2'),
             lambda: self.backend.network_get("deadbeef", 3),
             ops.RelationNotFoundError,
             [['network-get', 'deadbeef', '-r', '3', '--format=json']],
@@ -2539,44 +2538,44 @@ class TestModelBackend(unittest.TestCase):
             do_fake()
             with self.assertRaises(exception):
                 run()
-            self.assertEqual(fake_script_calls(self, clear=True), calls)
+            self.assertEqual(self.fake_script_calls(clear=True), calls)
 
     def test_action_get_error(self):
-        fake_script(self, 'action-get', '')
-        fake_script(self, 'action-get', 'echo fooerror >&2 ; exit 1')
+        self.fake_script('action-get', '')
+        self.fake_script('action-get', 'echo fooerror >&2 ; exit 1')
         with self.assertRaises(ops.ModelError):
             self.backend.action_get()
         calls = [['action-get', '--format=json']]
-        self.assertEqual(fake_script_calls(self, clear=True), calls)
+        self.assertEqual(self.fake_script_calls(clear=True), calls)
 
     def test_action_set_error(self):
-        fake_script(self, 'action-get', '')
-        fake_script(self, 'action-set', 'echo fooerror >&2 ; exit 1')
+        self.fake_script('action-get', '')
+        self.fake_script('action-set', 'echo fooerror >&2 ; exit 1')
         with self.assertRaises(ops.ModelError):
             self.backend.action_set(OrderedDict([('foo', 'bar'), ('dead', 'beef cafe')]))
         self.assertCountEqual(
-            ["action-set", "dead=beef cafe", "foo=bar"], fake_script_calls(self, clear=True)[0])
+            ["action-set", "dead=beef cafe", "foo=bar"], self.fake_script_calls(clear=True)[0])
 
     def test_action_log_error(self):
-        fake_script(self, 'action-get', '')
-        fake_script(self, 'action-log', 'echo fooerror >&2 ; exit 1')
+        self.fake_script('action-get', '')
+        self.fake_script('action-log', 'echo fooerror >&2 ; exit 1')
         with self.assertRaises(ops.ModelError):
             self.backend.action_log('log-message')
         calls = [["action-log", "log-message"]]
-        self.assertEqual(fake_script_calls(self, clear=True), calls)
+        self.assertEqual(self.fake_script_calls(clear=True), calls)
 
     def test_action_get(self):
-        fake_script(self, 'action-get', """echo '{"foo-name": "bar", "silent": false}'""")
+        self.fake_script('action-get', """echo '{"foo-name": "bar", "silent": false}'""")
         params = self.backend.action_get()
         self.assertEqual(params['foo-name'], 'bar')
         self.assertEqual(params['silent'], False)
-        self.assertEqual(fake_script_calls(self), [['action-get', '--format=json']])
+        self.assertEqual(self.fake_script_calls(), [['action-get', '--format=json']])
 
     def test_action_set(self):
-        fake_script(self, 'action-get', 'exit 1')
-        fake_script(self, 'action-set', 'exit 0')
+        self.fake_script('action-get', 'exit 1')
+        self.fake_script('action-set', 'exit 0')
         self.backend.action_set({'x': 'dead beef', 'y': 1})
-        self.assertCountEqual(['action-set', 'x=dead beef', 'y=1'], fake_script_calls(self)[0])
+        self.assertCountEqual(['action-set', 'x=dead beef', 'y=1'], self.fake_script_calls()[0])
 
     def test_action_set_key_validation(self):
         with self.assertRaises(ValueError):
@@ -2589,75 +2588,75 @@ class TestModelBackend(unittest.TestCase):
             self.backend.action_set({'some_key': 'dead beef', 'y': 1})
 
     def test_action_set_nested(self):
-        fake_script(self, 'action-get', 'exit 1')
-        fake_script(self, 'action-set', 'exit 0')
+        self.fake_script('action-get', 'exit 1')
+        self.fake_script('action-set', 'exit 0')
         self.backend.action_set({'a': {'b': 1, 'c': 2}, 'd': 3})
-        self.assertCountEqual(['action-set', 'a.b=1', 'a.c=2', 'd=3'], fake_script_calls(self)[0])
+        self.assertCountEqual(['action-set', 'a.b=1', 'a.c=2', 'd=3'], self.fake_script_calls()[0])
 
     def test_action_set_more_nested(self):
-        fake_script(self, 'action-get', 'exit 1')
-        fake_script(self, 'action-set', 'exit 0')
+        self.fake_script('action-get', 'exit 1')
+        self.fake_script('action-set', 'exit 0')
         self.backend.action_set({'a': {'b': 1, 'c': 2, 'd': {'e': 3}}, 'f': 4})
         self.assertCountEqual(
-            ['action-set', 'a.b=1', 'a.c=2', 'a.d.e=3', 'f=4'], fake_script_calls(self)[0])
+            ['action-set', 'a.b=1', 'a.c=2', 'a.d.e=3', 'f=4'], self.fake_script_calls()[0])
 
     def test_action_set_dotted_dict(self):
-        fake_script(self, 'action-get', 'exit 1')
-        fake_script(self, 'action-set', 'exit 0')
+        self.fake_script('action-get', 'exit 1')
+        self.fake_script('action-set', 'exit 0')
         self.backend.action_set({'a.b': 1, 'a': {'c': 2}, 'd': 3})
-        self.assertCountEqual(['action-set', 'a.b=1', 'a.c=2', 'd=3'], fake_script_calls(self)[0])
+        self.assertCountEqual(['action-set', 'a.b=1', 'a.c=2', 'd=3'], self.fake_script_calls()[0])
 
     def test_action_set_duplicated_keys(self):
-        fake_script(self, 'action-get', 'exit 1')
-        fake_script(self, 'action-set', 'exit 0')
+        self.fake_script('action-get', 'exit 1')
+        self.fake_script('action-set', 'exit 0')
         with self.assertRaises(ValueError):
             self.backend.action_set({'a.b': 1, 'a': {'b': 2}, 'd': 3})
         with self.assertRaises(ValueError):
             self.backend.action_set({'a': {'b': 1, 'c': 2, 'd': {'e': 3}}, 'f': 4, 'a.d.e': 'foo'})
 
     def test_action_fail(self):
-        fake_script(self, 'action-get', 'exit 1')
-        fake_script(self, 'action-fail', 'exit 0')
+        self.fake_script('action-get', 'exit 1')
+        self.fake_script('action-fail', 'exit 0')
         self.backend.action_fail('error 42')
-        self.assertEqual(fake_script_calls(self), [['action-fail', 'error 42']])
+        self.assertEqual(self.fake_script_calls(), [['action-fail', 'error 42']])
 
     def test_action_log(self):
-        fake_script(self, 'action-get', 'exit 1')
-        fake_script(self, 'action-log', 'exit 0')
+        self.fake_script('action-get', 'exit 1')
+        self.fake_script('action-log', 'exit 0')
         self.backend.action_log('progress: 42%')
-        self.assertEqual(fake_script_calls(self), [['action-log', 'progress: 42%']])
+        self.assertEqual(self.fake_script_calls(), [['action-log', 'progress: 42%']])
 
     def test_application_version_set(self):
-        fake_script(self, 'application-version-set', 'exit 0')
+        self.fake_script('application-version-set', 'exit 0')
         self.backend.application_version_set('1.2b3')
-        self.assertEqual(fake_script_calls(self), [['application-version-set', '--', '1.2b3']])
+        self.assertEqual(self.fake_script_calls(), [['application-version-set', '--', '1.2b3']])
 
     def test_application_version_set_invalid(self):
-        fake_script(self, 'application-version-set', 'exit 0')
+        self.fake_script('application-version-set', 'exit 0')
         with self.assertRaises(TypeError):
             self.backend.application_version_set(2)
         with self.assertRaises(TypeError):
             self.backend.application_version_set()
-        self.assertEqual(fake_script_calls(self), [])
+        self.assertEqual(self.fake_script_calls(), [])
 
     def test_juju_log(self):
-        fake_script(self, 'juju-log', 'exit 0')
+        self.fake_script('juju-log', 'exit 0')
         self.backend.juju_log('WARNING', 'foo')
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['juju-log', '--log-level', 'WARNING', '--', 'foo']])
 
         with self.assertRaises(TypeError):
             self.backend.juju_log('DEBUG')
-        self.assertEqual(fake_script_calls(self, clear=True), [])
+        self.assertEqual(self.fake_script_calls(clear=True), [])
 
-        fake_script(self, 'juju-log', 'exit 1')
+        self.fake_script('juju-log', 'exit 1')
         with self.assertRaises(ops.ModelError):
             self.backend.juju_log('BAR', 'foo')
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['juju-log', '--log-level', 'BAR', '--', 'foo']])
 
     def test_valid_metrics(self):
-        fake_script(self, 'add-metric', 'exit 0')
+        self.fake_script('add-metric', 'exit 0')
         test_cases = [(
             OrderedDict([('foo', 42), ('b-ar', 4.5), ('ba_-z', 4.5), ('a', 1)]),
             OrderedDict([('de', 'ad'), ('be', 'ef_ -')]),
@@ -2670,7 +2669,7 @@ class TestModelBackend(unittest.TestCase):
         )]
         for metrics, labels, expected_calls in test_cases:
             self.backend.add_metrics(metrics, labels)
-            self.assertEqual(fake_script_calls(self, clear=True), expected_calls)
+            self.assertEqual(self.fake_script_calls(clear=True), expected_calls)
 
     def test_invalid_metric_names(self):
         invalid_inputs = [
@@ -2739,11 +2738,11 @@ class TestModelBackend(unittest.TestCase):
         self.addCleanup(os.environ.pop, 'JUJU_REMOTE_APP', None)
 
         # JUJU_RELATION_ID and JUJU_REMOTE_APP both unset
-        fake_script(self, 'relation-list', r"""
+        self.fake_script('relation-list', r"""
 echo '"remoteapp2"'
 """)
         self.assertEqual(self.backend.relation_remote_app_name(1), 'remoteapp2')
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['relation-list', '-r', '1', '--app', '--format=json'],
         ])
 
@@ -2761,33 +2760,33 @@ echo '"remoteapp2"'
         self.assertEqual(self.backend.relation_remote_app_name(5), 'remoteapp2')
 
     def test_relation_remote_app_name_script_errors(self):
-        fake_script(self, 'relation-list', r"""
+        self.fake_script('relation-list', r"""
 echo "ERROR invalid value \"6\" for option -r: relation not found" >&2  # NOQA
 exit 2
 """)
         self.assertIs(self.backend.relation_remote_app_name(6), None)
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['relation-list', '-r', '6', '--app', '--format=json'],
         ])
 
-        fake_script(self, 'relation-list', r"""
+        self.fake_script('relation-list', r"""
 echo "ERROR option provided but not defined: --app" >&2
 exit 2
 """)
         self.assertIs(self.backend.relation_remote_app_name(6), None)
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['relation-list', '-r', '6', '--app', '--format=json'],
         ])
 
     def test_planned_units(self):
         # no units
-        fake_script(self, 'goal-state', """
+        self.fake_script('goal-state', """
 echo '{"units":{}, "relations":{}}'
 """)
         self.assertEqual(self.backend.planned_units(), 0)
 
         # only active units
-        fake_script(self, 'goal-state', """
+        self.fake_script('goal-state', """
 echo '{
     "units":{
         "app/0": {"status":"active","since":"2023-05-23 17:05:05Z"},
@@ -2798,7 +2797,7 @@ echo '{
         self.assertEqual(self.backend.planned_units(), 2)
 
         # active and dying units
-        fake_script(self, 'goal-state', """
+        self.fake_script('goal-state', """
 echo '{
     "units":{
         "app/0": {"status":"active","since":"2023-05-23 17:05:05Z"},
@@ -2829,25 +2828,25 @@ class TestLazyMapping(unittest.TestCase):
         self.assertEqual(loaded, [1, 1])
 
 
-class TestSecrets(unittest.TestCase):
+class TestSecrets(FakeScriptTestCase):
     def setUp(self):
         self.model = ops.Model(ops.CharmMeta(), _ModelBackend('myapp/0'))
         self.app = self.model.app
         self.unit = self.model.unit
 
     def test_app_add_secret_simple(self):
-        fake_script(self, 'secret-add', 'echo secret:123')
+        self.fake_script('secret-add', 'echo secret:123')
 
         secret = self.app.add_secret({'foo': 'x'})
         self.assertIsInstance(secret, ops.Secret)
         self.assertEqual(secret.id, 'secret:123')
         self.assertIsNone(secret.label)
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-add', '--owner', 'application', 'foo=x']])
 
     def test_app_add_secret_args(self):
-        fake_script(self, 'secret-add', 'echo secret:234')
+        self.fake_script('secret-add', 'echo secret:234')
 
         expire = datetime.datetime(2022, 12, 9, 16, 17, 0)
         secret = self.app.add_secret({'foo': 'x', 'bar': 'y'}, label='lbl', description='desc',
@@ -2856,24 +2855,24 @@ class TestSecrets(unittest.TestCase):
         self.assertEqual(secret.label, 'lbl')
         self.assertEqual(secret.get_content(), {'foo': 'x', 'bar': 'y'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-add', '--label', 'lbl', '--description', 'desc',
                            '--expire', '2022-12-09T16:17:00', '--rotate', 'hourly',
                            '--owner', 'application', 'foo=x', 'bar=y']])
 
     def test_unit_add_secret_simple(self):
-        fake_script(self, 'secret-add', 'echo secret:345')
+        self.fake_script('secret-add', 'echo secret:345')
 
         secret = self.unit.add_secret({'foo': 'x'})
         self.assertIsInstance(secret, ops.Secret)
         self.assertEqual(secret.id, 'secret:345')
         self.assertIsNone(secret.label)
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-add', '--owner', 'unit', 'foo=x']])
 
     def test_unit_add_secret_args(self):
-        fake_script(self, 'secret-add', 'echo secret:456')
+        self.fake_script('secret-add', 'echo secret:456')
 
         expire = datetime.datetime(2022, 12, 9, 16, 22, 0)
         secret = self.unit.add_secret({'foo': 'w', 'bar': 'z'}, label='l2', description='xyz',
@@ -2882,7 +2881,7 @@ class TestSecrets(unittest.TestCase):
         self.assertEqual(secret.label, 'l2')
         self.assertEqual(secret.get_content(), {'foo': 'w', 'bar': 'z'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-add', '--label', 'l2', '--description', 'xyz',
                            '--expire', '2022-12-09T16:22:00', '--rotate', 'yearly',
                            '--owner', 'unit', 'foo=w', 'bar=z']])
@@ -2922,36 +2921,36 @@ class TestSecrets(unittest.TestCase):
                 self.unit.add_secret(content, **kwargs)
 
     def test_get_secret_id(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "g"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "g"}'""")
 
         secret = self.model.get_secret(id='123')
         self.assertEqual(secret.id, 'secret:123')
         self.assertIsNone(secret.label)
         self.assertEqual(secret.get_content(), {'foo': 'g'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-get', 'secret:123', '--format=json']])
 
     def test_get_secret_label(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "g"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "g"}'""")
 
         secret = self.model.get_secret(label='lbl')
         self.assertIsNone(secret.id)
         self.assertEqual(secret.label, 'lbl')
         self.assertEqual(secret.get_content(), {'foo': 'g'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-get', '--label', 'lbl', '--format=json']])
 
     def test_get_secret_id_and_label(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "h"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "h"}'""")
 
         secret = self.model.get_secret(id='123', label='l')
         self.assertEqual(secret.id, 'secret:123')
         self.assertEqual(secret.label, 'l')
         self.assertEqual(secret.get_content(), {'foo': 'h'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-get', 'secret:123', '--label', 'l', '--format=json']])
 
     def test_get_secret_no_args(self):
@@ -2960,21 +2959,21 @@ class TestSecrets(unittest.TestCase):
 
     def test_get_secret_not_found(self):
         script = """echo 'ERROR secret "123" not found' >&2; exit 1"""
-        fake_script(self, 'secret-get', script)
+        self.fake_script('secret-get', script)
 
         with self.assertRaises(ops.SecretNotFoundError):
             self.model.get_secret(id='123')
 
     def test_get_secret_other_error(self):
         script = """echo 'ERROR other error' >&2; exit 1"""
-        fake_script(self, 'secret-get', script)
+        self.fake_script('secret-get', script)
 
         with self.assertRaises(ops.ModelError) as cm:
             self.model.get_secret(id='123')
         self.assertNotIsInstance(cm.exception, ops.SecretNotFoundError)
 
     def test_secret_unique_identifier(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "g"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "g"}'""")
 
         secret = self.model.get_secret(label='lbl')
         self.assertIsNone(secret.id)
@@ -2992,7 +2991,7 @@ class TestSecrets(unittest.TestCase):
         self.assertEqual(secret.id, 'secret://modeluuid/125')
         self.assertEqual(secret.unique_identifier, '125')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-get', '--label', 'lbl', '--format=json'],
             ['secret-get', 'secret:123', '--format=json'],
             ['secret-get', 'secret:124', '--format=json'],
@@ -3053,7 +3052,7 @@ class TestSecretInfo(unittest.TestCase):
         self.assertEqual(info.revision, 9)
 
 
-class TestSecretClass(unittest.TestCase):
+class TestSecretClass(FakeScriptTestCase):
     maxDiff = 64 * 1024
 
     def setUp(self):
@@ -3076,36 +3075,36 @@ class TestSecretClass(unittest.TestCase):
         self.assertEqual(secret.label, 'y')
 
     def test_get_content_cached(self):
-        fake_script(self, 'secret-get', """exit 1""")
+        self.fake_script('secret-get', """exit 1""")
 
         secret = self.make_secret(id='x', label='y', content={'foo': 'bar'})
         content = secret.get_content()  # will use cached content, not run secret-get
         self.assertEqual(content, {'foo': 'bar'})
 
-        self.assertEqual(fake_script_calls(self, clear=True), [])
+        self.assertEqual(self.fake_script_calls(clear=True), [])
 
     def test_get_content_refresh(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "refreshed"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "refreshed"}'""")
 
         secret = self.make_secret(id='y', content={'foo': 'bar'})
         content = secret.get_content(refresh=True)
         self.assertEqual(content, {'foo': 'refreshed'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-get', 'secret:y', '--refresh', '--format=json']])
 
     def test_get_content_uncached(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "notcached"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "notcached"}'""")
 
         secret = self.make_secret(id='z')
         content = secret.get_content()
         self.assertEqual(content, {'foo': 'notcached'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-get', 'secret:z', '--format=json']])
 
     def test_get_content_copies_dict(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "bar"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "bar"}'""")
 
         secret = self.make_secret(id='z')
         content = secret.get_content()
@@ -3113,39 +3112,39 @@ class TestSecretClass(unittest.TestCase):
         content['new'] = 'value'
         self.assertEqual(secret.get_content(), {'foo': 'bar'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-get', 'secret:z', '--format=json']])
 
     def test_set_content_invalidates_cache(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "bar"}'""")
-        fake_script(self, 'secret-set', """exit 0""")
+        self.fake_script('secret-get', """echo '{"foo": "bar"}'""")
+        self.fake_script('secret-set', """exit 0""")
 
         secret = self.make_secret(id='z')
         old_content = secret.get_content()
         self.assertEqual(old_content, {'foo': 'bar'})
         secret.set_content({'new': 'content'})
-        fake_script(self, 'secret-get', """echo '{"new": "content"}'""")
+        self.fake_script('secret-get', """echo '{"new": "content"}'""")
         new_content = secret.get_content()
         self.assertEqual(new_content, {'new': 'content'})
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-get', 'secret:z', '--format=json'],
             ['secret-set', 'secret:z', 'new=content'],
             ['secret-get', 'secret:z', '--format=json'],
         ])
 
     def test_peek_content(self):
-        fake_script(self, 'secret-get', """echo '{"foo": "peeked"}'""")
+        self.fake_script('secret-get', """echo '{"foo": "peeked"}'""")
 
         secret = self.make_secret(id='a', label='b')
         content = secret.peek_content()
         self.assertEqual(content, {'foo': 'peeked'})
 
-        self.assertEqual(fake_script_calls(self, clear=True),
+        self.assertEqual(self.fake_script_calls(clear=True),
                          [['secret-get', 'secret:a', '--label', 'b', '--peek', '--format=json']])
 
     def test_get_info(self):
-        fake_script(self, 'secret-info-get', """echo '{"x": {"label": "y", "revision": 7}}'""")
+        self.fake_script('secret-info-get', """echo '{"x": {"label": "y", "revision": 7}}'""")
 
         # Secret with ID only
         secret = self.make_secret(id='x')
@@ -3169,7 +3168,7 @@ class TestSecretClass(unittest.TestCase):
         self.assertEqual(info.revision, 7)
 
         self.assertEqual(
-            fake_script_calls(self, clear=True),
+            self.fake_script_calls(clear=True),
             [
                 ['secret-info-get', 'secret:x', '--format=json'],
                 ['secret-info-get', '--label', 'y', '--format=json'],
@@ -3177,8 +3176,8 @@ class TestSecretClass(unittest.TestCase):
             ])
 
     def test_set_content(self):
-        fake_script(self, 'secret-set', """exit 0""")
-        fake_script(self, 'secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
+        self.fake_script('secret-set', """exit 0""")
+        self.fake_script('secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
 
         secret = self.make_secret(id='x')
         secret.set_content({'foo': 'bar'})
@@ -3192,15 +3191,15 @@ class TestSecretClass(unittest.TestCase):
         with self.assertRaises(ValueError):
             secret.set_content({'s': 't'})  # ensure it validates content (key too short)
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-set', 'secret:x', 'foo=bar'],
             ['secret-info-get', '--label', 'y', '--format=json'],
             ['secret-set', 'secret:z', 'bar=foo'],
         ])
 
     def test_set_info(self):
-        fake_script(self, 'secret-set', """exit 0""")
-        fake_script(self, 'secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
+        self.fake_script('secret-set', """exit 0""")
+        self.fake_script('secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
 
         secret = self.make_secret(id='x')
         expire = datetime.datetime(2022, 12, 9, 16, 59, 0)
@@ -3217,7 +3216,7 @@ class TestSecretClass(unittest.TestCase):
         secret.set_info(label='lbl')
         self.assertEqual(secret.id, 'secret:z')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-set', 'secret:x', '--label', 'lab', '--description', 'desc',
              '--expire', '2022-12-09T16:59:00', '--rotate', 'monthly'],
             ['secret-info-get', '--label', 'y', '--format=json'],
@@ -3228,8 +3227,8 @@ class TestSecretClass(unittest.TestCase):
             secret.set_info()  # no args provided
 
     def test_grant(self):
-        fake_script(self, 'secret-grant', """exit 0""")
-        fake_script(self, 'secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
+        self.fake_script('secret-grant', """exit 0""")
+        self.fake_script('secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
 
         secret = self.make_secret(id='x')
         secret.grant(types.SimpleNamespace(id=123))
@@ -3241,7 +3240,7 @@ class TestSecretClass(unittest.TestCase):
         secret.grant(types.SimpleNamespace(id=345))
         self.assertEqual(secret.id, 'secret:z')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-grant', 'secret:x', '--relation', '123'],
             ['secret-grant', 'secret:x', '--relation', '234', '--unit', 'app/0'],
             ['secret-info-get', '--label', 'y', '--format=json'],
@@ -3249,8 +3248,8 @@ class TestSecretClass(unittest.TestCase):
         ])
 
     def test_revoke(self):
-        fake_script(self, 'secret-revoke', """exit 0""")
-        fake_script(self, 'secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
+        self.fake_script('secret-revoke', """exit 0""")
+        self.fake_script('secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
 
         secret = self.make_secret(id='x')
         secret.revoke(types.SimpleNamespace(id=123))
@@ -3262,7 +3261,7 @@ class TestSecretClass(unittest.TestCase):
         secret.revoke(types.SimpleNamespace(id=345))
         self.assertEqual(secret.id, 'secret:z')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-revoke', 'secret:x', '--relation', '123'],
             ['secret-revoke', 'secret:x', '--relation', '234', '--unit', 'app/0'],
             ['secret-info-get', '--label', 'y', '--format=json'],
@@ -3270,8 +3269,8 @@ class TestSecretClass(unittest.TestCase):
         ])
 
     def test_remove_revision(self):
-        fake_script(self, 'secret-remove', """exit 0""")
-        fake_script(self, 'secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
+        self.fake_script('secret-remove', """exit 0""")
+        self.fake_script('secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
 
         secret = self.make_secret(id='x')
         secret.remove_revision(123)
@@ -3282,15 +3281,15 @@ class TestSecretClass(unittest.TestCase):
         secret.remove_revision(234)
         self.assertEqual(secret.id, 'secret:z')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-remove', 'secret:x', '--revision', '123'],
             ['secret-info-get', '--label', 'y', '--format=json'],
             ['secret-remove', 'secret:z', '--revision', '234'],
         ])
 
     def test_remove_all_revisions(self):
-        fake_script(self, 'secret-remove', """exit 0""")
-        fake_script(self, 'secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
+        self.fake_script('secret-remove', """exit 0""")
+        self.fake_script('secret-info-get', """echo '{"z": {"label": "y", "revision": 7}}'""")
 
         secret = self.make_secret(id='x')
         secret.remove_all_revisions()
@@ -3301,68 +3300,68 @@ class TestSecretClass(unittest.TestCase):
         secret.remove_all_revisions()
         self.assertEqual(secret.id, 'secret:z')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['secret-remove', 'secret:x'],
             ['secret-info-get', '--label', 'y', '--format=json'],
             ['secret-remove', 'secret:z'],
         ])
 
 
-class TestPorts(unittest.TestCase):
+class TestPorts(FakeScriptTestCase):
     def setUp(self):
         self.model = ops.model.Model(ops.charm.CharmMeta(), ops.model._ModelBackend('myapp/0'))
         self.unit = self.model.unit
 
     def test_open_port(self):
-        fake_script(self, 'open-port', 'exit 0')
+        self.fake_script('open-port', 'exit 0')
 
         self.unit.open_port('tcp', 8080)
         self.unit.open_port('UDP', 4000)
         self.unit.open_port('icmp')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['open-port', '8080/tcp'],
             ['open-port', '4000/udp'],
             ['open-port', 'icmp'],
         ])
 
     def test_open_port_error(self):
-        fake_script(self, 'open-port', "echo 'ERROR bad protocol' >&2; exit 1")
+        self.fake_script('open-port', "echo 'ERROR bad protocol' >&2; exit 1")
 
         with self.assertRaises(ops.ModelError) as cm:
             self.unit.open_port('ftp', 8080)
         self.assertEqual(str(cm.exception), 'ERROR bad protocol\n')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['open-port', '8080/ftp'],
         ])
 
     def test_close_port(self):
-        fake_script(self, 'close-port', 'exit 0')
+        self.fake_script('close-port', 'exit 0')
 
         self.unit.close_port('tcp', 8080)
         self.unit.close_port('UDP', 4000)
         self.unit.close_port('icmp')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['close-port', '8080/tcp'],
             ['close-port', '4000/udp'],
             ['close-port', 'icmp'],
         ])
 
     def test_close_port_error(self):
-        fake_script(self, 'close-port', "echo 'ERROR bad protocol' >&2; exit 1")
+        self.fake_script('close-port', "echo 'ERROR bad protocol' >&2; exit 1")
 
         with self.assertRaises(ops.ModelError) as cm:
             self.unit.close_port('ftp', 8080)
         self.assertEqual(str(cm.exception), 'ERROR bad protocol\n')
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['close-port', '8080/ftp'],
         ])
 
     def test_opened_ports(self):
-        fake_script(self, 'opened-ports', """echo 8080/tcp; echo icmp""")
+        self.fake_script('opened-ports', """echo 8080/tcp; echo icmp""")
 
         ports_set = self.unit.opened_ports()
         self.assertIsInstance(ports_set, set)
@@ -3375,12 +3374,12 @@ class TestPorts(unittest.TestCase):
         self.assertEqual(ports[1].protocol, 'tcp')
         self.assertEqual(ports[1].port, 8080)
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['opened-ports', ''],
         ])
 
     def test_opened_ports_warnings(self):
-        fake_script(self, 'opened-ports', """echo 8080/tcp; echo 1234/ftp; echo 1000-2000/udp""")
+        self.fake_script('opened-ports', """echo 8080/tcp; echo 1234/ftp; echo 1000-2000/udp""")
 
         with self.assertLogs('ops.model', level='WARNING') as cm:
             ports_set = self.unit.opened_ports()
@@ -3398,7 +3397,7 @@ class TestPorts(unittest.TestCase):
         self.assertEqual(ports[1].protocol, 'udp')
         self.assertEqual(ports[1].port, 1000)
 
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['opened-ports', ''],
         ])
 

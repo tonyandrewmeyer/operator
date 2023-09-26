@@ -19,7 +19,7 @@ import os
 import pathlib
 import sys
 import tempfile
-from test.test_helpers import BaseTestCase, fake_script, fake_script_calls
+from test.test_helpers import BaseTestCase, FakeScriptTestCase
 from textwrap import dedent
 
 import yaml
@@ -214,7 +214,7 @@ def setup_juju_backend(test_case, state_file):
         'state_file': str(state_file.as_posix()),
     }
 
-    fake_script(test_case, 'state-set', dedent('''\
+    test_case.fake_script('state-set', dedent('''\
         {executable} -c '
         import sys
         if "{pthpth}" not in sys.path:
@@ -235,7 +235,7 @@ def setup_juju_backend(test_case, state_file):
         ' "$@"
         ''').format(**template_args))
 
-    fake_script(test_case, 'state-get', dedent('''\
+    test_case.fake_script('state-get', dedent('''\
         {executable} -Sc '
         import sys
         if "{pthpth}" not in sys.path:
@@ -253,7 +253,7 @@ def setup_juju_backend(test_case, state_file):
         ' "$@"
         ''').format(**template_args))
 
-    fake_script(test_case, 'state-delete', dedent('''\
+    test_case.fake_script('state-delete', dedent('''\
         {executable} -Sc '
         import sys
         if "{pthpth}" not in sys.path:
@@ -273,7 +273,7 @@ def setup_juju_backend(test_case, state_file):
         ''').format(**template_args))
 
 
-class TestJujuStorage(StoragePermutations, BaseTestCase):
+class TestJujuStorage(StoragePermutations, BaseTestCase, FakeScriptTestCase):
 
     def create_storage(self):
         fd, fn = tempfile.mkstemp(prefix='tmp-ops-test-state-')
@@ -327,25 +327,25 @@ class TestSimpleLoader(BaseTestCase):
         self.assertRefused(f)
 
 
-class TestJujuStateBackend(BaseTestCase):
+class TestJujuStateBackend(BaseTestCase, FakeScriptTestCase):
 
     def test_is_not_available(self):
         self.assertFalse(ops.storage.juju_backend_available())
 
     def test_is_available(self):
-        fake_script(self, 'state-get', 'echo ""')
+        self.fake_script('state-get', 'echo ""')
         self.assertTrue(ops.storage.juju_backend_available())
-        self.assertEqual(fake_script_calls(self, clear=True), [])
+        self.assertEqual(self.fake_script_calls(clear=True), [])
 
     def test_set_encodes_args(self):
         t = tempfile.NamedTemporaryFile()
         try:
-            fake_script(self, 'state-set', dedent("""
+            self.fake_script('state-set', dedent("""
                 cat >> {}
                 """).format(pathlib.Path(t.name).as_posix()))
             backend = ops.storage._JujuStorageBackend()
             backend.set('key', {'foo': 2})
-            self.assertEqual(fake_script_calls(self, clear=True), [
+            self.assertEqual(self.fake_script_calls(clear=True), [
                 ['state-set', '--file', '-'],
             ])
             t.seek(0)
@@ -358,20 +358,20 @@ class TestJujuStateBackend(BaseTestCase):
             """))
 
     def test_get(self):
-        fake_script(self, 'state-get', dedent("""
+        self.fake_script('state-get', dedent("""
             echo 'foo: "bar"'
             """))
         backend = ops.storage._JujuStorageBackend()
         value = backend.get('key')
         self.assertEqual(value, {'foo': 'bar'})
-        self.assertEqual(fake_script_calls(self, clear=True), [
+        self.assertEqual(self.fake_script_calls(clear=True), [
             ['state-get', 'key'],
         ])
 
     def test_set_and_get_complex_value(self):
         t = tempfile.NamedTemporaryFile()
         try:
-            fake_script(self, 'state-set', dedent("""
+            self.fake_script('state-set', dedent("""
                 cat >> {}
                 """).format(pathlib.Path(t.name).as_posix()))
             backend = ops.storage._JujuStorageBackend()
@@ -384,7 +384,7 @@ class TestJujuStateBackend(BaseTestCase):
                 'seven': b'1234',
             }
             backend.set('Class[foo]/_stored', complex_val)
-            self.assertEqual(fake_script_calls(self, clear=True), [
+            self.assertEqual(self.fake_script_calls(clear=True), [
                 ['state-set', '--file', '-'],
             ])
             t.seek(0)
@@ -408,7 +408,7 @@ class TestJujuStateBackend(BaseTestCase):
             """))
         # Note that the content is yaml in a string, embedded inside YAML to declare the Key:
         # Value of where to store the entry.
-        fake_script(self, 'state-get', dedent("""
+        self.fake_script('state-get', dedent("""
             echo "foo: 2
             3: [1, 2, '3']
             four: !!set {2: null, 3: null}

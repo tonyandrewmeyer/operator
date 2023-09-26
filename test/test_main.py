@@ -32,7 +32,7 @@ from ops.main import CHARM_STATE_FILE, _should_use_controller_storage
 from ops.storage import SQLiteStorage
 
 from .charms.test_main.src.charm import MyCharmEvents
-from .test_helpers import fake_script, fake_script_calls
+from .test_helpers import FakeScriptTestCase
 
 # This relies on the expected repository structure to find a path to
 # source of the charm under test.
@@ -266,8 +266,8 @@ class _TestMain(abc.ABC):
             ops.CharmBase.on = ops.CharmEvents()
         self.addCleanup(cleanup)
 
-        fake_script(self, 'is-leader', 'echo true')
-        fake_script(self, 'juju-log', 'exit 0')
+        self.fake_script('is-leader', 'echo true')
+        self.fake_script('juju-log', 'exit 0')
 
         # set to something other than None for tests that care
         self.stdout = None
@@ -417,7 +417,7 @@ class _TestMain(abc.ABC):
             ['ConfigChangedEvent', 'UpdateStatusEvent'])
 
     def test_no_reemission_on_collect_metrics(self):
-        fake_script(self, 'add-metric', 'exit 0')
+        self.fake_script('add-metric', 'exit 0')
 
         # First run "install" to make sure all hooks are set up.
         state = self._simulate_event(EventSpec(ops.InstallEvent, 'install'))
@@ -434,7 +434,7 @@ class _TestMain(abc.ABC):
     def test_multiple_events_handled(self):
         self._prepare_actions()
 
-        fake_script(self, 'action-get', "echo '{}'")
+        self.fake_script('action-get', "echo '{}'")
 
         # Sample events with a different amount of dashes used
         # and with endpoints from different sections of metadata.yaml
@@ -612,10 +612,10 @@ class _TestMain(abc.ABC):
         self._simulate_event(EventSpec(ops.InstallEvent, 'install'))
 
     def test_collect_metrics(self):
-        fake_script(self, 'add-metric', 'exit 0')
+        self.fake_script('add-metric', 'exit 0')
         self._simulate_event(EventSpec(ops.InstallEvent, 'install'))
         # Clear the calls during 'install'
-        fake_script_calls(self, clear=True)
+        self.fake_script_calls(clear=True)
         self._simulate_event(EventSpec(ops.CollectMetricsEvent, 'collect_metrics'))
 
         expected = [
@@ -624,18 +624,18 @@ class _TestMain(abc.ABC):
             ['add-metric', '--labels', 'bar=4.2', 'foo=42'],
             ['is-leader', '--format=json'],
         ]
-        calls = fake_script_calls(self)
+        calls = self.fake_script_calls()
 
         self.assertEqual(calls, expected)
 
     def test_custom_event(self):
         self._simulate_event(EventSpec(ops.InstallEvent, 'install'))
         # Clear the calls during 'install'
-        fake_script_calls(self, clear=True)
+        self.fake_script_calls(clear=True)
         self._simulate_event(EventSpec(ops.UpdateStatusEvent, 'update-status',
                                        set_in_env={'EMIT_CUSTOM_EVENT': "1"}))
 
-        calls = fake_script_calls(self)
+        calls = self.fake_script_calls()
 
         custom_event_prefix = 'Emitting custom event <CustomEvent via Charm/on/custom'
         expected = [
@@ -650,7 +650,7 @@ class _TestMain(abc.ABC):
         self.assertEqual(calls, expected)
 
     def test_logger(self):
-        fake_script(self, 'action-get', "echo '{}'")
+        self.fake_script('action-get', "echo '{}'")
 
         test_cases = [(
             EventSpec(ops.ActionEvent, 'log_critical_action', env_var='JUJU_ACTION_NAME'),
@@ -674,14 +674,14 @@ class _TestMain(abc.ABC):
 
         for event_spec, calls in test_cases:
             self._simulate_event(event_spec)
-            self.assertIn(calls, fake_script_calls(self, clear=True))
+            self.assertIn(calls, self.fake_script_calls(clear=True))
 
     def test_excepthook(self):
         with self.assertRaises(subprocess.CalledProcessError):
             self._simulate_event(EventSpec(ops.InstallEvent, 'install',
                                            set_in_env={'TRY_EXCEPTHOOK': '1'}))
 
-        calls = [' '.join(i) for i in fake_script_calls(self)]
+        calls = [' '.join(i) for i in self.fake_script_calls()]
 
         self.assertEqual(calls.pop(0), ' '.join(VERSION_LOGLINE))
         self.assertRegex(calls.pop(0), 'Using local storage: not a Kubernetes podspec charm')
@@ -701,7 +701,7 @@ class _TestMain(abc.ABC):
     def test_sets_model_name(self):
         self._prepare_actions()
 
-        fake_script(self, 'action-get', "echo '{}'")
+        self.fake_script('action-get', "echo '{}'")
         state = self._simulate_event(EventSpec(
             ops.ActionEvent, 'get_model_name_action',
             env_var='JUJU_ACTION_NAME',
@@ -712,16 +712,16 @@ class _TestMain(abc.ABC):
     def test_has_valid_status(self):
         self._prepare_actions()
 
-        fake_script(self, 'action-get', "echo '{}'")
-        fake_script(self, 'status-get', """echo '{"status": "unknown", "message": ""}'""")
+        self.fake_script('action-get', "echo '{}'")
+        self.fake_script('status-get', """echo '{"status": "unknown", "message": ""}'""")
         state = self._simulate_event(EventSpec(
             ops.ActionEvent, 'get_status_action',
             env_var='JUJU_ACTION_NAME'))
         self.assertIsNotNone(state)
         self.assertEqual(state.status_name, 'unknown')
         self.assertEqual(state.status_message, '')
-        fake_script(
-            self, 'status-get', """echo '{"status": "blocked", "message": "help meeee"}'""")
+        self.fake_script(
+            'status-get', """echo '{"status": "blocked", "message": "help meeee"}'""")
         state = self._simulate_event(EventSpec(
             ops.ActionEvent, 'get_status_action',
             env_var='JUJU_ACTION_NAME'))
@@ -730,7 +730,7 @@ class _TestMain(abc.ABC):
         self.assertEqual(state.status_message, 'help meeee')
 
 
-class TestMainWithNoDispatch(_TestMain, unittest.TestCase):
+class TestMainWithNoDispatch(_TestMain, FakeScriptTestCase, unittest.TestCase):
     has_dispatch = False
     hooks_are_symlinks = True
 
@@ -743,8 +743,7 @@ class TestMainWithNoDispatch(_TestMain, unittest.TestCase):
         event_file = self.JUJU_CHARM_DIR / rel_path
         # Note that sys.executable is used to make sure we are using the same
         # interpreter for the child process to support virtual environments.
-        fake_script(
-            self,
+        self.fake_script(
             "storage-get",
             """
             if [ "$1" = "-s" ]; then
@@ -776,8 +775,7 @@ class TestMainWithNoDispatch(_TestMain, unittest.TestCase):
             fi
             """,
         )
-        fake_script(
-            self,
+        self.fake_script(
             "storage-list",
             """
             echo '["disks/0"]'
@@ -887,11 +885,11 @@ class _TestMainWithDispatch(_TestMain):
     def test_hook_and_dispatch(self):
         old_path = self.fake_script_path
         self.fake_script_path = self.hooks_dir
-        fake_script(self, 'install', 'exit 0')
+        self.fake_script('install', 'exit 0')
         state = self._simulate_event(EventSpec(ops.InstallEvent, 'install'))
 
         # the script was called, *and*, the .on. was called
-        self.assertEqual(fake_script_calls(self), [['install', '']])
+        self.assertEqual(self.fake_script_calls(), [['install', '']])
         self.assertEqual(list(state.observed_event_types), ['InstallEvent'])
 
         self.fake_script_path = old_path
@@ -908,7 +906,7 @@ class _TestMainWithDispatch(_TestMain):
              'Emitting Juju event install.'],
             ['is-leader', '--format=json'],
         ]
-        calls = fake_script_calls(self)
+        calls = self.fake_script_calls()
         self.assertRegex(' '.join(calls.pop(-3)), 'Initializing SQLite local storage: ')
         self.assertEqual(calls, expected)
 
@@ -928,7 +926,7 @@ class _TestMainWithDispatch(_TestMain):
              'Emitting Juju event install.'],
             ['is-leader', '--format=json'],
         ]
-        calls = fake_script_calls(self)
+        calls = self.fake_script_calls()
         self.assertRegex(' '.join(calls.pop(-3)), 'Initializing SQLite local storage: ')
         self.assertEqual(calls, expected)
 
@@ -938,7 +936,7 @@ class _TestMainWithDispatch(_TestMain):
 
         old_path = self.fake_script_path
         self.fake_script_path = self.hooks_dir
-        fake_script(self, 'install', 'exit 42')
+        self.fake_script('install', 'exit 42')
         event = EventSpec(ops.InstallEvent, 'install')
         with self.assertRaises(subprocess.CalledProcessError):
             self._simulate_event(event)
@@ -946,7 +944,7 @@ class _TestMainWithDispatch(_TestMain):
 
         self.stdout.seek(0)
         self.assertEqual(self.stdout.read(), b'')
-        calls = fake_script_calls(self)
+        calls = self.fake_script_calls()
         hook = Path('hooks/install')
         expected = [
             VERSION_LOGLINE,
@@ -1011,13 +1009,13 @@ class _TestMainWithDispatch(_TestMain):
              'Emitting Juju event install.'],
             ['is-leader', '--format=json'],
         ]
-        calls = fake_script_calls(self)
+        calls = self.fake_script_calls()
         self.assertRegex(' '.join(calls.pop(-3)), 'Initializing SQLite local storage: ')
 
         self.assertEqual(calls, expected)
 
 
-class TestMainWithDispatch(_TestMainWithDispatch, unittest.TestCase):
+class TestMainWithDispatch(_TestMainWithDispatch, FakeScriptTestCase):
     def _setup_entry_point(self, directory, entry_point):
         path = self.JUJU_CHARM_DIR / 'dispatch'
         if not path.exists():
@@ -1027,8 +1025,7 @@ class TestMainWithDispatch(_TestMainWithDispatch, unittest.TestCase):
         env['JUJU_DISPATCH_PATH'] = str(rel_path)
         env['JUJU_VERSION'] = '2.8.0'
         dispatch = self.JUJU_CHARM_DIR / 'dispatch'
-        fake_script(
-            self,
+        self.fake_script(
             "storage-get",
             """
             if [ "$1" = "-s" ]; then
@@ -1060,8 +1057,7 @@ class TestMainWithDispatch(_TestMainWithDispatch, unittest.TestCase):
             fi
             """,
         )
-        fake_script(
-            self,
+        self.fake_script(
             "storage-list",
             """
             echo '["disks/0"]'
@@ -1074,7 +1070,7 @@ class TestMainWithDispatch(_TestMainWithDispatch, unittest.TestCase):
             check=True, env=env, cwd=str(self.JUJU_CHARM_DIR))
 
 
-class TestMainWithDispatchAsScript(_TestMainWithDispatch, unittest.TestCase):
+class TestMainWithDispatchAsScript(_TestMainWithDispatch, FakeScriptTestCase):
     """Here dispatch is a script that execs the charm.py instead of a symlink."""
 
     has_dispatch = True
@@ -1090,8 +1086,7 @@ class TestMainWithDispatchAsScript(_TestMainWithDispatch, unittest.TestCase):
     def _call_event(self, rel_path, env):
         env['JUJU_DISPATCH_PATH'] = str(rel_path)
         env['JUJU_VERSION'] = '2.8.0'
-        fake_script(
-            self,
+        self.fake_script(
             "storage-get",
             """
             if [ "$1" = "-s" ]; then
@@ -1123,8 +1118,7 @@ class TestMainWithDispatchAsScript(_TestMainWithDispatch, unittest.TestCase):
             fi
             """,
         )
-        fake_script(
-            self,
+        self.fake_script(
             "storage-list",
             """
             echo '["disks/0"]'

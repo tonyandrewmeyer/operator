@@ -22,7 +22,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from test.test_helpers import BaseTestCase, fake_script
+from test.test_helpers import BaseTestCase, FakeScriptTestCase
 from unittest.mock import patch
 
 import ops
@@ -1682,7 +1682,7 @@ class BreakpointTests(BaseTestCase):
         self.check_trace_set('hook', 'mybreak', 0)
 
 
-class DebugHookTests(BaseTestCase):
+class DebugHookTests(BaseTestCase, FakeScriptTestCase):
 
     def test_envvar_parsing_missing(self):
         with patch.dict(os.environ):
@@ -1740,7 +1740,7 @@ class DebugHookTests(BaseTestCase):
         publisher = CustomEvents(framework, "1")
         observer = GenericObserver(framework, "1")
         framework.observe(publisher.foobar_action, observer.callback_method)
-        fake_script(self, 'action-get', "echo {}")
+        self.fake_script('action-get', "echo {}")
 
         with patch('sys.stderr', new_callable=io.StringIO):
             with patch('pdb.runcall') as mock:
@@ -1761,7 +1761,7 @@ class DebugHookTests(BaseTestCase):
         publisher = CustomEvents(framework, "1")
         observer = GenericObserver(framework, "1")
         framework.observe(publisher.foobar_action, observer.callback_method)
-        fake_script(self, 'action-get', "echo {}")
+        self.fake_script('action-get', "echo {}")
 
         with patch('sys.stderr', new_callable=io.StringIO):
             with patch('pdb.runcall') as mock:

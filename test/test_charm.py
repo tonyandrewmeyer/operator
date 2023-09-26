@@ -15,7 +15,6 @@ import functools
 import os
 import shutil
 import tempfile
-import unittest
 from pathlib import Path
 
 import ops
@@ -23,10 +22,10 @@ import ops.charm
 from ops.model import _ModelBackend
 from ops.storage import SQLiteStorage
 
-from .test_helpers import fake_script, fake_script_calls
+from .test_helpers import FakeScriptTestCase
 
 
-class TestCharm(unittest.TestCase):
+class TestCharm(FakeScriptTestCase):
 
     def setUp(self):
         def restore_env(env):
@@ -255,8 +254,7 @@ storage:
     type: filesystem
 ''')
 
-        fake_script(
-            self,
+        self.fake_script(
             "storage-get",
             """
             if [ "$1" = "-s" ]; then
@@ -288,8 +286,7 @@ storage:
             fi
             """,
         )
-        fake_script(
-            self,
+        self.fake_script(
             "storage-list",
             """
             echo '["disks/0"]'
@@ -427,10 +424,10 @@ start:
 
     def _setup_test_action(self):
         os.environ['JUJU_ACTION_NAME'] = 'foo-bar'
-        fake_script(self, 'action-get', """echo '{"foo-name": "name", "silent": true}'""")
-        fake_script(self, 'action-set', "")
-        fake_script(self, 'action-log', "")
-        fake_script(self, 'action-fail', "")
+        self.fake_script('action-get', """echo '{"foo-name": "name", "silent": true}'""")
+        self.fake_script('action-set', "")
+        self.fake_script('action-log', "")
+        self.fake_script('action-fail', "")
         self.meta = self._get_action_test_meta()
 
     def test_action_events(self):
@@ -461,7 +458,7 @@ start:
 
         charm.on.foo_bar_action.emit()
         self.assertEqual(charm.seen_action_params, {"foo-name": "name", "silent": True})
-        self.assertEqual(fake_script_calls(self), [
+        self.assertEqual(self.fake_script_calls(), [
             ['action-get', '--format=json'],
             ['action-log', "test-log"],
             ['action-set', "res=val with spaces"],
@@ -511,7 +508,7 @@ start:
             def _on_start_action(self, event):
                 event.defer()
 
-        fake_script(self, f"{cmd_type}-get", """echo '{"foo-name": "name", "silent": true}'""")
+        self.fake_script(f"{cmd_type}-get", """echo '{"foo-name": "name", "silent": true}'""")
         self.meta = self._get_action_test_meta()
 
         os.environ[f'JUJU_{cmd_type.upper()}_NAME'] = 'start'
@@ -645,13 +642,13 @@ containers:
                 event.add_status(ops.WaitingStatus('waiting'))
                 event.add_status(ops.BlockedStatus('second'))
 
-        fake_script(self, 'is-leader', 'echo true')
-        fake_script(self, 'status-set', 'exit 0')
+        self.fake_script('is-leader', 'echo true')
+        self.fake_script('status-set', 'exit 0')
 
         charm = MyCharm(self.create_framework())
         ops.charm._evaluate_status(charm)
 
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['is-leader', '--format=json'],
             ['status-set', '--application=True', 'blocked', 'first'],
         ])
@@ -665,12 +662,12 @@ containers:
             def _on_collect_status(self, event):
                 pass
 
-        fake_script(self, 'is-leader', 'echo true')
+        self.fake_script('is-leader', 'echo true')
 
         charm = MyCharm(self.create_framework())
         ops.charm._evaluate_status(charm)
 
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['is-leader', '--format=json'],
         ])
 
@@ -683,12 +680,12 @@ containers:
             def _on_collect_status(self, event):
                 raise Exception  # shouldn't be called
 
-        fake_script(self, 'is-leader', 'echo false')
+        self.fake_script('is-leader', 'echo false')
 
         charm = MyCharm(self.create_framework())
         ops.charm._evaluate_status(charm)
 
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['is-leader', '--format=json'],
         ])
 
@@ -704,13 +701,13 @@ containers:
                 event.add_status(ops.WaitingStatus('waiting'))
                 event.add_status(ops.BlockedStatus('second'))
 
-        fake_script(self, 'is-leader', 'echo false')  # called only for collecting app statuses
-        fake_script(self, 'status-set', 'exit 0')
+        self.fake_script('is-leader', 'echo false')  # called only for collecting app statuses
+        self.fake_script('status-set', 'exit 0')
 
         charm = MyCharm(self.create_framework())
         ops.charm._evaluate_status(charm)
 
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['is-leader', '--format=json'],
             ['status-set', '--application=False', 'blocked', 'first'],
         ])
@@ -724,12 +721,12 @@ containers:
             def _on_collect_status(self, event):
                 pass
 
-        fake_script(self, 'is-leader', 'echo false')  # called only for collecting app statuses
+        self.fake_script('is-leader', 'echo false')  # called only for collecting app statuses
 
         charm = MyCharm(self.create_framework())
         ops.charm._evaluate_status(charm)
 
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['is-leader', '--format=json'],
         ])
 
@@ -746,13 +743,13 @@ containers:
             def _on_collect_unit_status(self, event):
                 event.add_status(ops.WaitingStatus('blah'))
 
-        fake_script(self, 'is-leader', 'echo true')
-        fake_script(self, 'status-set', 'exit 0')
+        self.fake_script('is-leader', 'echo true')
+        self.fake_script('status-set', 'exit 0')
 
         charm = MyCharm(self.create_framework())
         ops.charm._evaluate_status(charm)
 
-        self.assertEqual(fake_script_calls(self, True), [
+        self.assertEqual(self.fake_script_calls(True), [
             ['is-leader', '--format=json'],
             ['status-set', '--application=True', 'active', ''],
             ['status-set', '--application=False', 'waiting', 'blah'],
@@ -767,7 +764,7 @@ containers:
             def _on_collect_status(self, event):
                 event.add_status('active')
 
-        fake_script(self, 'is-leader', 'echo true')
+        self.fake_script('is-leader', 'echo true')
 
         charm = MyCharm(self.create_framework())
         with self.assertRaises(TypeError):
@@ -784,8 +781,8 @@ containers:
                 for status in self.statuses:
                     event.add_status(ops.StatusBase.from_name(status, ''))
 
-        fake_script(self, 'is-leader', 'echo true')
-        fake_script(self, 'status-set', 'exit 0')
+        self.fake_script('is-leader', 'echo true')
+        self.fake_script('status-set', 'exit 0')
 
         charm = MyCharm(self.create_framework(), statuses=['blocked', 'error'])
         ops.charm._evaluate_status(charm)
@@ -805,7 +802,7 @@ containers:
         charm = MyCharm(self.create_framework(), statuses=['unknown'])
         ops.charm._evaluate_status(charm)
 
-        status_set_calls = [call for call in fake_script_calls(self, True)
+        status_set_calls = [call for call in self.fake_script_calls(True)
                             if call[0] == 'status-set']
         self.assertEqual(status_set_calls, [
             ['status-set', '--application=True', 'error', ''],

@@ -25,6 +25,7 @@ import pathlib
 import pdb
 import re
 import sys
+import tempfile
 import types
 import typing
 import weakref
@@ -241,6 +242,10 @@ class EventBase:
            proceed.
         """
         logger.debug("Deferring %s.", self)
+        stack = inspect.stack()
+        methods = [frame[3] for frame in stack if frame[3] is not None]
+        with open(os.path.join(tempfile.gettempdir(), "charm-defer.log"), "a") as log:
+            log.write(f"{__file__}: {methods}\n")
         self.deferred = True
 
     def snapshot(self) -> Dict[str, Any]:

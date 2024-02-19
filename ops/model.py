@@ -17,6 +17,7 @@
 import dataclasses
 import datetime
 import enum
+import inspect
 import ipaddress
 import json
 import logging
@@ -2104,6 +2105,10 @@ class Container:
             else:
                 event.defer()
         """
+        stack = inspect.stack()
+        methods = [frame[3] for frame in stack if frame[3] is not None]
+        with open(os.path.join(tempfile.gettempdir(), "charm-can-connect.log"), "a") as log:
+            log.write(f"{__file__}: {methods}\n")
         try:
             self._pebble.get_system_info()
         except pebble.ConnectionError as e:

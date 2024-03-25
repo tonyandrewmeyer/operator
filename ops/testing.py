@@ -60,6 +60,7 @@ from typing import (
 from ops import charm, framework, model, pebble, storage
 from ops._private import yaml
 from ops.charm import CharmBase, CharmMeta, RelationRole
+from ops.main import _Manager
 from ops.model import Container, RelationNotFoundError, _ConfigOption, _NetworkDict
 from ops.pebble import ExecProcess
 
@@ -170,6 +171,146 @@ class _RunningAction:
     failure_message: Optional[str] = None
 
 
+# TODO: This has diverged quite a bit from main._Manager - should compare the
+# two classes and see whether this is really inheriting, or is actually just a
+# completely different kind of manager.
+class _TestingManager(_Manager):
+    """Initialises the Framework and manages the lifecycle of a charm.
+
+    Running _Manager consists of three main steps:
+    - setup: initialise the following from JUJU_* environment variables:
+      - the Framework (hook tool wrappers)
+      - the storage backend
+      - the event that Juju is emitting on us
+      - the charm instance (user-facing)
+    - emit: core user-facing lifecycle step. Consists of:
+      - re-emit any deferred events found in the storage
+      - emit the Juju event to the charm
+        - emit any custom events emitted by the charm during this phase
+      - emit  the ``collect-status`` events
+    - commit: responsible for:
+      - store any events deferred throughout this execution
+      - graceful teardown of the storage
+
+
+    TODO: Update the above for the Harness situation.
+    """
+
+    def __init__(
+            self,
+            charm_class: Type['CharmBase'],
+            model_backend: '_TestingModelBackend',
+            charm_root: str,
+            charm_meta: CharmMeta,
+    ):
+        self._charm_class = charm_class
+        self._model_backend = model_backend
+        self._charm_root = charm_root
+        self._charm_meta = charm_meta
+
+        self.framework = self._make_framework(None)
+        self.charm = None
+
+    def _make_charm(self, framework: 'framework.Framework', _: Any):
+        # The Framework adds attributes to class objects for events, etc. As such, we can't re-use
+        # the original class against multiple Frameworks. So create a locally defined class
+        # and register it.
+        # TODO: jam 2020-03-16 We are looking to changes this to Instance attributes instead of
+        #       Class attributes which should clean up this ugliness. The API can stay the same
+        class TestEvents(self._charm_class.on.__class__):
+            pass
+
+        TestEvents.__name__ = self._charm_class.on.__class__.__name__
+
+        class TestCharm(self._charm_class):  # type: ignore
+            on = TestEvents()
+
+        # Note: jam 2020-03-01 This is so that errors in testing say MyCharm has no attribute foo,
+        # rather than TestCharm has no attribute foo.
+        TestCharm.__name__ = self._charm_class.__name__
+
+        return TestCharm(framework)
+
+    def _make_storage(self, _: Any):
+        return storage.SQLiteStorage(':memory:')
+
+    def _make_framework(self, _: Any):
+        test_model = model.Model(self._charm_meta, self._model_backend)
+        return framework.Framework(
+            self._make_storage(None), self._charm_root, self._charm_meta, test_model)
+
+    def make_charm(self):
+        self.charm = self._make_charm(self.framework, None)
+
+    # TODO: Maybe args and kwargs rather than *args and **kwargs, to more
+    # clearly deliminate?
+    def emit(self, source: 'framework.BoundEvent', *args: Any, **kwargs: Any):
+        # It would be better if this was after the emit - a cleanup - but there
+        # are a bunch of test_testing tests that do something like self.x = foo
+        # and then check that `harness.charm.x == foo`, and charm tests might
+        # be doing the same thing. We need to have the charm exist before the
+        # call to emit because it's used as the argument - but we could clean
+        # that up? What if someone does: harness = Harness(...); harness.begin();
+        # harness.charm.x = foo; harness.something_that_emits()? Probably that
+        # should be invalid because you can't really do that in practice?
+
+        # Prepare for another emit().
+        self.framework._forget(self.charm)
+        self.framework._forget(self.charm.on)
+        # TODO: If we end up keeping this, it would probably be better to have
+        # an 'undefine_event()' method on `ObjectEvents`, or even a private
+        # `_undefine_event()`.
+        for event_source in self.charm.on.events():
+            try:
+                delattr(self.charm.__class__, event_source)
+            except AttributeError:
+                pass
+        to_remove = []
+        for handle_path, name, emitter_path, kind in self.framework._observers:
+            if handle_path == self.charm.handle.path:
+                to_remove.append((handle_path, name, emitter_path, kind))
+        for obs in to_remove:
+            self.framework._observers.remove(obs)
+        try:
+            del self.framework._observer[self.charm.handle.path]
+        except KeyError:
+            pass
+        self.make_charm()
+
+        # TODO: Do we want this here? It adds in support for deferring, but
+        # without anything explicit on that - is this too big a change? Also,
+        # do we need to change deferring to be on a clean instance? If so, then
+        # maybe it's not required here.
+        # Also: does this actually work, or does it rely on the storage or fs
+        # still having the deferred event somewhere?
+        # Re-emit any deferred events from the previous run.
+        #self.framework.reemit()
+
+        # Emit the Juju event.
+        key = self.framework._next_event_key()
+        event = source.event_type(
+            framework.Handle(
+                source.emitter,
+                source.event_kind,
+                key),
+            *args,
+            **kwargs)
+        event.framework = self.framework
+        self.framework._emit(event)
+
+        # TODO: Should we do this? It's the most realistic, but there's a
+        # dedicated Harness method for it if people want to do it explicitly.
+        # Emit collect-status events.
+        # Also: the manager doesn't need the charm for anything else.
+        #charm._evaluate_status(self.charm)
+
+        # TODO: Same here, should we do this? Again, it's the most realistic,
+        # and possibly charms are relying on it. Here, there isn't really a
+        # way for people to do this manually when they want to.
+        # Emit pre-commit, commit, and save the snapshot.
+        #self._commit()
+
+
 # noinspection PyProtectedMember
 class Harness(Generic[CharmType]):
     """This class represents a way to build up the model that will drive a test suite.
@@ -240,7 +381,7 @@ class Harness(Generic[CharmType]):
             actions: Optional[YAMLStringOrFile] = None,
             config: Optional[YAMLStringOrFile] = None):
         self._charm_cls = charm_cls
-        self._charm: Optional[CharmType] = None
+        self._begun = False
         self._charm_dir = 'no-disk-path'  # this may be updated by _create_meta
         self._meta = self._create_meta(meta, actions)
         self._unit_name: str = f"{self._meta.name}/0"
@@ -249,10 +390,11 @@ class Harness(Generic[CharmType]):
         self._action_id_counter: int = 0
         config_ = self._get_config(config)
         self._backend = _TestingModelBackend(self._unit_name, self._meta, config_)
-        self._model = model.Model(self._meta, self._backend)
-        self._storage = storage.SQLiteStorage(':memory:')
-        self._framework = framework.Framework(
-            self._storage, self._charm_dir, self._meta, self._model)
+        self._manager = _TestingManager(
+            self._charm_cls,
+            self._backend,
+            charm_root=self._charm_dir,
+            charm_meta=self._meta)
 
     def _event_context(self, event_name: str):
         """Configures the Harness to behave as if an event hook were running.
@@ -303,7 +445,7 @@ class Harness(Generic[CharmType]):
         >>>         harness.charm.event_handler(event)
 
         """
-        return self._framework._event_context(event_name)
+        return self._manager.framework._event_context(event_name)
 
     def set_can_connect(self, container: Union[str, model.Container], val: bool):
         """Change the simulated connection status of a container's underlying Pebble client.
@@ -321,20 +463,20 @@ class Harness(Generic[CharmType]):
         Note that the Charm is not instantiated until :meth:`.begin()` is called.
         Until then, attempting to access this property will raise an exception.
         """
-        if self._charm is None:
+        if not self._begun:
             raise RuntimeError('The charm instance is not available yet. '
                                'Call Harness.begin() first.')
-        return self._charm
+        return cast(CharmType, self._manager.charm)
 
     @property
     def model(self) -> model.Model:
         """Return the :class:`~ops.model.Model` that is being driven by this Harness."""
-        return self._model
+        return self.framework.model
 
     @property
     def framework(self) -> framework.Framework:
         """Return the Framework that is being driven by this Harness."""
-        return self._framework
+        return self._manager.framework
 
     def begin(self) -> None:
         """Instantiate the Charm and start handling events.
@@ -344,26 +486,10 @@ class Harness(Generic[CharmType]):
 
         Should only be called once.
         """
-        if self._charm is not None:
+        if self._begun:
             raise RuntimeError('cannot call the begin method on the harness more than once')
-
-        # The Framework adds attributes to class objects for events, etc. As such, we can't re-use
-        # the original class against multiple Frameworks. So create a locally defined class
-        # and register it.
-        # TODO: jam 2020-03-16 We are looking to changes this to Instance attributes instead of
-        #       Class attributes which should clean up this ugliness. The API can stay the same
-        class TestEvents(self._charm_cls.on.__class__):
-            pass
-
-        TestEvents.__name__ = self._charm_cls.on.__class__.__name__
-
-        class TestCharm(self._charm_cls):  # type: ignore
-            on = TestEvents()
-
-        # Note: jam 2020-03-01 This is so that errors in testing say MyCharm has no attribute foo,
-        # rather than TestCharm has no attribute foo.
-        TestCharm.__name__ = self._charm_cls.__name__
-        self._charm = TestCharm(self._framework)  # type: ignore
+        self._manager.make_charm()
+        self._begun = True
 
     def begin_with_initial_hooks(self) -> None:
         """Fire the same hooks that Juju would fire at startup.
@@ -399,7 +525,6 @@ class Harness(Generic[CharmType]):
         """
         self.begin()
 
-        charm = cast(CharmBase, self._charm)
         # Checking if disks have been added
         # storage-attached events happen before install
         for storage_name in self._meta.storages:
@@ -407,11 +532,11 @@ class Harness(Generic[CharmType]):
                 s = model.Storage(storage_name, storage_index, self._backend)
                 if self._backend._storage_is_attached(storage_name, storage_index):
                     # Attaching was done already, but we still need the event to be emitted.
-                    self.charm.on[storage_name].storage_attached.emit(s)
+                    self._manager.emit(self.charm.on[storage_name].storage_attached, s)
                 else:
                     self.attach_storage(s.full_id)
         # Storage done, emit install event
-        charm.on.install.emit()
+        self._manager.emit(self.charm.on.install)
 
         # Juju itself iterates what relation to fire based on a map[int]relation, so it doesn't
         # guarantee a stable ordering between relation events. It *does* give a stable ordering
@@ -437,13 +562,13 @@ class Harness(Generic[CharmType]):
                     app_name = self._backend._relation_app_and_units[rel_id]["app"]
                     self._emit_relation_created(relname, rel_id, app_name)
         if self._backend._is_leader:
-            charm.on.leader_elected.emit()
+            self._manager.emit(self.charm.on.leader_elected)
         else:
-            charm.on.leader_settings_changed.emit()
+            self._manager.emit(self.charm.on.leader_settings_changed)
 
-        charm.on.config_changed.emit()
+        self._manager.emit(self.charm.on.config_changed)
 
-        charm.on.start.emit()
+        self._manager.emit(self.charm.on.start)
 
         # Set can_connect and fire pebble-ready for any containers.
         for container_name in self._meta.containers:
@@ -463,22 +588,23 @@ class Harness(Generic[CharmType]):
             # the unit names. It also always fires relation-changed immediately after
             # relation-joined for the same unit.
             # Juju only fires relation-changed (app) if there is data for the related application
-            relation = self._model.get_relation(rel_name, rel_id)
+            relation = self.model.get_relation(rel_name, rel_id)
             if self._backend._relation_data_raw[rel_id].get(app_name):
-                app = self._model.get_app(app_name)
-                charm.on[rel_name].relation_changed.emit(relation, app, None)
+                app = self.model.get_app(app_name)
+                self._manager.emit(self.charm.on[rel_name].relation_changed, relation, app, None)
             for unit_name in sorted(rel_app_and_units["units"]):
-                remote_unit = self._model.get_unit(unit_name)
-                charm.on[rel_name].relation_joined.emit(
-                    relation, remote_unit.app, remote_unit)
-                charm.on[rel_name].relation_changed.emit(
-                    relation, remote_unit.app, remote_unit)
+                remote_unit = self.model.get_unit(unit_name)
+                self._manager.emit(self.charm.on[rel_name].relation_joined,
+                                   relation, remote_unit.app, remote_unit)
+                self._manager.emit(self.charm.on[rel_name].relation_changed,
+                                   relation, remote_unit.app, remote_unit)
 
     def cleanup(self) -> None:
         """Called by the test infrastructure to clean up any temporary directories/files/etc.
 
         Always call ``self.addCleanup(harness.cleanup)`` after creating a :class:`Harness`.
         """
+        self.framework.close()
         self._backend._cleanup()
 
     def _create_meta(self, charm_metadata_yaml: Optional[YAMLStringOrFile],
@@ -728,15 +854,15 @@ class Harness(Generic[CharmType]):
             storage_id: The full storage ID of the storage unit being detached, including the
                 storage key, e.g. my-storage/0.
         """
-        if self._charm is None:
+        if not self._begun:
             raise RuntimeError('cannot detach storage before Harness is initialised')
         storage_name, storage_index = storage_id.split('/', 1)
         storage_index = int(storage_index)
         storage_attached = self._backend._storage_is_attached(
             storage_name, storage_index)
         if storage_attached and self._hooks_enabled:
-            self.charm.on[storage_name].storage_detaching.emit(
-                model.Storage(storage_name, storage_index, self._backend))
+            self._manager.emit(self.charm.on[storage_name].storage_detaching,
+                               model.Storage(storage_name, storage_index, self._backend))
         self._backend._storage_detach(storage_id)
 
     def attach_storage(self, storage_id: str) -> None:
@@ -756,18 +882,18 @@ class Harness(Generic[CharmType]):
         """
         if not self._backend._storage_attach(storage_id):
             return  # storage was already attached
-        if not self._charm or not self._hooks_enabled:
+        if not self._begun or not self._hooks_enabled:
             return  # don't need to run hook callback
 
         storage_name, storage_index = storage_id.split('/', 1)
 
         # Reset associated cached value in the storage mappings.  If we don't do this,
         # Model._storages won't return Storage objects for subsequently-added storage.
-        self._model._storages._invalidate(storage_name)
+        self.model._storages._invalidate(storage_name)
 
         storage_index = int(storage_index)
-        self.charm.on[storage_name].storage_attached.emit(
-            model.Storage(storage_name, storage_index, self._backend))
+        self._manager.emit(self.charm.on[storage_name].storage_attached,
+                           model.Storage(storage_name, storage_index, self._backend))
 
     def remove_storage(self, storage_id: str) -> None:
         """Detach a storage device.
@@ -791,9 +917,9 @@ class Harness(Generic[CharmType]):
                 f"the key '{storage_name}' is not specified as a storage key in metadata")
         is_attached = self._backend._storage_is_attached(
             storage_name, storage_index)
-        if self._charm is not None and self._hooks_enabled and is_attached:
-            self.charm.on[storage_name].storage_detaching.emit(
-                model.Storage(storage_name, storage_index, self._backend))
+        if self._begun and self._hooks_enabled and is_attached:
+            self._manager.emit(self.charm.on[storage_name].storage_detaching,
+                               model.Storage(storage_name, storage_index, self._backend))
         self._backend._storage_remove(storage_id)
 
     def add_relation(self, relation_name: str, remote_app: str, *,
@@ -859,8 +985,8 @@ class Harness(Generic[CharmType]):
             "units": [],
         }
         # Reload the relation_ids list
-        if self._model is not None:
-            self._model.relations._invalidate(relation_name)
+        if self.model is not None:
+            self.model.relations._invalidate(relation_name)
         self._emit_relation_created(relation_name, relation_id, remote_app)
 
         if app_data is not None or unit_data is not None:
@@ -903,18 +1029,18 @@ class Harness(Generic[CharmType]):
             self.remove_relation_unit(relation_id, unit_name)
 
         prev_broken_id = None  # Silence linter warning.
-        if self._model is not None:
+        if self.model is not None:
             # Let the model's RelationMapping know that this relation is broken.
             # Normally, this is handled in `main`, but while testing we create
             # the `Model` object and keep it around for multiple events.
-            prev_broken_id = self._model._relations._broken_relation_id
-            self._model.relations._broken_relation_id = relation_id
+            prev_broken_id = self.model._relations._broken_relation_id
+            self.model.relations._broken_relation_id = relation_id
             # Ensure that we don't offer a cached relation.
-            self._model.relations._invalidate(relation_name)
+            self.model.relations._invalidate(relation_name)
         self._emit_relation_broken(relation_name, relation_id, remote_app)
-        if self._model is not None:
-            self._model.relations._broken_relation_id = prev_broken_id
-            self._model.relations._invalidate(relation_name)
+        if self.model is not None:
+            self.model.relations._broken_relation_id = prev_broken_id
+            self.model.relations._invalidate(relation_name)
 
         self._backend._relation_app_and_units.pop(relation_id)
         self._backend._relation_data_raw.pop(relation_id)
@@ -931,21 +1057,21 @@ class Harness(Generic[CharmType]):
     def _emit_relation_created(self, relation_name: str, relation_id: int,
                                remote_app: str) -> None:
         """Trigger relation-created for a given relation with a given remote application."""
-        if self._charm is None or not self._hooks_enabled:
+        if not self._begun or not self._hooks_enabled:
             return
-        relation = self._model.get_relation(relation_name, relation_id)
-        app = self._model.get_app(remote_app)
-        self._charm.on[relation_name].relation_created.emit(
-            relation, app)
+        relation = self.model.get_relation(relation_name, relation_id)
+        app = self.model.get_app(remote_app)
+        self._manager.emit(self.charm.on[relation_name].relation_created,
+                           relation, app)
 
     def _emit_relation_broken(self, relation_name: str, relation_id: int,
                               remote_app: str) -> None:
         """Trigger relation-broken for a given relation with a given remote application."""
-        if self._charm is None or not self._hooks_enabled:
+        if not self._begun or not self._hooks_enabled:
             return
-        relation = self._model.get_relation(relation_name, relation_id)
-        app = self._model.get_app(remote_app)
-        self._charm.on[relation_name].relation_broken.emit(relation, app)
+        relation = self.model.get_relation(relation_name, relation_id)
+        app = self.model.get_app(remote_app)
+        self._manager.emit(self.charm.on[relation_name].relation_broken, relation, app)
 
     def add_relation_unit(self, relation_id: int, remote_unit_name: str) -> None:
         """Add a new unit to a relation.
@@ -972,7 +1098,7 @@ class Harness(Generic[CharmType]):
         self._backend._relation_list_map[relation_id].append(remote_unit_name)
         # we can write remote unit data iff we are not in a hook env
         relation_name = self._backend._relation_names[relation_id]
-        relation = self._model.get_relation(relation_name, relation_id)
+        relation = self.model.get_relation(relation_name, relation_id)
 
         if not relation:
             raise RuntimeError('Relation id {} is mapped to relation name {},'
@@ -989,15 +1115,15 @@ class Harness(Generic[CharmType]):
         app_and_units[relation_id]["units"].append(remote_unit_name)
         # Make sure that the Model reloads the relation_list for this relation_id, as well as
         # reloading the relation data for this unit.
-        remote_unit = self._model.get_unit(remote_unit_name)
+        remote_unit = self.model.get_unit(remote_unit_name)
         unit_cache = relation.data.get(remote_unit, None)
         if unit_cache is not None:
             unit_cache._invalidate()
-        self._model.relations._invalidate(relation_name)
-        if self._charm is None or not self._hooks_enabled:
+        self.model.relations._invalidate(relation_name)
+        if not self._begun or not self._hooks_enabled:
             return
-        self._charm.on[relation_name].relation_joined.emit(
-            relation, remote_unit.app, remote_unit)
+        self._manager.emit(self.charm.on[relation_name].relation_joined,
+                           relation, remote_unit.app, remote_unit)
 
     def remove_relation_unit(self, relation_id: int, remote_unit_name: str) -> None:
         """Remove a unit from a relation.
@@ -1024,8 +1150,8 @@ class Harness(Generic[CharmType]):
         relation_name = self._backend._relation_names[relation_id]
 
         # gather data to invalidate cache later
-        remote_unit = self._model.get_unit(remote_unit_name)
-        relation = self._model.get_relation(relation_name, relation_id)
+        remote_unit = self.model.get_unit(remote_unit_name)
+        relation = self.model.get_relation(relation_name, relation_id)
 
         if not relation:
             # This should not really happen, since there being a relation name mapped
@@ -1051,7 +1177,7 @@ class Harness(Generic[CharmType]):
 
     def _emit_relation_departed(self, relation_id: int, unit_name: str):
         """Trigger relation-departed event for a given relation id and unit."""
-        if self._charm is None or not self._hooks_enabled:
+        if not self._begun or not self._hooks_enabled:
             return
         rel_name = self._backend._relation_names[relation_id]
         relation = self.model.get_relation(rel_name, relation_id)
@@ -1061,8 +1187,8 @@ class Harness(Generic[CharmType]):
             unit = self.model.get_unit(unit_name)
         else:
             raise ValueError('Invalid Unit Name')
-        self._charm.on[rel_name].relation_departed.emit(
-            relation, app, unit, unit_name)
+        self._manager.emit(self.charm.on[rel_name].relation_departed,
+                           relation, app, unit, unit_name)
 
     def get_relation_data(self, relation_id: int, app_or_unit: AppUnitOrName) -> Mapping[str, str]:
         """Get the relation data bucket for a single app or unit in a given relation.
@@ -1126,11 +1252,11 @@ class Harness(Generic[CharmType]):
 
         It will do nothing if :meth:`begin()` has not been called.
         """
-        if self._charm is None:
+        if not self._begun:
             return
         container = self.model.unit.get_container(container_name)
         self.set_can_connect(container, True)
-        self.charm.on[container_name].pebble_ready.emit(container)
+        self._manager.emit(self.charm.on[container_name].pebble_ready, container)
 
     def pebble_notify(self, container_name: str, key: str, *,
                       data: Optional[Dict[str, str]] = None,
@@ -1158,8 +1284,9 @@ class Harness(Generic[CharmType]):
 
         id, new_or_repeated = client._notify(type, key, data=data, repeat_after=repeat_after)
 
-        if self._charm is not None and type == pebble.NoticeType.CUSTOM and new_or_repeated:
-            self.charm.on[container_name].pebble_custom_notice.emit(container, id, type.value, key)
+        if not self.begin and type == pebble.NoticeType.CUSTOM and new_or_repeated:
+            self._manager.emit(self.charm.on[container_name].pebble_custom_notice,
+                               container, id, type.value, key)
 
         return id
 
@@ -1188,7 +1315,7 @@ class Harness(Generic[CharmType]):
         Cannot be called once :meth:`begin` has been called. Use it to set the
         value that will be returned by :attr:`Model.name <ops.Model.name>`.
         """
-        if self._charm is not None:
+        if self._begun:
             raise RuntimeError('cannot set the Model name after begin()')
         self._backend.model_name = name
 
@@ -1198,7 +1325,7 @@ class Harness(Generic[CharmType]):
         Cannot be called once :meth:`begin` has been called. Use it to set the
         value that will be returned by :attr:`Model.uuid <ops.Model.uuid>`.
         """
-        if self._charm is not None:
+        if self._begun:
             raise RuntimeError('cannot set the Model uuid after begin()')
         self._backend.model_uuid = uuid
 
@@ -1223,11 +1350,11 @@ class Harness(Generic[CharmType]):
             key_values: Each key/value will be updated in the relation data.
         """
         relation_name = self._backend._relation_names[relation_id]
-        relation = self._model.get_relation(relation_name, relation_id)
+        relation = self.model.get_relation(relation_name, relation_id)
         if '/' in app_or_unit:
-            entity = self._model.get_unit(app_or_unit)
+            entity = self.model.get_unit(app_or_unit)
         else:
-            entity = self._model.get_app(app_or_unit)
+            entity = self.model.get_app(app_or_unit)
 
         if not relation:
             raise RuntimeError('Relation id {} is mapped to relation name {},'
@@ -1262,21 +1389,21 @@ class Harness(Generic[CharmType]):
             # Do not issue a relation changed event if the data bags have not changed
             return
 
-        if app_or_unit == self._model.unit.name:
+        if app_or_unit == self.model.unit.name:
             # No events for our own unit
             return
-        if app_or_unit == self._model.app.name:
+        if app_or_unit == self.model.app.name:
             # updating our own app only generates an event if it is a peer relation and we
             # aren't the leader
             is_peer = self._meta.relations[relation_name].role.is_peer()
             if not is_peer:
                 return
-            if self._model.unit.is_leader():
+            if self.model.unit.is_leader():
                 return
         self._emit_relation_changed(relation_id, app_or_unit)
 
     def _emit_relation_changed(self, relation_id: int, app_or_unit: str):
-        if self._charm is None or not self._hooks_enabled:
+        if not self._begun or not self._hooks_enabled:
             return
         rel_name = self._backend._relation_names[relation_id]
         relation = self.model.get_relation(rel_name, relation_id)
@@ -1290,7 +1417,7 @@ class Harness(Generic[CharmType]):
             app_name = app_or_unit
             app = self.model.get_app(app_name)
             args = (relation, app)
-        self._charm.on[rel_name].relation_changed.emit(*args)
+        self._manager.emit(self.charm.on[rel_name].relation_changed, *args)
 
     def _update_config(
             self,
@@ -1351,9 +1478,9 @@ class Harness(Generic[CharmType]):
             ValueError: if the key is not present in the config.
         """
         self._update_config(key_values, unset)
-        if self._charm is None or not self._hooks_enabled:
+        if not self._begun or not self._hooks_enabled:
             return
-        self._charm.on.config_changed.emit()
+        self._manager.emit(self.charm.on.config_changed)
 
     def set_leader(self, is_leader: bool = True) -> None:
         """Set whether this unit is the leader or not.
@@ -1370,8 +1497,8 @@ class Harness(Generic[CharmType]):
 
         # Note: jam 2020-03-01 currently is_leader is cached at the ModelBackend level, not in
         # the Model objects, so this automatically gets noticed.
-        if is_leader and self._charm is not None and self._hooks_enabled:
-            self._charm.on.leader_elected.emit()
+        if is_leader and self._begun and self._hooks_enabled:
+            self._manager.emit(self.charm.on.leader_elected)
 
     def set_planned_units(self, num_units: int) -> None:
         """Set the number of "planned" units.
@@ -1546,7 +1673,7 @@ class Harness(Generic[CharmType]):
             content=content,
         )
         secret.revisions.append(new_revision)
-        self.charm.on.secret_changed.emit(secret_id, secret.label)
+        self._manager.emit(self.charm.on.secret_changed, secret_id, secret.label)
 
     def grant_secret(self, secret_id: str, observer: AppUnitOrName):
         """Grant read access to this secret for the given observer application or unit.
@@ -1637,7 +1764,7 @@ class Harness(Generic[CharmType]):
         secret = self._ensure_secret(secret_id)
         if label is None:
             label = secret.label
-        self.charm.on.secret_rotate.emit(secret_id, label)
+        self._manager.emit(self.charm.on.secret_rotate, secret_id, label)
 
     def trigger_secret_removal(self, secret_id: str, revision: int, *,
                                label: Optional[str] = None):
@@ -1657,7 +1784,7 @@ class Harness(Generic[CharmType]):
         secret = self._ensure_secret(secret_id)
         if label is None:
             label = secret.label
-        self.charm.on.secret_remove.emit(secret_id, label, revision)
+        self._manager.emit(self.charm.on.secret_remove, secret_id, label, revision)
 
     def trigger_secret_expiration(self, secret_id: str, revision: int, *,
                                   label: Optional[str] = None):
@@ -1677,7 +1804,7 @@ class Harness(Generic[CharmType]):
         secret = self._ensure_secret(secret_id)
         if label is None:
             label = secret.label
-        self.charm.on.secret_expired.emit(secret_id, label, revision)
+        self._manager.emit(self.charm.on.secret_expired, secret_id, label, revision)
 
     def get_filesystem_root(self, container: Union[str, Container]) -> pathlib.Path:
         """Return the temp directory path harness will use to simulate the container filesystem.
@@ -1879,6 +2006,9 @@ class Harness(Generic[CharmType]):
               be raised at the end of the ``run_action`` call, not immediately when
               :code:`fail()` is called, to match the run-time behaviour.
         """
+        if not self._begun:
+            raise RuntimeError('The charm instance is not available yet. '
+                               'Call Harness.begin() first.')
         try:
             action_meta = self.charm.meta.actions[action_name]
         except KeyError:
@@ -1901,7 +2031,7 @@ class Harness(Generic[CharmType]):
         handler = getattr(self.charm.on, f"{action_name.replace('-', '_')}_action")
         self._backend._running_action = action_under_test
         self._action_id_counter += 1
-        handler.emit(str(self._action_id_counter))
+        self._manager.emit(handler, str(self._action_id_counter))
         self._backend._running_action = None
         if action_under_test.failure_message is not None:
             raise ActionFailed(

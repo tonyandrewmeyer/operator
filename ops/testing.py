@@ -277,14 +277,8 @@ class _TestingManager(_Manager):
             pass
         self.make_charm()
 
-        # TODO: Do we want this here? It adds in support for deferring, but
-        # without anything explicit on that - is this too big a change? Also,
-        # do we need to change deferring to be on a clean instance? If so, then
-        # maybe it's not required here.
-        # Also: does this actually work, or does it rely on the storage or fs
-        # still having the deferred event somewhere?
         # Re-emit any deferred events from the previous run.
-        #self.framework.reemit()
+        self.framework.reemit()
 
         # Emit the Juju event.
         key = self.framework._next_event_key()

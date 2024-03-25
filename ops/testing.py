@@ -253,7 +253,7 @@ class _TestingManager(_Manager):
 #            self.charm.on._undefine_event(event_source)  # type: ignore
         to_remove = []
         for handle_path, name, emitter_path, kind in self.framework._observers:
-            if handle_path == self.charm.handle.path:
+            if handle_path.startswith(self.charm.handle.path):
                 to_remove.append((handle_path, name, emitter_path, kind))
         for obs in to_remove:
             self.framework._observers.remove(obs)

@@ -243,17 +243,25 @@ class _TestingManager(_Manager):
         self.charm = self._make_charm(self.framework, None)
 
     def _forget_charm(self):
+        # TODO: Maybe it's better to just create a fresh framework rather than
+        # doing all this work to unobserve and stop tracking objects?
         # TODO: Can we get rid of all these type:ignores? It's the dynamic .on
         # that's the issue - maybe we can cast that once?
-        self.framework._forget(self.charm)  # type: ignore
-        self.framework._forget(self.charm.on)  # type: ignore
+        to_forget = []
+        for obj in self.framework._objects.values():
+            if obj.handle.path == self.charm.handle.path or obj.handle.path.startswith(self.charm.handle.path + "/"):
+                to_forget.append(obj)
+        for obj in to_forget:
+            self.framework._forget(obj)
+#        self.framework._forget(self.charm)  # type: ignore
+#        self.framework._forget(self.charm.on)  # type: ignore
         for event_source in self.charm.on.events():  # type: ignore
             if event_source in ("collect_app_status", "collect_unit_status", "collect_metrics"):
                 continue
 #            self.charm.on._undefine_event(event_source)  # type: ignore
         to_remove = []
         for handle_path, name, emitter_path, kind in self.framework._observers:
-            if handle_path.startswith(self.charm.handle.path):
+            if handle_path == self.charm.handle.path or handle_path.startswith(self.charm.handle.path + "/"):
                 to_remove.append((handle_path, name, emitter_path, kind))
         for obs in to_remove:
             self.framework._observers.remove(obs)

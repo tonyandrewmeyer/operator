@@ -304,11 +304,8 @@ class _TestingManager(_Manager):
         # Also: the manager doesn't need the charm for anything else.
         #charm._evaluate_status(self.charm)
 
-        # TODO: Same here, should we do this? Again, it's the most realistic,
-        # and possibly charms are relying on it. Here, there isn't really a
-        # way for people to do this manually when they want to.
         # Emit pre-commit, commit, and save the snapshot.
-        #self._commit()
+        self._commit()
 
 
 # noinspection PyProtectedMember

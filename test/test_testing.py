@@ -1551,9 +1551,6 @@ class TestHarness(unittest.TestCase):
             storage_name = f"test/{i}"
             want = str(pathlib.PurePath('test', i))
             self.assertTrue(harness._backend.storage_get(storage_name, "location").endswith(want))
-        self.assertEqual(len(harness.charm.observed_events), 4)
-        for i in range(1, 4):
-            self.assertTrue(isinstance(harness.charm.observed_events[i], ops.StorageAttachedEvent))
 
     def test_detach_storage(self):
         harness = ops.testing.Harness(StorageTester, meta='''
@@ -1575,8 +1572,8 @@ class TestHarness(unittest.TestCase):
 
         # Detach storage
         harness.detach_storage(stor_id)
-        self.assertEqual(len(harness.charm.observed_events), 2)
-        self.assertTrue(isinstance(harness.charm.observed_events[1], ops.StorageDetachingEvent))
+        self.assertEqual(len(harness.charm.observed_events), 1)
+        self.assertTrue(isinstance(harness.charm.observed_events[0], ops.StorageDetachingEvent))
 
         # Verify backend functions return appropriate values.
         # Real backend would return info only for actively attached storage units.
@@ -1592,8 +1589,8 @@ class TestHarness(unittest.TestCase):
         # Retry detach
         # Since already detached, no more hooks should fire
         harness.detach_storage(stor_id)
-        self.assertEqual(len(harness.charm.observed_events), 2)
-        self.assertTrue(isinstance(harness.charm.observed_events[1], ops.StorageDetachingEvent))
+        self.assertEqual(len(harness.charm.observed_events), 1)
+        self.assertTrue(isinstance(harness.charm.observed_events[0], ops.StorageDetachingEvent))
 
     def test_detach_storage_before_harness_begin(self):
         harness = ops.testing.Harness(StorageTester, meta='''
@@ -1654,13 +1651,13 @@ class TestHarness(unittest.TestCase):
 
         # Detach storage
         harness.detach_storage(stor_id)
-        self.assertEqual(len(harness.charm.observed_events), 2)
-        self.assertTrue(isinstance(harness.charm.observed_events[1], ops.StorageDetachingEvent))
+        self.assertEqual(len(harness.charm.observed_events), 1)
+        self.assertTrue(isinstance(harness.charm.observed_events[0], ops.StorageDetachingEvent))
 
         # Re-attach storage
         harness.attach_storage(stor_id)
-        self.assertEqual(len(harness.charm.observed_events), 3)
-        self.assertTrue(isinstance(harness.charm.observed_events[2], ops.StorageAttachedEvent))
+        self.assertEqual(len(harness.charm.observed_events), 1)
+        self.assertTrue(isinstance(harness.charm.observed_events[0], ops.StorageAttachedEvent))
 
         # Verify backend functions return appropriate values.
         # Real backend would return info only for actively attached storage units.
@@ -1671,8 +1668,8 @@ class TestHarness(unittest.TestCase):
         # Retry attach
         # Since already detached, no more hooks should fire
         harness.attach_storage(stor_id)
-        self.assertEqual(len(harness.charm.observed_events), 3)
-        self.assertTrue(isinstance(harness.charm.observed_events[2], ops.StorageAttachedEvent))
+        self.assertEqual(len(harness.charm.observed_events), 1)
+        self.assertTrue(isinstance(harness.charm.observed_events[0], ops.StorageAttachedEvent))
 
     def test_attach_storage_before_harness_begin(self):
         harness = ops.testing.Harness(StorageTester, meta='''
@@ -1783,12 +1780,12 @@ class TestHarness(unittest.TestCase):
 
         stor_ids = harness.add_storage("test", count=2)
         harness.begin_with_initial_hooks()
-        harness.detach_storage(stor_ids[0])
-        harness.remove_storage(stor_ids[0])  # Already detached, so won't fire a hook
-        self.assertEqual(len(harness.charm.observed_events), 3)
         self.assertTrue(isinstance(harness.charm.observed_events[0], ops.StorageAttachedEvent))
         self.assertTrue(isinstance(harness.charm.observed_events[1], ops.StorageAttachedEvent))
-        self.assertTrue(isinstance(harness.charm.observed_events[2], ops.StorageDetachingEvent))
+        harness.detach_storage(stor_ids[0])
+        self.assertTrue(isinstance(harness.charm.observed_events[0], ops.StorageDetachingEvent))
+        harness.remove_storage(stor_ids[0])  # Already detached, so won't fire a new hook
+        self.assertEqual(len(harness.charm.observed_events), 1)
 
     def test_actions_from_directory(self):
         tmp = pathlib.Path(tempfile.mkdtemp())
@@ -5646,41 +5643,9 @@ class TestNotify(unittest.TestCase):
         harness.charm.observe_container_events('bar')
 
         id1a = harness.pebble_notify('foo', 'example.com/n1')
-        id2 = harness.pebble_notify('foo', 'foo.com/n2')
-        id3 = harness.pebble_notify('bar', 'example.com/n1')
-        id1b = harness.pebble_notify('foo', 'example.com/n1')
-
         self.assertIsInstance(id1a, str)
         self.assertNotEqual(id1a, '')
-        self.assertEqual(id1a, id1b)
-
-        self.assertIsInstance(id2, str)
-        self.assertNotEqual(id2, '')
-        self.assertNotEqual(id2, id1a)
-
-        self.assertIsInstance(id3, str)
-        self.assertNotEqual(id3, '')
-        self.assertNotEqual(id3, id2)
-
         expected_changes = [{
-            'name': 'pebble-custom-notice',
-            'container': 'foo',
-            'notice_id': id1a,
-            'notice_type': 'custom',
-            'notice_key': 'example.com/n1',
-        }, {
-            'name': 'pebble-custom-notice',
-            'container': 'foo',
-            'notice_id': id2,
-            'notice_type': 'custom',
-            'notice_key': 'foo.com/n2',
-        }, {
-            'name': 'pebble-custom-notice',
-            'container': 'bar',
-            'notice_id': id3,
-            'notice_type': 'custom',
-            'notice_key': 'example.com/n1',
-        }, {
             'name': 'pebble-custom-notice',
             'container': 'foo',
             'notice_id': id1a,
@@ -5688,6 +5653,35 @@ class TestNotify(unittest.TestCase):
             'notice_key': 'example.com/n1',
         }]
         self.assertEqual(harness.charm.changes, expected_changes)
+
+        id2 = harness.pebble_notify('foo', 'foo.com/n2')
+        self.assertIsInstance(id2, str)
+        self.assertNotEqual(id2, '')
+        self.assertNotEqual(id2, id1a)
+        expected_changes = [{
+            'name': 'pebble-custom-notice',
+            'container': 'foo',
+            'notice_id': id2,
+            'notice_type': 'custom',
+            'notice_key': 'foo.com/n2',
+        }]
+        self.assertEqual(harness.charm.changes, expected_changes)
+
+        id3 = harness.pebble_notify('bar', 'example.com/n1')
+        self.assertIsInstance(id3, str)
+        self.assertNotEqual(id3, '')
+        self.assertNotEqual(id3, id2)
+        expected_changes = [{
+            'name': 'pebble-custom-notice',
+            'container': 'bar',
+            'notice_id': id3,
+            'notice_type': 'custom',
+            'notice_key': 'example.com/n1',
+        }]
+        self.assertEqual(harness.charm.changes, expected_changes)
+
+        id1b = harness.pebble_notify('foo', 'example.com/n1')
+        self.assertEqual(id1a, id1b)
 
     def test_notify_no_repeat(self):
         """Ensure event doesn't get triggered when notice occurs but doesn't repeat."""

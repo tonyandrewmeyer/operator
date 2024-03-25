@@ -242,9 +242,33 @@ class _TestingManager(_Manager):
     def make_charm(self):
         self.charm = self._make_charm(self.framework, None)
 
+    def _forget_charm(self):
+        # TODO: Can we get rid of all these type:ignores? It's the dynamic .on
+        # that's the issue - maybe we can cast that once?
+        self.framework._forget(self.charm)  # type: ignore
+        self.framework._forget(self.charm.on)  # type: ignore
+        for event_source in self.charm.on.events():  # type: ignore
+            if event_source in ("collect_app_status", "collect_unit_status", "collect_metrics"):
+                continue
+#            self.charm.on._undefine_event(event_source)  # type: ignore
+        to_remove = []
+        for handle_path, name, emitter_path, kind in self.framework._observers:
+            if handle_path == self.charm.handle.path:
+                to_remove.append((handle_path, name, emitter_path, kind))
+        for obs in to_remove:
+            self.framework._observers.remove(obs)
+#        if self.charm.handle.path in self.framework._observer:
+#            del self.framework._observer[self.charm.handle.path]
+
     # TODO: Maybe args and kwargs rather than *args and **kwargs, to more
-    # clearly deliminate?
-    def emit(self, source: 'framework.BoundEvent', *args: Any, **kwargs: Any):
+    # clearly deliminate? Definitely if `forget_charm` stays.
+    # TODO: It seems wrong that this creates a charm object, but that it's
+    # called with an attribute of the charm object. We need the charm object
+    # to exist after `begin()` (although it would be nice if it did not) because
+    # that's the previous behaviour, but we shouldn't really make use of that.
+    # The signature should change or we should be able to do this via a
+    # dispatcher to be more like main.
+    def emit(self, source: 'framework.BoundEvent', *args: Any, forget_charm=True, **kwargs: Any):
         # It would be better if this was after the emit - a cleanup - but there
         # are a bunch of test_testing tests that do something like self.x = foo
         # and then check that `harness.charm.x == foo`, and charm tests might
@@ -255,27 +279,9 @@ class _TestingManager(_Manager):
         # should be invalid because you can't really do that in practice?
 
         # Prepare for another emit().
-        self.framework._forget(self.charm)
-        self.framework._forget(self.charm.on)
-        # TODO: If we end up keeping this, it would probably be better to have
-        # an 'undefine_event()' method on `ObjectEvents`, or even a private
-        # `_undefine_event()`.
-        for event_source in self.charm.on.events():
-            try:
-                delattr(self.charm.__class__, event_source)
-            except AttributeError:
-                pass
-        to_remove = []
-        for handle_path, name, emitter_path, kind in self.framework._observers:
-            if handle_path == self.charm.handle.path:
-                to_remove.append((handle_path, name, emitter_path, kind))
-        for obs in to_remove:
-            self.framework._observers.remove(obs)
-        try:
-            del self.framework._observer[self.charm.handle.path]
-        except KeyError:
-            pass
-        self.make_charm()
+        if forget_charm:
+            self._forget_charm()
+            self.make_charm()
 
         # Re-emit any deferred events from the previous run.
         self.framework.reemit()
@@ -410,6 +416,7 @@ class Harness(Generic[CharmType]):
         >>>             event.relation.data[event.relation.app]['foo'] = 'bar'
         >>>
         >>>     harness = Harness(MyCharm)
+        >>>     harness.begin()
         >>>     event = MagicMock()
         >>>     event.relation = harness.charm.model.relations[0]
         >>>
@@ -429,6 +436,7 @@ class Harness(Generic[CharmType]):
         >>>             event.relation.data[self.app]['foo'] = 'bar'
         >>>
         >>>     harness = Harness(MyCharm)
+        >>>     harness.begin()
         >>>     event = MagicMock()
         >>>     event.relation = harness.charm.model.relations[0]
         >>>
@@ -515,6 +523,8 @@ class Harness(Generic[CharmType]):
             # To be fired.
         """
         self.begin()
+        self._manager._forget_charm()
+        self._manager.make_charm()
 
         # Checking if disks have been added
         # storage-attached events happen before install
@@ -523,11 +533,16 @@ class Harness(Generic[CharmType]):
                 s = model.Storage(storage_name, storage_index, self._backend)
                 if self._backend._storage_is_attached(storage_name, storage_index):
                     # Attaching was done already, but we still need the event to be emitted.
-                    self._manager.emit(self.charm.on[storage_name].storage_attached, s)
+                    self._manager.emit(self.charm.on[storage_name].storage_attached, s, forget_charm=False)
                 else:
-                    self.attach_storage(s.full_id)
+                    if not self._backend._storage_attach(s.full_id):
+                        continue
+                    # Reset associated cached value in the storage mappings.  If we don't do this,
+                    # Model._storages won't return Storage objects for subsequently-added storage.
+                    self.model._storages._invalidate(storage_name)
+                    self._manager.emit(self.charm.on[storage_name].storage_attached, s, forget_charm=False)
         # Storage done, emit install event
-        self._manager.emit(self.charm.on.install)
+        self._manager.emit(self.charm.on.install, forget_charm=False)
 
         # Juju itself iterates what relation to fire based on a map[int]relation, so it doesn't
         # guarantee a stable ordering between relation events. It *does* give a stable ordering
@@ -545,25 +560,27 @@ class Harness(Generic[CharmType]):
                 else:
                     random.shuffle(rel_ids)
                     for rel_id in rel_ids:
-                        self._emit_relation_created(relname, rel_id, this_app_name)
+                        self._emit_relation_created(relname, rel_id, this_app_name, forget_charm=False)
             else:
                 rel_ids = self._backend._relation_ids_map.get(relname, [])
                 random.shuffle(rel_ids)
                 for rel_id in rel_ids:
                     app_name = self._backend._relation_app_and_units[rel_id]["app"]
-                    self._emit_relation_created(relname, rel_id, app_name)
+                    self._emit_relation_created(relname, rel_id, app_name, forget_charm=False)
         if self._backend._is_leader:
-            self._manager.emit(self.charm.on.leader_elected)
+            self._manager.emit(self.charm.on.leader_elected, forget_charm=False)
         else:
-            self._manager.emit(self.charm.on.leader_settings_changed)
+            self._manager.emit(self.charm.on.leader_settings_changed, forget_charm=False)
 
-        self._manager.emit(self.charm.on.config_changed)
+        self._manager.emit(self.charm.on.config_changed, forget_charm=False)
 
-        self._manager.emit(self.charm.on.start)
+        self._manager.emit(self.charm.on.start, forget_charm=False)
 
         # Set can_connect and fire pebble-ready for any containers.
         for container_name in self._meta.containers:
-            self.container_pebble_ready(container_name)
+            container = self.model.unit.get_container(container_name)
+            self.set_can_connect(container, True)
+            self._manager.emit(self.charm.on[container_name].pebble_ready, container, forget_charm=False)
 
         # If the initial hooks do not set a unit status, the Juju controller will switch
         # the unit status from "Maintenance" to "Unknown". See gh#726
@@ -582,13 +599,13 @@ class Harness(Generic[CharmType]):
             relation = self.model.get_relation(rel_name, rel_id)
             if self._backend._relation_data_raw[rel_id].get(app_name):
                 app = self.model.get_app(app_name)
-                self._manager.emit(self.charm.on[rel_name].relation_changed, relation, app, None)
+                self._manager.emit(self.charm.on[rel_name].relation_changed, relation, app, None, forget_charm=False)
             for unit_name in sorted(rel_app_and_units["units"]):
                 remote_unit = self.model.get_unit(unit_name)
                 self._manager.emit(self.charm.on[rel_name].relation_joined,
-                                   relation, remote_unit.app, remote_unit)
+                                   relation, remote_unit.app, remote_unit, forget_charm=False)
                 self._manager.emit(self.charm.on[rel_name].relation_changed,
-                                   relation, remote_unit.app, remote_unit)
+                                   relation, remote_unit.app, remote_unit, forget_charm=False)
 
     def cleanup(self) -> None:
         """Called by the test infrastructure to clean up any temporary directories/files/etc.
@@ -1046,14 +1063,14 @@ class Harness(Generic[CharmType]):
                              if rid != relation_id}
 
     def _emit_relation_created(self, relation_name: str, relation_id: int,
-                               remote_app: str) -> None:
+                               remote_app: str, forget_charm=True) -> None:
         """Trigger relation-created for a given relation with a given remote application."""
         if not self._begun or not self._hooks_enabled:
             return
         relation = self.model.get_relation(relation_name, relation_id)
         app = self.model.get_app(remote_app)
         self._manager.emit(self.charm.on[relation_name].relation_created,
-                           relation, app)
+                           relation, app, forget_charm=forget_charm)
 
     def _emit_relation_broken(self, relation_name: str, relation_id: int,
                               remote_app: str) -> None:
@@ -2001,7 +2018,7 @@ class Harness(Generic[CharmType]):
             raise RuntimeError('The charm instance is not available yet. '
                                'Call Harness.begin() first.')
         try:
-            action_meta = self.charm.meta.actions[action_name]
+            action_meta = self._meta.actions[action_name]
         except KeyError:
             raise RuntimeError(f"Charm does not have a {action_name!r} action.") from None
         if params is None:

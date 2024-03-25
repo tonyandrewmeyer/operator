@@ -478,6 +478,21 @@ class ObjectEvents(Object):
         event_descriptor.__set_name__(cls, event_kind)
         setattr(cls, event_kind, event_descriptor)
 
+    @classmethod
+    def _undefine_event(cls, event_kind: str):
+        """Remove an event that was previously defined on this type at runtime.
+        
+        Args:
+            event_kind: An attribute name that was used to access the event.
+                        Must have previously been used with :meth:`define_event()`.
+
+        Raises:
+            RuntimeError: if the event had not previously been defined.
+        """
+        if not hasattr(cls, event_kind):
+            raise RuntimeError(f"{event_kind} has not been previously defined")
+        delattr(cls, event_kind)
+
     def _event_kinds(self) -> List[str]:
         event_kinds: List[str] = []
         # We have to iterate over the class rather than instance to allow for properties which

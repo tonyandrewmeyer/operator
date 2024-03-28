@@ -359,6 +359,36 @@ class Harness(Generic[CharmType]):
 
         class TestCharm(self._charm_cls):  # type: ignore
             on = TestEvents()
+            def __init__(self, *args: Any, **kwargs: Any):
+                super().__setattr__("_attributes", set(dir(self)))
+                super().__setattr__("_disabled", True)
+                super().__init__(*args, **kwargs)
+                super().__setattr__("_fresh_attributes", set(super().__getattribute__("_attributes")))
+                super().__setattr__("_disabled", False)
+
+            def __getattribute__(self, name: str) -> Any:
+                try:
+                    if super().__getattribute__("_disabled"):
+                        disabled = True
+                        attrs = {}
+                    else:
+                        attrs = super().__getattribute__("_attributes")
+                        disabled = False
+                except AttributeError:
+                    # Still setting up.
+                    pass
+                else:
+                    if not disabled and name not in attrs:
+                        raise AttributeError(f"You didn't set {name} in this event")
+                return super().__getattribute__(name)
+            
+            def __setattr__(self, name: str, value: Any) -> None:
+                if name != "_fresh_attributes":
+                    super().__getattribute__("_attributes").add(name)
+                return super().__setattr__(name, value)
+            
+            def _reset_attributes(self):
+                super().__setattr__("_attributes", set(super().__getattribute__("_fresh_attributes")))
 
         # Note: jam 2020-03-01 This is so that errors in testing say MyCharm has no attribute foo,
         # rather than TestCharm has no attribute foo.

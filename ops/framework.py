@@ -958,6 +958,10 @@ class Framework(Object):
             # scratch in the next path.
             self.framework._forget(event)  # type: ignore
 
+            # XXX Super hacky just for a PoC.
+            if isinstance(event, charm.HookEvent) and hasattr(observer, "_reset_attributes"):
+                observer._reset_attributes()
+
         if not deferred and last_event_path is not None:
             self._storage.drop_snapshot(last_event_path)
 

@@ -286,11 +286,6 @@ class _TestingManager(_Manager):
         # harness.charm.x = foo; harness.something_that_emits()? Probably that
         # should be invalid because you can't really do that in practice?
 
-        # Prepare for another emit().
-        if forget_charm:
-            self._forget_charm()
-            self.make_charm()
-
         # Re-emit any deferred events from the previous run.
         self.framework.reemit()
 
@@ -314,6 +309,11 @@ class _TestingManager(_Manager):
 
         # Emit pre-commit, commit, and save the snapshot.
         self._commit()
+
+        # Prepare for another emit().
+        if forget_charm:
+            self._forget_charm()
+            self.make_charm()
 
 
 # noinspection PyProtectedMember

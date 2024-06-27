@@ -3,7 +3,6 @@
 ## Fixes
 
 * Add connect timeout for exec websockets to avoid hanging (#1247)
-* Correct email address in PyPI project metadata (#1257)
 * Adjust Harness secret behaviour to align with Juju (#1248)
 
 ## Tests

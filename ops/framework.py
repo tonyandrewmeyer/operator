@@ -715,15 +715,15 @@ class Framework(Object):
         self._type_registry[(parent_path, kind_)] = cls
         self._type_known.add(cls)
 
-    def save_snapshot(self, value: Union['StoredStateData', 'EventBase']):
-        """Save a persistent snapshot of the provided value."""
+    def _validate_snapshot_data(
+        self, value: Union['StoredStateData', 'EventBase'], data: Dict[str, Any]
+    ):
         if type(value) not in self._type_known:
             raise RuntimeError(
                 f'cannot save {type(value).__name__} values before registering that type'
             )
-        data = value.snapshot()
 
-        # Use marshal as a validator, enforcing the use of simple types, as we later the
+        # Use marshal as a validator, enforcing the use of simple types, as later the
         # information is really pickled, which is too error-prone for future evolution of the
         # stored data (e.g. if the developer stores a custom object and later changes its
         # class name; when unpickling the original class will not be there and event
@@ -734,6 +734,10 @@ class Framework(Object):
             msg = 'unable to save the data for {}, it must contain only simple types: {!r}'
             raise ValueError(msg.format(value.__class__.__name__, data)) from None
 
+    def save_snapshot(self, value: Union['StoredStateData', 'EventBase']):
+        """Save a persistent snapshot of the provided value."""
+        data = value.snapshot()
+        self._validate_snapshot_data(value, data)
         self._storage.save_snapshot(value.handle.path, data)
 
     def load_snapshot(self, handle: Handle) -> Serializable:
@@ -835,17 +839,48 @@ class Framework(Object):
         parent = event.handle.parent
         assert isinstance(parent, Handle), 'event handle must have a parent'
         parent_path = parent.path
+        this_event_data = event.snapshot()
+        self._validate_snapshot_data(event, this_event_data)
         # TODO Track observers by (parent_path, event_kind) rather than as a list of
-        #  all observers. Avoiding linear search through all observers for every event
+        # all observers. Avoiding linear search through all observers for every event
         for observer_path, method_name, _parent_path, _event_kind in self._observers:
             if _parent_path != parent_path:
                 continue
             if _event_kind and _event_kind != event_kind:
                 continue
+            # Check if there is already a notice for the same event.
+            notice_exists = False
+            for (
+                existing_event_path,
+                existing_observer_path,
+                existing_method_name,
+            ) in self._storage.notices():
+                if (
+                    existing_observer_path != observer_path
+                    or existing_method_name != method_name
+                    or existing_event_path.split('[')[0] != event_path.split('[')[0]
+                ):
+                    continue
+                # Check if the snapshot for this notice is the same.
+                try:
+                    existing_event_data = self._storage.load_snapshot(existing_event_path)
+                except NoSnapshotError:
+                    existing_event_data = {}
+                if this_event_data == existing_event_data:
+                    logger.info(
+                        'Skipping notice (%s/%s/%s) - already in the queue.',
+                        event_path,
+                        observer_path,
+                        method_name,
+                    )
+                    notice_exists = True
+                    break
+            if notice_exists:
+                continue
             if not saved:
                 # Save the event for all known observers before the first notification
                 # takes place, so that either everyone interested sees it, or nobody does.
-                self.save_snapshot(event)
+                self._storage.save_snapshot(event.handle.path, this_event_data)
                 saved = True
             # Again, only commit this after all notices are saved.
             self._storage.save_notice(event_path, observer_path, method_name)

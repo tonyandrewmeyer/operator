@@ -831,6 +831,32 @@ class Framework(Object):
         self._stored['event_count'] += 1
         return str(self._stored['event_count'])
 
+    def _event_is_in_storage(
+        self, observer_path: str, method_name: str, event_path: str, event_data: Dict[str, Any]
+    ) -> bool:
+        """Check if there is already a notice with the same snapshot in the storage."""
+        # Check all the notices to see if there is one that is the same other
+        # than the event ID.
+        for (
+            existing_event_path,
+            existing_observer_path,
+            existing_method_name,
+        ) in self._storage.notices():
+            if (
+                existing_observer_path != observer_path
+                or existing_method_name != method_name
+                or existing_event_path.split('[')[0] != event_path.split('[')[0]
+            ):
+                continue
+            # Check if the snapshot for this notice is the same.
+            try:
+                existing_event_data = self._storage.load_snapshot(existing_event_path)
+            except NoSnapshotError:
+                existing_event_data = {}
+            if event_data == existing_event_data:
+                return True
+        return False
+
     def _emit(self, event: EventBase):
         """See BoundEvent.emit for the public way to call this."""
         saved = False
@@ -848,34 +874,13 @@ class Framework(Object):
                 continue
             if _event_kind and _event_kind != event_kind:
                 continue
-            # Check if there is already a notice for the same event.
-            notice_exists = False
-            for (
-                existing_event_path,
-                existing_observer_path,
-                existing_method_name,
-            ) in self._storage.notices():
-                if (
-                    existing_observer_path != observer_path
-                    or existing_method_name != method_name
-                    or existing_event_path.split('[')[0] != event_path.split('[')[0]
-                ):
-                    continue
-                # Check if the snapshot for this notice is the same.
-                try:
-                    existing_event_data = self._storage.load_snapshot(existing_event_path)
-                except NoSnapshotError:
-                    existing_event_data = {}
-                if this_event_data == existing_event_data:
-                    logger.info(
-                        'Skipping notice (%s/%s/%s) - already in the queue.',
-                        event_path,
-                        observer_path,
-                        method_name,
-                    )
-                    notice_exists = True
-                    break
-            if notice_exists:
+            if self._event_is_in_storage(observer_path, method_name, event_path, this_event_data):
+                logger.info(
+                    'Skipping notice (%s/%s/%s) - already in the queue.',
+                    event_path,
+                    observer_path,
+                    method_name,
+                )
                 continue
             if not saved:
                 # Save the event for all known observers before the first notification

@@ -126,14 +126,7 @@ class Ops(_Manager):
         )
 
     def _load_charm_meta(self):
-        metadata = (self._charm_root / "metadata.yaml").read_text()
-        actions_meta = self._charm_root / "actions.yaml"
-        if actions_meta.exists():
-            actions_metadata = actions_meta.read_text()
-        else:
-            actions_metadata = None
-
-        return ops.CharmMeta.from_yaml(metadata, actions_metadata)
+        return ops.CharmMeta(self.charm_spec.meta, self.charm_spec.actions)
 
     def _setup_root_logging(self):
         # Ops sets sys.excepthook to go to Juju's debug-log, but that's not

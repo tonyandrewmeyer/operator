@@ -1172,11 +1172,28 @@ That happens automatically behind the scenes whenever you trigger an event;
   working on a machine charm or don't have either way a `bar` container in your `metadata.yaml`, Scenario will flag that
   as inconsistent.
 
+# Overriding default behaviour
+
 ## Bypassing the checker
 
 If you have a clear false negative, are explicitly testing 'edge', inconsistent situations, or for whatever reason the
 checker is in your way, you can set the `SCENARIO_SKIP_CONSISTENCY_CHECKS` envvar and skip it altogether. Hopefully you
 don't need that.
+
+## Adjusting the log level
+
+Set `OP_SCENARIO_LOGGING` to one of the standard log level names (such as
+`DEBUG` or `WARNING`) to change the level at which Scenario logs.
+
+## Adjusting the spec cache size
+
+Each time a `Context` object is created, the `charmcraft.yaml`
+(or `metadata.yaml`, `actions.yaml`, and `config.yaml`) data is loaded from
+disk and deserialised, if the data is not passed as dictionaries. In most cases,
+each test uses a new `Context` object, and the YAML does not change from test to
+test. To avoid unnecessary work, Scenario caches the loaded data for up to four
+charms. If your tests are working with a lot of different charms, you should get
+a performance benefit by changing `SCENARIO_SPEC_CACHE_SIZE` to a larger value.
 
 # Jhack integrations
 

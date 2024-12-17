@@ -10,7 +10,6 @@ import dataclasses
 import datetime
 import functools
 import inspect
-import os
 import pathlib
 import random
 import re
@@ -1628,6 +1627,7 @@ class _CharmSpec(Generic[CharmType]):
         actions = yaml.safe_load(actions_path.open()) if actions_path.exists() else None
         return meta, config, actions
 
+    @functools.lru_cache
     @staticmethod
     def _load_metadata(charm_root: pathlib.Path):
         """Load metadata from charm projects created with Charmcraft >= 2.5."""
@@ -1641,7 +1641,6 @@ class _CharmSpec(Generic[CharmType]):
         actions = meta.pop("actions", None)
         return meta, config, actions
 
-    @functools.lru_cache(int(os.environ.get("SCENARIO_SPEC_CACHE_SIZE", "4")))
     @staticmethod
     def autoload(charm_type: type[CharmBase]) -> _CharmSpec[CharmType]:
         """Construct a ``_CharmSpec`` object by looking up the metadata from the charm's repo root.

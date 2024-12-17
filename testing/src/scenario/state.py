@@ -1627,8 +1627,8 @@ class _CharmSpec(Generic[CharmType]):
         actions = yaml.safe_load(actions_path.open()) if actions_path.exists() else None
         return meta, config, actions
 
-    @functools.lru_cache
     @staticmethod
+    @functools.lru_cache
     def _load_metadata(charm_root: pathlib.Path):
         """Load metadata from charm projects created with Charmcraft >= 2.5."""
         metadata_path = charm_root / "charmcraft.yaml"

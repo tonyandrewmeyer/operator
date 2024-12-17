@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright 2023 Canonical Ltd.
 # See LICENSE file for licensing details.
 
@@ -8,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import functools
 import inspect
 import pathlib
 import random
@@ -1627,6 +1627,7 @@ class _CharmSpec(Generic[CharmType]):
         return meta, config, actions
 
     @staticmethod
+    @functools.lru_cache
     def _load_metadata(charm_root: pathlib.Path):
         """Load metadata from charm projects created with Charmcraft >= 2.5."""
         metadata_path = charm_root / "charmcraft.yaml"

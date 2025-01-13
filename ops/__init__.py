@@ -372,3 +372,9 @@ Args:
         are running on a new enough Juju default to controller-side storage,
         and local storage otherwise.
 """
+
+# TODO: 100% the wrong place, but force this to happen in any unit tests
+# as a first basic check to see what will break.
+import os as _os
+import stat as _stat
+_os.umask(_stat.S_IWGRP | _stat.S_IWOTH)

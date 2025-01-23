@@ -1530,8 +1530,10 @@ class Secret:
             expire=expire,
             rotate=cached_data.get('rotate'),
         )
-        # We do not need to invalidate the cache here, as the content is the
-        # same until `refresh` is used, at which point the cache is invalidated.
+        # We need to invalidate the cache here, because a *different* Secret object
+        # referencing the *same* secret may do a refresh=True, causing that Secret to
+        # have the correct content, and this one the wrong content.
+        self._content = None
 
     def set_info(
         self,

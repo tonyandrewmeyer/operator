@@ -3701,6 +3701,27 @@ class TestSecretClass:
             ['secret-get', f'secret://{model._backend.model_uuid}/y', '--refresh', '--format=json']
         ]
 
+    def test_get_content_refresh_two_objects(self, model: ops.Model, fake_script: FakeScript):
+        fake_script.write('secret-get', """echo '{"foo": "refreshed"}'""")
+
+        secret_first_instance = self.make_secret(model, id='z', content={'foo': 'bar'})
+        content = secret_first_instance.get_content()
+        assert content == {'foo': 'bar'}
+
+        secret_second_instance = model.get_secret(id='z')
+        content = secret_second_instance.get_content(refresh=True)
+        assert content == {'foo': 'refreshed'}
+
+        # The original object should also have the refreshed content.
+        content = secret_first_instance.get_content()
+        assert False, secret_first_instance._content
+        assert content == {'foo': 'refreshed'}
+
+        assert fake_script.calls(clear=True) == [
+            ['secret-get', f'secret://{model._backend.model_uuid}/z', '--refresh', '--format=json'],
+            ['secret-get', f'secret://{model._backend.model_uuid}/z', '--format=json'],
+        ]
+
     def test_get_content_uncached(self, model: ops.Model, fake_script: FakeScript):
         fake_script.write('secret-get', """echo '{"foo": "notcached"}'""")
 

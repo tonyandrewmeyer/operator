@@ -1,0 +1,32 @@
+name: ops/ops-scenario compatibility
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ops: ["main", "2.17.0", "2.17.1", "2.18.0", "2.18.1", "2.19.0"]
+        scenario: ["7.0", "7.0.1", "7.0.2", "7.0.3", "7.0.4", "7.0.5", "7.1.1", "7.1.2", "7.1.3", "7.2"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ops }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+
+      - name: Install tox
+        run: pip install tox~=4.24
+
+      - name: Update 'ops-scenario' dependency
+        run: |
+          sed -i -e "/^-e testing/ops-scenario==${{ matrix.scenario }}/g" -e tox.ini
+
+      - name: Run unit tests
+        run: tox -e unit

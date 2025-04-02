@@ -401,6 +401,8 @@ To make a release of the `ops` and/or `ops-scenario` packages, do the following:
    next version, with ".dev0" appended (for example, if 3.14.1 is the next
    expected version, use `'3.14.1.dev0'`).
 
+17. Follow the security scan process outlined below.
+
 ## Release Documentation
 
 We produce several pieces of documentation for `ops` and `ops-scenario`
@@ -505,3 +507,56 @@ In the post, outline the key improvements both in `ops` and `ops-scenario`.
 The point here is to encourage people to check out the full notes and to upgrade
 promptly, so ensure that you entice them with the best that the new versions
 have to offer.
+
+## Security scanning releases
+
+As part of our SSDLC commitments, we perform security scans of each release and
+keep the results of the scans.
+
+[Detailed instructions for using the scanning service are available in Discourse](https://discourse.canonical.com/t/vulnerability-scanning-service-release/4350) (Canonical only),
+but the short version is:
+
+* Connect to the Canonical VPN
+* Install the `canonical-secscan-client` snap.
+* In `~/snap/canonical-secscan-client/common`, run:
+  * `pip download --no-deps ops==<the version just published>`
+  * `pip download --no-deps --no-binary ops ops==<the version just published>`
+  * `pip download --no-deps ops-scenario==<the version just published>`
+  * `pip download --no-deps --no-binary ops-scenario ops-scenario==<the version just published>`
+* Use the [SBOM request tool](https://sbom-request.canonical.com/sbom/) to
+  request SBOMs for each of the artifacts downloaded in the previous step.
+  When the results are available you will receive an email. Copy the link for
+  each set of reports to a new document named `ops <version> and ops-scenario <version> SBOMs`
+  in [Charm Tech | Security scans](https://drive.google.com/drive/folders/1z9O0DfiNync2L2jxlDkdGh1DtCxqeNrQ?usp=drive_link).
+* Again in `~/snap/canonical-secscan-client/common`, run:
+  * `secscan-client submit --type=package --scanner=blackduck --format=archive ops-<version>.tar.gz --wait-and-print`
+  * `secscan-client submit --type=package --scanner=trivy --format=archive ops-<version>.tar.gz --wait-and-print`
+  * `secscan-client submit --type=package --scanner=blackduck --format=pywheel ops-<version>-py3-none-any.whl --wait-and-print`
+  * `secscan-client submit --type=package --scanner=trivy --format=pywheel ops-<version>-py3-none-any.whl --wait-and-print`
+  * `secscan-client submit --type=package --scanner=blackduck --format=archive ops_scenario-<version>.tar.gz --wait-and-print`
+  * `secscan-client submit --type=package --scanner=trivy --format=archive ops_scenario-<version>.tar.gz --wait-and-print`
+  * `secscan-client submit --type=package --scanner=blackduck --format=pywheel ops_scenario-<version>-py3-none-any.whl --wait-and-print`
+  * `secscan-client submit --type=package --scanner=trivy --format=pywheel ops_scenario-<version>-py3-none-any.whl --wait-and-print`
+
+The output will look like:
+
+```text
+Scan request submitted.
+Scan request is running.
+Scan has succeeded.
+Scan request information:
+  Started at:        2025-04-02 01:25:20+00:00
+  Completed at:      2025-04-02 01:25:22+00:00
+  Scanner:           trivy
+  Target:            s3://secscan-attachments/ca50e002-2018-4614-94cb-c39abaeac6a2
+  Target type:       package
+  Target format:     archive
+  Target vulnerabilities:
+```
+
+**If there are any vulnerabilities listed, then follow the appropriate procedures for
+handling those.**
+
+Copy the output of all the commands to a new file in the
+[Charm Tech | Security Scans folder](https://drive.google.com/drive/folders/1z9O0DfiNync2L2jxlDkdGh1DtCxqeNrQ?usp=drive_link)
+named `ops <version> and ops-scenario <version> secscan results`.

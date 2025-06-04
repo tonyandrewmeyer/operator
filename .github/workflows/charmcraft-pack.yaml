@@ -6,8 +6,6 @@ on:
       - main
   pull_request:
 
-permissions: {}
-
 jobs:
   charmcraft-pack:
     runs-on: ubuntu-22.04
@@ -18,11 +16,16 @@ jobs:
           - charm-repo: jnsgruk/hello-kubecon
             commit: eb3225860cc7db0e071d0ea6cd4a01b47e66b1e5  # 2025-03-27T12:05:21Z
     steps:
+      - name: Setup my-bin
+        run: |
+          echo "::add-path::$HOME/.local/my-bin"
+        env:
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+
       - name: Checkout test charm repository
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.charm-repo }}
-          persist-credentials: false
           ref: ${{ matrix.commit }}
 
       - name: Update 'ops' dependency in test charm to latest

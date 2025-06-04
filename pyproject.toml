@@ -285,3 +285,6 @@ stubPath = ""
 [tool.codespell]
 skip = './docs/_build,.venv,venv,build'
 quiet-level = 3
+
+[tool.uv.workspace]
+members = ["ops"]

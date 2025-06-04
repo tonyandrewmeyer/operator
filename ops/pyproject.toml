@@ -1,0 +1,11 @@
+[project]
+name = "ops"
+version = "2.23.0.dev0"
+description = "Add your description here"
+dependencies = [
+    "PyYAML==6.*",
+    "websocket-client==1.*",
+    # Wide version range to preempt conflicts when charms pin a version.
+    "opentelemetry-api~=1.0",
+    "importlib-metadata",
+]

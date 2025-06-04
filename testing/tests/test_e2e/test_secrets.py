@@ -11,7 +11,7 @@ from ops.model import SecretNotFoundError, SecretRotate
 
 from scenario import Context
 from scenario.state import Relation, Secret, State
-from tests.helpers import trigger
+from ..helpers import trigger
 
 
 @pytest.fixture(scope='function')

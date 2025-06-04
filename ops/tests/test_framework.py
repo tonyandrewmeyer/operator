@@ -35,7 +35,11 @@ from ops.framework import _BREAKPOINT_WELCOME_MESSAGE, _event_regex
 from ops.jujucontext import _JujuContext
 from ops.model import _ModelBackend
 from ops.storage import JujuStorage, NoSnapshotError, SQLiteStorage
-from test.test_helpers import FakeScript
+
+import sys
+sys.path.append(os.getcwd() + "/ops/tests")
+from test_helpers import FakeScript
+sys.path.remove(os.getcwd() + "/ops/tests")
 
 
 def create_model():
@@ -1087,7 +1091,7 @@ class TestFramework:
             framework.save_snapshot(event)
         expected = (
             'unable to save the data for FooEvent, it must contain only simple types: '
-            "{'bar': <class 'test.test_framework.TestFramework'>}"
+            "{'bar': <class 'ops.tests.test_framework.TestFramework'>}"
         )
         assert str(excinfo.value) == expected
 

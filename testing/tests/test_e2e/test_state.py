@@ -31,7 +31,7 @@ from scenario.state import (
     SubordinateRelation,
     TCPPort,
 )
-from tests.helpers import jsonpatch_delta, sort_patch, trigger
+from ..helpers import jsonpatch_delta, sort_patch, trigger
 
 CUSTOM_EVT_SUFFIXES = {
     'relation_created',

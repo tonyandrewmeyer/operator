@@ -6,7 +6,7 @@ import ops
 from ops.framework import StoredState as ops_storedstate
 
 from scenario.state import State, StoredState
-from tests.helpers import trigger
+from ..helpers import trigger
 
 
 @pytest.fixture(scope='function')

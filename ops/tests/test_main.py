@@ -37,8 +37,11 @@ from ops._main import _should_use_controller_storage
 from ops.jujucontext import _JujuContext
 from ops.storage import SQLiteStorage
 
-from .charms.test_main.src.charm import MyCharmEvents
-from .test_helpers import FakeScript
+import sys
+sys.path.append(os.getcwd() + "/ops/tests")
+from charms.test_main.src.charm import MyCharmEvents
+from test_helpers import FakeScript
+sys.path.remove(os.getcwd() + "/ops/tests")
 
 # This relies on the expected repository structure to find a path to
 # source of the charm under test.

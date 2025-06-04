@@ -63,7 +63,7 @@ class TestJujuContext:
 
     def test_parsing_juju_charm_dir_not_set(self):
         juju_context = _JujuContext.from_dict({'JUJU_VERSION': '0.0.0'})
-        assert juju_context.charm_dir == Path(f'{__file__}/../../..').resolve()
+        assert juju_context.charm_dir == Path(f'{__file__}/../../').resolve()
 
     def test_parsing_juju_version(self):
         juju_context = _JujuContext.from_dict({'JUJU_VERSION': '3.4.0'})

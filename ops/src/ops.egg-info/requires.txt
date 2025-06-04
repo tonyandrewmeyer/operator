@@ -1,0 +1,4 @@
+PyYAML==6.*
+websocket-client==1.*
+opentelemetry-api~=1.0
+importlib-metadata

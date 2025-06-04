@@ -26,7 +26,7 @@ from scenario.state import (
     SubordinateRelation,
     _next_relation_id,
 )
-from tests.helpers import trigger
+from ..helpers import trigger
 
 
 @pytest.fixture(scope='function')

@@ -32,7 +32,7 @@ import yaml
 
 import ops
 import ops.storage
-from test.test_helpers import FakeScript
+from .test_helpers import FakeScript
 
 
 @pytest.fixture

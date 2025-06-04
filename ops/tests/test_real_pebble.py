@@ -43,8 +43,10 @@ import pytest
 
 from ops import pebble
 
-from .test_testing import PebbleNoticesMixin, PebbleStorageAPIsTestMixin
-
+import sys
+sys.path.append(os.getcwd() + "/ops/tests")
+from test_testing import PebbleNoticesMixin, PebbleStorageAPIsTestMixin
+sys.path.remove(os.getcwd() + "/ops/tests")
 
 def get_socket_path() -> str:
     socket_path = os.getenv('PEBBLE_SOCKET')

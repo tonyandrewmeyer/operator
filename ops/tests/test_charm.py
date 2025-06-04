@@ -27,7 +27,10 @@ import ops
 import ops.charm
 from ops.model import ModelError, StatusName
 
-from .test_helpers import FakeScript, create_framework
+import sys, os
+sys.path.append(os.getcwd() + "/ops/tests")
+from test_helpers import FakeScript, create_framework
+sys.path.remove(os.getcwd() + "/ops/tests")
 
 
 @pytest.fixture

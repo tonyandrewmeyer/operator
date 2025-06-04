@@ -42,10 +42,11 @@ def test_import(mod_name: str, tmp_path: pathlib.Path):
         fh.write(template.format(module_name=mod_name))
 
     environ = os.environ.copy()
+    ops_path = str(pathlib.Path(os.getcwd()) / 'ops')
     if 'PYTHONPATH' in environ:
-        environ['PYTHONPATH'] = os.getcwd() + os.pathsep + environ['PYTHONPATH']
+        environ['PYTHONPATH'] = ops_path + os.pathsep + environ['PYTHONPATH']
     else:
-        environ['PYTHONPATH'] = os.getcwd()
+        environ['PYTHONPATH'] = ops_path
 
     proc = subprocess.run([sys.executable, testfile], env=environ)
     assert proc.returncode == 0

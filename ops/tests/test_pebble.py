@@ -30,7 +30,10 @@ import unittest.util
 import pytest
 import websocket
 
-import test.fake_pebble as fake_pebble
+import sys, os
+sys.path.append(os.getcwd() + "/ops/tests")
+import fake_pebble as fake_pebble
+sys.path.remove(os.getcwd() + "/ops/tests")
 from ops import pebble
 from ops._private import yaml
 

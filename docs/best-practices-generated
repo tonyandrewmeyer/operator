@@ -1,7 +1,3 @@
-### [How to run workloads with a machine charm](https://documentation.ubuntu.com/ops/latest/howto/run-workloads-with-a-charm-machines/)
-- Use absolute paths in subprocesses to prevent security issues.
-- Execute processes directly rather than via the shell.
-
 ### [How to write and structure charm code](https://documentation.ubuntu.com/ops/latest/howto/write-and-structure-charm-code/)
 - Name the repository using the pattern ``<charm name>-operator`` for a single charm, or ``<base charm name>-operators`` when the repository will hold multiple related charms. For the charm name, see {external+charmcraft:ref}`Charmcraft | Specify a name <specify-a-name>`. (See more: [Create a repository and initialise it](#create-a-repository-and-initialise-it).)
 - Set the [`requires-python`](https://packaging.python.org/en/latest/specifications/pyproject-toml/#requires-python) version in your `pyproject.toml` so that tooling will detect any use of Python features not available in the versions you support. (See more: [Use the Python provided by the base](#define-the-required-dependencies).)

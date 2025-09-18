@@ -43,7 +43,12 @@ def setup(juju_context: _JujuContext, charm_class_name: str) -> None:
         juju_context: the context for this dispatch, for annotation
         charm_class_name: the name of the charm class, for annotation
     """
-    app_name, unit_number = juju_context.unit_name.split('/', 1)
+    try:
+        app_name, unit_number = juju_context.unit_name.split('/', 1)
+    except ValueError:
+        # In 'restricted context' events, like meter-status-changed, the unit name
+        # is not provided.
+        app_name = unit_number = '[unknown]'
     try:
         meta = yaml.safe_load((juju_context.charm_dir / 'metadata.yaml').read_text())
         charmhub_charm_name = meta['name']

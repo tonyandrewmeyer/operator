@@ -22,8 +22,6 @@ jobs:
             charm-root: .
           - charm-repo: canonical/airbyte-k8s-operator
             charm-root: .
-          - charm-repo: canonical/airbyte-ui-k8s-operator
-            charm-root: .
           - charm-repo: canonical/aproxy-operator
             charm-root: .
           - charm-repo: canonical/argo-operators

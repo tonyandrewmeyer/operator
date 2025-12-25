@@ -132,9 +132,7 @@ def url_to_charm_name(url: str | None):
     if parsed.netloc != 'github.com':
         logger.info('URL %s is not a GitHub URL', url)
         return None
-    if not parsed.path.startswith('/canonical'):
-        # TODO: Maybe we can include some of these anyway?
-        # 'juju-solutions' and 'charmed-kubernetes' seem viable, for example.
+    if not parsed.path.startswith(('/canonical', 'juju-solutions', 'charmed-kubernetes')):
         logger.info('URL %s is not a Canonical charm', url)
         return None
     try:

@@ -53,7 +53,6 @@ add_tox_pip_commands() {
   
   # Add commands_post to force-reinstall ops after regular install
   echo "    Adding commands_post to force-reinstall ops 3.x"
-  # Use multiple sed commands to insert actual newlines (not literal \n)
   sed -i "/$section_pattern/a commands_post =" tox.ini
   sed -i "/$section_pattern/,/^\[testenv:/ { /^commands_post[[:space:]]*=/a\\    pip install --force-reinstall --no-deps $OPS_WHEEL" tox.ini
   sed -i "/$section_pattern/,/^\[testenv:/ { /pip install --force-reinstall --no-deps.*ops.*whl/a\\    pip install --no-deps $OPS_SCENARIO_WHEEL" tox.ini

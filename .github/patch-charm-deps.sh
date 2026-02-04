@@ -121,7 +121,6 @@ elif [ -e "uv.lock" ]; then
   echo "✓ Found uv-based charm"
   echo "  Strategy: Update uv.lock with wheel files"
   
-  # Remove --frozen flag as it conflicts with regenerating the lock file
   uv add --raw-sources "$OPS_WHEEL"
   uv add --raw-sources "$OPS_SCENARIO_WHEEL"
   echo "    ✓ Updated uv.lock with ops 3.x wheels"

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# pyright: reportUnnecessaryTypeIgnoreComment=false
 """Framework for unit testing charms in a simulated Juju environment.
 
 The module includes:
@@ -118,6 +119,7 @@ try:
         layer_from_rockcraft,
     )
 except ImportError:
+    # mypy requires the type: ignore, pyright complains about the type: ignore
     from .model import Container  # type: ignore[assignment]
 else:
     # The Scenario unit testing framework.

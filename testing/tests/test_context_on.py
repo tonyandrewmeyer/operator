@@ -13,7 +13,7 @@ import scenario
 
 import ops
 
-META: dict[str, Any] = {
+META: Mapping[str, Any] = {
     'name': 'context-charm',
     'containers': {
         'bar': {},

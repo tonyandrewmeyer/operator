@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import datetime
 import typing
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import pytest

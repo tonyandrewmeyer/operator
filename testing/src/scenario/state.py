@@ -271,7 +271,7 @@ class Secret:
     """Indicates if the secret is owned by *this* unit, *this* application, or
     another application/unit.
 
-    If None, the implication is that read access to the secret has been granted
+    If ``None``, the implication is that read access to the secret has been granted
     to this unit.
     """
 
@@ -897,22 +897,20 @@ class Notice:
         )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, init=False)
 class CheckInfo:
     """A health check for a Pebble workload container."""
 
     name: str
     """Name of the check."""
 
-    _: dataclasses.KW_ONLY
-
-    level: pebble.CheckLevel | None = None
+    level: pebble.CheckLevel | None
     """Level of the check."""
 
-    startup: pebble.CheckStartup = pebble.CheckStartup.ENABLED
+    startup: pebble.CheckStartup
     """Startup mode of the check."""
 
-    status: pebble.CheckStatus = pebble.CheckStatus.UP
+    status: pebble.CheckStatus
     """Status of the check.
 
     :attr:`ops.pebble.CheckStatus.UP` means the check is healthy (the number of
@@ -922,36 +920,56 @@ class CheckInfo:
     been stopped, so is not currently running.
     """
 
-    successes: int | None = 0
+    successes: int | None
     """Number of times this check has succeeded.
 
     Set this to None to simulate an older version of Pebble which doesn't have
     the ``successes`` field (introduced in Pebble v1.23.0).
     """
 
-    failures: int = 0
+    failures: int
     """Number of failures since the check last succeeded."""
 
-    threshold: int = 3
+    threshold: int
     """Failure threshold.
 
     This is how many consecutive failures for the check to be considered 'down'.
     """
 
-    change_id: pebble.ChangeID | None = None
+    change_id: pebble.ChangeID | None
     """The ID of the Pebble Change associated with this check.
 
     Passing ``None`` will automatically assign a new Change ID if the status is
     :attr:`ops.pebble.CheckStatus.UP` or :attr:`ops.pebble.CheckStatus.DOWN`.
     """
 
-    def __post_init__(self):
-        if self.change_id is None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        level: pebble.CheckLevel | str | None = None,
+        startup: pebble.CheckStartup = pebble.CheckStartup.ENABLED,
+        status: pebble.CheckStatus = pebble.CheckStatus.UP,
+        successes: int | None = 0,
+        failures: int = 0,
+        threshold: int = 3,
+        change_id: pebble.ChangeID | None = None,
+    ):
+        object.__setattr__(self, 'name', name)
+        if level is not None:
+            level = pebble.CheckLevel(level)
+        object.__setattr__(self, 'level', level)
+        object.__setattr__(self, 'startup', startup)
+        object.__setattr__(self, 'status', status)
+        object.__setattr__(self, 'successes', successes)
+        object.__setattr__(self, 'failures', failures)
+        object.__setattr__(self, 'threshold', threshold)
+        if change_id is None:
             if self.status == pebble.CheckStatus.INACTIVE:
                 change_id = ''
             else:
                 change_id = pebble.ChangeID(_generate_new_change_id())
-            object.__setattr__(self, 'change_id', change_id)
+        object.__setattr__(self, 'change_id', change_id)
 
     def __hash__(self) -> int:
         return hash(self.name)
@@ -1139,7 +1157,7 @@ class Container:
             infos[name] = info
         return infos
 
-    def get_filesystem(self, ctx: Context) -> pathlib.Path:
+    def get_filesystem(self, ctx: Context[Any]) -> pathlib.Path:
         """Simulated Pebble filesystem in this context.
 
         Returns:
@@ -1333,7 +1351,7 @@ class StoredState:
     owner_path: str | None = None
     """The path to the owner of this StoredState instance.
 
-    If None, the owner is the Framework. Otherwise, /-separated object names,
+    If ``None``, the owner is the Framework. Otherwise, /-separated object names,
     for example MyCharm/MyCharmLib.
     """
 
@@ -1490,7 +1508,7 @@ class Storage:
             return (self.name, self.index) == (other.name, other.index)
         return False
 
-    def get_filesystem(self, ctx: Context) -> pathlib.Path:
+    def get_filesystem(self, ctx: Context[Any]) -> pathlib.Path:
         """Simulated filesystem root in this context."""
         return ctx._get_storage_root(self.name, self.index)
 
@@ -1780,8 +1798,8 @@ class State:
         Items that are found in the metadata and are also in the passed
         arguments will be merged, with the passed values taking precedence.
         """
-        meta = ctx.charm_spec.meta
-        spec_config = ctx.charm_spec.config
+        meta = ctx._charm_spec.meta
+        spec_config = ctx._charm_spec.config
         config = {} if config is None else config
         if spec_config:
             options = spec_config.get('options', {})
@@ -1811,10 +1829,10 @@ class State:
                 continue
             storages.add(Storage(name=storage_name))
         stored_states = set(stored_states or ())
-        for attr in dir(ctx.charm_spec.charm_type):
-            value = getattr(ctx.charm_spec.charm_type, attr)
+        for attr in dir(ctx._charm_spec.charm_type):
+            value = getattr(ctx._charm_spec.charm_type, attr)
             if isinstance(value, ops.StoredState):
-                owner_path = ctx.charm_spec.charm_type.handle_kind
+                owner_path = ctx._charm_spec.charm_type.handle_kind
                 if any(ss.name == attr and ss.owner_path == owner_path for ss in stored_states):
                     continue
                 stored_states.add(StoredState(attr, owner_path=owner_path))

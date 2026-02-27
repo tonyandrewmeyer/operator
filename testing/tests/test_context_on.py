@@ -6,7 +6,6 @@ from __future__ import annotations
 import copy
 import datetime
 import typing
-from collections.abc import Mapping
 from typing import Any, Literal
 
 import pytest
@@ -14,7 +13,7 @@ import scenario
 
 import ops
 
-META: Mapping[str, Any] = {
+META: dict[str, Any] = {
     'name': 'context-charm',
     'containers': {
         'bar': {},

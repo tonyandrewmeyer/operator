@@ -70,6 +70,7 @@ from ops._private.harness import ActionFailed  # For backwards compatibility.
 
 from .context import CharmEvents, Context, Manager
 from .errors import StateValidationError  # For backwards compatibility.
+from .isolation import IsolatedContext, IsolatedEnv, IsolationError
 from .state import (
     ActiveStatus,
     Address,
@@ -114,6 +115,9 @@ from .state import (
 __all__ = [
     'ActionFailed',
     'ActiveStatus',
+    'IsolatedContext',
+    'IsolatedEnv',
+    'IsolationError',
     'Address',
     'AnyJson',
     'BindAddress',

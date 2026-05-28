@@ -372,3 +372,4 @@ class TestMetadataResolution:
             tmp_path = Path(tmp)
             (tmp_path / 'src').mkdir()
             with pytest.raises(RuntimeError, match='metadata'):
+                _read_charm_metadata(tmp_path)

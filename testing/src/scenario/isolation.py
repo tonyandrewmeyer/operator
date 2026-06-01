@@ -24,17 +24,19 @@ Subinterpreters are explicitly *not* used — they do not solve C-extension bina
 conflicts and cost the same serialisation overhead.  See §4 of the spec for the
 full rationale.
 
-Serialisation (step 1)
-~~~~~~~~~~~~~~~~~~~~~~
-The event and state cross the process boundary via ``pickle`` files in a
-temporary directory.  Both the parent test process and the per-charm worker must
-therefore have **the same** ``ops`` / ``ops.testing`` version installed — only
-the charm's own runtime dependencies (``cryptography``, ``pydantic``, charm
-libs, ...) may differ between the worker venv and the parent.
+Serialisation
+~~~~~~~~~~~~~
+The event and state cross the process boundary as **JSON** files in a temporary
+directory.  The wire format is a typed envelope produced by
+:mod:`scenario._isolated_serde` that round-trips frozen dataclasses,
+``set``/``frozenset``/``tuple``, ``datetime``, ``pathlib.Path``, the
+``_EntityStatus`` family, and ``pebble.Layer``.
 
-A typed JSON encoder/decoder (step 2 of the incremental plan) will replace this
-pickle wire format once it is merged; the interface of :class:`IsolatedEnv` and
-:class:`IsolatedContext` will not change.
+The parent and the per-charm worker must have **the same** ``ops`` /
+``ops.testing`` version installed (the worker reconstructs dataclasses by name,
+so the class registry must match).  Only the charm's own runtime dependencies
+(``cryptography``, ``pydantic``, charm libs, ...) may differ between the worker
+venv and the parent.
 
 Typical usage
 ~~~~~~~~~~~~~
@@ -63,9 +65,9 @@ dependency directory without a full venv::
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import pathlib
-import pickle
 import subprocess
 import sys
 import tempfile
@@ -73,6 +75,7 @@ from typing import Any
 
 import yaml
 
+from . import _isolated_serde
 from .context import _DEFAULT_JUJU_VERSION, CharmEvents
 from .state import State, _Event
 
@@ -116,8 +119,8 @@ class IsolatedEnv:
         The per-charm venv selected via ``python_executable`` must have **the
         same** ``ops`` version installed as the parent test process.  Only the
         charm's own runtime dependencies may differ between the two environments.
-        A mismatch will typically surface as a pickle deserialization error
-        inside :class:`IsolationError`.
+        A mismatch typically surfaces as an :class:`IsolationError` whose
+        traceback names an unknown dataclass on the wire.
 
     Examples::
 
@@ -135,9 +138,7 @@ class IsolatedEnv:
     """
 
     charm_source: pathlib.Path
-    python_executable: str = dataclasses.field(
-        default_factory=lambda: sys.executable
-    )
+    python_executable: str = dataclasses.field(default_factory=lambda: sys.executable)
     extra_sys_path: tuple[str, ...] = ()
 
 
@@ -209,9 +210,10 @@ def _dispatch(
     persistent-worker mode (step 3) will be added later behind the same
     :class:`IsolatedEnv` interface.
 
-    The event and state cross the process boundary via ``pickle`` files in a
+    The event and state cross the process boundary via JSON files in a
     short-lived temporary directory.  Both the parent and worker must therefore
-    use the same ``ops`` version.
+    use the same ``ops`` version (the wire format reconstructs dataclasses by
+    name).
 
     Raises:
         IsolationError: if the worker exits without producing a response, or if
@@ -225,18 +227,15 @@ def _dispatch(
         'actions': actions,
         'app_name': app_name,
         'unit_id': unit_id,
-        # event and state are pickled to avoid importing ops.testing types on
-        # the parent side with a possibly mismatched worker-side version.
-        'event': pickle.dumps(event),
-        'state_in': pickle.dumps(state_in),
+        'event': _isolated_serde.encode_event(event),
+        'state_in': _isolated_serde.encode_state(state_in),
     }
 
     with tempfile.TemporaryDirectory(prefix='ops-iso-') as tmp:
-        req_file = pathlib.Path(tmp) / 'request.pkl'
-        resp_file = pathlib.Path(tmp) / 'response.pkl'
+        req_file = pathlib.Path(tmp) / 'request.json'
+        resp_file = pathlib.Path(tmp) / 'response.json'
 
-        with req_file.open('wb') as fh:
-            pickle.dump(request, fh)
+        req_file.write_text(json.dumps(request))
 
         cmd = [
             env.python_executable,
@@ -247,11 +246,11 @@ def _dispatch(
         ]
 
         # Make the ops.testing package importable inside the worker regardless
-        # of the worker interpreter's site-packages (the worker venv may not
-        # have ops installed in editable/dev mode, but it will have the
-        # release package; the PYTHONPATH override ensures the *parent's*
-        # testing src is available so the worker can import the same
-        # scenario.* classes as the parent for pickle compatibility).
+        # of the worker interpreter's site-packages.  The worker venv may not
+        # have ops installed in editable/dev mode, but it will have the release
+        # package; the PYTHONPATH override ensures the parent's testing src is
+        # available so the worker imports the same scenario.* dataclasses (the
+        # wire format references them by name).
         child_env = _child_environ()
 
         proc = subprocess.run(
@@ -270,16 +269,14 @@ def _dispatch(
                 f'stderr:\n{proc.stderr}'
             )
 
-        with resp_file.open('rb') as fh:
-            response = pickle.load(fh)
+        response = json.loads(resp_file.read_text())
 
     if 'error' in response:
         raise IsolationError(
-            f'Isolated charm run failed for {app_name}/{unit_id}:\n'
-            f'{response["error"]}'
+            f'Isolated charm run failed for {app_name}/{unit_id}:\n{response["error"]}'
         )
 
-    return pickle.loads(response['state_out'])
+    return _isolated_serde.decode_state(response['state_out'])
 
 
 def _child_environ() -> dict[str, str]:
@@ -387,9 +384,7 @@ class IsolatedContext:
     ):
         charm_root = pathlib.Path(charm_source)
         if not charm_root.exists():
-            raise ValueError(
-                f'charm_source {charm_root!r} does not exist.'
-            )
+            raise ValueError(f'charm_source {charm_root!r} does not exist.')
 
         self._env = IsolatedEnv(
             charm_source=charm_root,

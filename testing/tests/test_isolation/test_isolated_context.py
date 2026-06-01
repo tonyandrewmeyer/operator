@@ -367,6 +367,7 @@ class TestMetadataResolution:
         """_read_charm_metadata raises RuntimeError if no metadata is found."""
         # Create a charm directory with no metadata files.
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
             (tmp_path / 'src').mkdir()

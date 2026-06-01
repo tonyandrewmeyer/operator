@@ -13,29 +13,30 @@ have a completely different ``sys.path`` / set of installed packages than the
 parent test process, so two charms with conflicting dependencies can each run in
 their own world.
 
-Protocol (spawn-per-event, step 1)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``argv[1]`` — path to a pickle file with the request dict.  Keys:
+Protocol (spawn-per-event)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+``argv[1]`` — path to a JSON file with the request dict.  Keys:
 
 - ``charm_source`` (``str``): path to the charm repo root (``src/``, ``lib/``).
 - ``extra_sys_path`` (``list[str]``): prepended to ``sys.path`` before the charm
   is imported.
 - ``meta`` / ``config`` / ``actions`` (``dict | None``): charm spec.
 - ``app_name`` (``str``), ``unit_id`` (``int``).
-- ``event`` (``bytes``): ``pickle.dumps(_Event)``.
-- ``state_in`` (``bytes``): ``pickle.dumps(State)``.
+- ``event`` (``str``): the JSON wire form of the input ``_Event``.
+- ``state_in`` (``str``): the JSON wire form of the input ``State``.
 
-``argv[2]`` — path to write the response pickle file.  Keys:
+``argv[2]`` — path to write the response JSON file.  Keys:
 
-- ``{"state_out": <bytes>}`` — ``pickle.dumps(state_out)`` on success.
+- ``{"state_out": <str>}`` — the JSON wire form of the output ``State``.
 - ``{"error": <str>}`` — formatted traceback on charm failure.
 
 Serialisation compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``State`` and ``_Event`` must pickle-roundtrip across the boundary, which
-requires the same ``ops`` version in both the parent and the worker venv.  The
-parent sets ``PYTHONPATH`` to include the ``testing/src`` directory so the
-worker imports the same ``scenario.*`` classes.
+``State`` and ``_Event`` are round-tripped through
+:mod:`scenario._isolated_serde`, which reconstructs scenario dataclasses by
+name.  The parent and worker must therefore have the **same** ``ops`` version.
+The parent sets ``PYTHONPATH`` to include the ``testing/src`` directory so the
+worker imports the matching ``scenario.*`` classes.
 
 Only the charm's *own* runtime dependencies (``cryptography``, ``pydantic``,
 charm libs, ...) may differ between the worker venv and the parent process.
@@ -48,8 +49,8 @@ a single ``CharmBase`` subclass in ``src/charm.py``.  If multiple or zero charm
 classes are found, the worker exits with an error.
 """
 
+import json
 import pathlib
-import pickle
 import sys
 import traceback
 
@@ -83,14 +84,10 @@ def _load_charm_type(charm_source: pathlib.Path):
     charm_types = [
         t
         for t in module.__dict__.values()
-        if isinstance(t, type)
-        and issubclass(t, CharmBase)
-        and t is not CharmBase
+        if isinstance(t, type) and issubclass(t, CharmBase) and t is not CharmBase
     ]
     if not charm_types:
-        raise RuntimeError(
-            f'No CharmBase subclass found in {charm_source}/src/charm.py.'
-        )
+        raise RuntimeError(f'No CharmBase subclass found in {charm_source}/src/charm.py.')
     if len(charm_types) > 1:
         raise RuntimeError(
             f'Multiple CharmBase subclasses found in {charm_source}/src/charm.py: '
@@ -107,7 +104,7 @@ def _run(request: dict) -> dict:
         request: The request dict from the parent process.
 
     Returns:
-        ``{"state_out": pickle.dumps(state_out)}`` on success.
+        ``{"state_out": <json-str>}`` on success.
 
     Raises:
         Any exception raised by the charm or by ops.testing is propagated to
@@ -120,13 +117,13 @@ def _run(request: dict) -> dict:
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context
+    from scenario import Context, _isolated_serde
 
     charm_source = pathlib.Path(request['charm_source'])
     charm_type = _load_charm_type(charm_source)
 
-    event = pickle.loads(request['event'])
-    state_in = pickle.loads(request['state_in'])
+    event = _isolated_serde.decode_event(request['event'])
+    state_in = _isolated_serde.decode_state(request['state_in'])
 
     ctx = Context(
         charm_type,
@@ -137,14 +134,14 @@ def _run(request: dict) -> dict:
         unit_id=request['unit_id'],
     )
     state_out = ctx.run(event, state_in)
-    return {'state_out': pickle.dumps(state_out)}
+    return {'state_out': _isolated_serde.encode_state(state_out)}
 
 
 def main(argv: list[str]) -> int:
     """Entry point for the worker subprocess.
 
-    Reads the request pickle file, runs :func:`_run`, and writes the response
-    pickle file.  Exceptions from the charm are caught and returned as an
+    Reads the request JSON file, runs :func:`_run`, and writes the response
+    JSON file.  Exceptions from the charm are caught and returned as an
     ``{"error": traceback_str}`` response so the parent can raise
     :class:`~ops.testing.IsolationError` with the full traceback.
 
@@ -157,16 +154,16 @@ def main(argv: list[str]) -> int:
     """
     request_file, response_file = argv[1], argv[2]
 
-    with open(request_file, 'rb') as fh:
-        request = pickle.load(fh)
+    with open(request_file, encoding='utf8') as fh:
+        request = json.load(fh)
 
     try:
         response = _run(request)
     except Exception:
         response = {'error': traceback.format_exc()}
 
-    with open(response_file, 'wb') as fh:
-        pickle.dump(response, fh)
+    with open(response_file, 'w', encoding='utf8') as fh:
+        json.dump(response, fh)
 
     return 0
 

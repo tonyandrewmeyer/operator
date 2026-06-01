@@ -9,8 +9,9 @@ LEGACY_NAME, so alpha and beta genuinely cannot share one confdep import in the
 same Python process.
 """
 
-import ops
 import confdep
+
+import ops
 
 # v2-only attribute: removed in v1, so v1-era code breaks against this.
 assert confdep.VERSION == '2.0', f'beta requires confdep v2, got {confdep.VERSION}'

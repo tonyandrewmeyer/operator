@@ -73,8 +73,8 @@ from typing import Any
 
 import yaml
 
-from .context import CharmEvents, _DEFAULT_JUJU_VERSION
-from .state import _Event, State
+from .context import _DEFAULT_JUJU_VERSION, CharmEvents
+from .state import State, _Event
 
 __all__ = [
     'IsolatedContext',

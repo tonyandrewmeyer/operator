@@ -49,7 +49,6 @@ import sys
 import venv
 
 import pytest
-
 from scenario import IsolatedContext, IsolatedEnv, IsolationError, State
 from scenario.isolation import _read_charm_metadata
 

@@ -9,8 +9,9 @@ run isolated via ops.testing.IsolatedContext, this process is a separate
 subprocess, so a beta charm using confdep v2 in its own subprocess cannot clash.
 """
 
-import ops
 import confdep
+
+import ops
 
 # v1-only attribute: this does not exist in confdep v2, so if v2 were the one
 # importable here the import-time access would raise AttributeError immediately.

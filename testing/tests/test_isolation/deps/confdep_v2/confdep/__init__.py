@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """confdep v2 — an intentionally API-incompatible test dependency.
 
 v2 *removes* ``LEGACY_NAME`` (so v1-era code breaks against it) and exposes

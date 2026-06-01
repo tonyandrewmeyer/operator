@@ -43,17 +43,17 @@ from __future__ import annotations
 
 import importlib
 import os
+import pathlib
 import subprocess
 import sys
 import venv
-from pathlib import Path
 
 import pytest
 
 from scenario import IsolatedContext, IsolatedEnv, IsolationError, State
 from scenario.isolation import _read_charm_metadata
 
-HERE = Path(__file__).parent
+HERE = pathlib.Path(__file__).parent
 CHARMS = HERE / 'charms'
 DEPS = HERE / 'deps'
 
@@ -192,7 +192,7 @@ _VENV_TEST_MARKER = pytest.mark.skipif(
 )
 
 
-def _make_venv(tmp_path: Path, name: str, confdep_src: Path) -> str:
+def _make_venv(tmp_path: pathlib.Path, name: str, confdep_src: pathlib.Path) -> str:
     """Create a venv with ops installed (inheriting from the parent) and pip-install confdep."""
     venv_dir = tmp_path / name
     # Use --system-site-packages so the venv inherits the parent's ops/scenario
@@ -369,7 +369,7 @@ class TestMetadataResolution:
         # Create a charm directory with no metadata files.
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            tmp_path = pathlib.Path(tmp)
             (tmp_path / 'src').mkdir()
             with pytest.raises(RuntimeError, match='metadata'):
                 _read_charm_metadata(tmp_path)

@@ -40,12 +40,12 @@ Typical usage
 ~~~~~~~~~~~~~
 ::
 
-    from pathlib import Path
+    import pathlib
     from ops import testing
 
     # Point at an existing venv built for this charm.
     ctx = testing.IsolatedContext(
-        charm_source=Path('./charms/myapp'),
+        charm_source=pathlib.Path('./charms/myapp'),
         python_executable='/path/to/myapp-venv/bin/python',
     )
     state_out = ctx.run(ctx.on.install(), testing.State())
@@ -55,7 +55,7 @@ For fast offline tests, ``extra_sys_path`` lets you inject a pre-built
 dependency directory without a full venv::
 
     ctx = testing.IsolatedContext(
-        charm_source=Path('./charms/myapp'),
+        charm_source=pathlib.Path('./charms/myapp'),
         extra_sys_path=('./deps/mylib_v2',),
     )
 """
@@ -64,11 +64,11 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import pathlib
 import pickle
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 from typing import Any
 
 import yaml
@@ -123,18 +123,18 @@ class IsolatedEnv:
 
         # Point at a pre-built venv:
         env = IsolatedEnv(
-            charm_source=Path('./charms/myapp'),
+            charm_source=pathlib.Path('./charms/myapp'),
             python_executable='/path/to/myapp-venv/bin/python',
         )
 
         # Inject a dependency directory (no venv needed):
         env = IsolatedEnv(
-            charm_source=Path('./charms/myapp'),
+            charm_source=pathlib.Path('./charms/myapp'),
             extra_sys_path=('./deps/mylib_v2',),
         )
     """
 
-    charm_source: Path
+    charm_source: pathlib.Path
     python_executable: str = dataclasses.field(
         default_factory=lambda: sys.executable
     )
@@ -157,7 +157,7 @@ class IsolationError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def _read_yaml(path: Path) -> dict[str, Any] | None:
+def _read_yaml(path: pathlib.Path) -> dict[str, Any] | None:
     """Read a YAML file and return its contents, or None if the file does not exist."""
     if not path.exists():
         return None
@@ -165,7 +165,7 @@ def _read_yaml(path: Path) -> dict[str, Any] | None:
         return yaml.safe_load(fh)
 
 
-def _read_charm_metadata(charm_root: Path) -> dict[str, Any]:
+def _read_charm_metadata(charm_root: pathlib.Path) -> dict[str, Any]:
     """Read charm metadata from disk without importing the charm.
 
     Prefers ``metadata.yaml`` but falls back to the metadata embedded in a
@@ -232,8 +232,8 @@ def _dispatch(
     }
 
     with tempfile.TemporaryDirectory(prefix='ops-iso-') as tmp:
-        req_file = Path(tmp) / 'request.pkl'
-        resp_file = Path(tmp) / 'response.pkl'
+        req_file = pathlib.Path(tmp) / 'request.pkl'
+        resp_file = pathlib.Path(tmp) / 'response.pkl'
 
         with req_file.open('wb') as fh:
             pickle.dump(request, fh)
@@ -291,7 +291,7 @@ def _child_environ() -> dict[str, str]:
     """
     # The scenario package lives at testing/src/scenario/; the importable root
     # is two levels up: testing/src/.
-    scenario_src = str(Path(__file__).resolve().parent.parent)
+    scenario_src = str(pathlib.Path(__file__).resolve().parent.parent)
 
     child = dict(os.environ)
     existing = child.get('PYTHONPATH', '')
@@ -350,11 +350,11 @@ class IsolatedContext:
 
     Example — point at a pre-built venv::
 
-        from pathlib import Path
+        import pathlib
         from ops import testing
 
         ctx = testing.IsolatedContext(
-            charm_source=Path('./charms/myapp'),
+            charm_source=pathlib.Path('./charms/myapp'),
             python_executable='/path/to/myapp-venv/bin/python',
         )
         state_out = ctx.run(ctx.on.install(), testing.State())
@@ -363,7 +363,7 @@ class IsolatedContext:
     Example — ``extra_sys_path`` for fast, offline tests::
 
         ctx = testing.IsolatedContext(
-            charm_source=Path('./charms/alpha'),
+            charm_source=pathlib.Path('./charms/alpha'),
             extra_sys_path=('./deps/mylib_v1',),
         )
         state_out = ctx.run(ctx.on.start(), testing.State())
@@ -374,7 +374,7 @@ class IsolatedContext:
 
     def __init__(
         self,
-        charm_source: str | Path,
+        charm_source: str | pathlib.Path,
         python_executable: str | None = None,
         extra_sys_path: tuple[str, ...] = (),
         *,
@@ -385,7 +385,7 @@ class IsolatedContext:
         unit_id: int = 0,
         juju_version: str = _DEFAULT_JUJU_VERSION,
     ):
-        charm_root = Path(charm_source)
+        charm_root = pathlib.Path(charm_source)
         if not charm_root.exists():
             raise ValueError(
                 f'charm_source {charm_root!r} does not exist.'

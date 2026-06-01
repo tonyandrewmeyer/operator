@@ -48,13 +48,13 @@ a single ``CharmBase`` subclass in ``src/charm.py``.  If multiple or zero charm
 classes are found, the worker exits with an error.
 """
 
+import pathlib
 import pickle
 import sys
 import traceback
-from pathlib import Path
 
 
-def _load_charm_type(charm_source: Path):
+def _load_charm_type(charm_source: pathlib.Path):
     """Import the charm module and return its CharmBase subclass.
 
     Adds ``charm_source/src`` and ``charm_source/lib`` to ``sys.path`` so that
@@ -73,7 +73,7 @@ def _load_charm_type(charm_source: Path):
 
     sources = [str(charm_source / 'src'), str(charm_source / 'lib')]
     for entry in sources:
-        if Path(entry).exists() and entry not in sys.path:
+        if pathlib.Path(entry).exists() and entry not in sys.path:
             sys.path.insert(0, entry)
 
     import importlib  # noqa: PLC0415
@@ -122,7 +122,7 @@ def _run(request: dict) -> dict:
 
     from scenario import Context  # noqa: PLC0415 — deferred, needs sys.path set first
 
-    charm_source = Path(request['charm_source'])
+    charm_source = pathlib.Path(request['charm_source'])
     charm_type = _load_charm_type(charm_source)
 
     event = pickle.loads(request['event'])

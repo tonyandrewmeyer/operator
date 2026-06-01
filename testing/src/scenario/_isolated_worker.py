@@ -69,14 +69,14 @@ def _load_charm_type(charm_source: pathlib.Path):
     Raises:
         RuntimeError: if zero or more than one charm class is found.
     """
-    from ops import CharmBase  # noqa: PLC0415 — intentional deferred import
+    from ops import CharmBase
 
     sources = [str(charm_source / 'src'), str(charm_source / 'lib')]
     for entry in sources:
         if pathlib.Path(entry).exists() and entry not in sys.path:
             sys.path.insert(0, entry)
 
-    import importlib  # noqa: PLC0415
+    import importlib
 
     module = importlib.import_module('charm')
 
@@ -120,7 +120,7 @@ def _run(request: dict) -> dict:
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context  # noqa: PLC0415 — deferred, needs sys.path set first
+    from scenario import Context
 
     charm_source = pathlib.Path(request['charm_source'])
     charm_type = _load_charm_type(charm_source)
@@ -162,7 +162,7 @@ def main(argv: list[str]) -> int:
 
     try:
         response = _run(request)
-    except Exception:  # noqa: BLE001 — ship full traceback back to the parent
+    except Exception:
         response = {'error': traceback.format_exc()}
 
     with open(response_file, 'wb') as fh:

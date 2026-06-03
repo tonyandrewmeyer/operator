@@ -106,6 +106,7 @@ try:
         Resource,
         Secret,
         State,
+        StateSchemaVersionError,
         Storage,
         StoredState,
         SubordinateRelation,
@@ -114,6 +115,8 @@ try:
         UnitID,
         UnknownStatus,
         WaitingStatus,
+        decode_state,
+        encode_state,
         errors,
         layer_from_rockcraft,
     )
@@ -153,6 +156,7 @@ else:
         'Resource',
         'Secret',
         'State',
+        'StateSchemaVersionError',
         'Storage',
         'StoredState',
         'SubordinateRelation',
@@ -161,6 +165,8 @@ else:
         'UnitID',
         'UnknownStatus',
         'WaitingStatus',
+        'decode_state',
+        'encode_state',
         'errors',
         'layer_from_rockcraft',
     ])

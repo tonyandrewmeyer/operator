@@ -70,6 +70,7 @@ from ops._private.harness import ActionFailed  # For backwards compatibility.
 
 from .context import CharmEvents, Context, Manager
 from .errors import StateValidationError  # For backwards compatibility.
+from ._state_serde import StateSchemaVersionError, decode_state, encode_state
 from .state import (
     ActiveStatus,
     Address,
@@ -145,6 +146,7 @@ __all__ = [
     'Resource',
     'Secret',
     'State',
+    'StateSchemaVersionError',
     'StateValidationError',
     'Storage',
     'StoredState',
@@ -154,5 +156,7 @@ __all__ = [
     'UnitID',
     'UnknownStatus',
     'WaitingStatus',
+    'decode_state',
+    'encode_state',
     'layer_from_rockcraft',
 ]

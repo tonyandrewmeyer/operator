@@ -786,6 +786,47 @@ def _generate_new_change_id():
     return _CHANGE_IDS
 
 
+_ServiceOpName = Literal['start', 'stop', 'restart', 'replan', 'autostart']
+
+
+@dataclasses.dataclass(frozen=True)
+class ServiceOp:
+    """A record of a single Pebble service lifecycle call.
+
+    Recorded for each call to :meth:`ops.Container.start`,
+    :meth:`ops.Container.stop`, :meth:`ops.Container.restart`,
+    :meth:`ops.Container.replan`, and :meth:`ops.Container.autostart`.
+    For ``replan`` and ``autostart``, :attr:`services` is the list of
+    services with ``startup: enabled`` in the plan at the time of the
+    call (capturing the charm's intent, before the base class filters
+    services that are already running).
+    """
+
+    op: _ServiceOpName
+    """The Pebble service lifecycle operation that was invoked."""
+
+    services: tuple[str, ...]
+    """The names of services the operation was applied to."""
+
+    def __post_init__(self):
+        # Allow any sequence type to be passed in, but normalise to a tuple.
+        object.__setattr__(self, 'services', tuple(self.services))
+
+
+@dataclasses.dataclass(frozen=True)
+class AddLayer:
+    """A record of a single :meth:`ops.Container.add_layer` call."""
+
+    label: str
+    """The label the layer was added with."""
+
+    layer: pebble.Layer
+    """The layer that was added."""
+
+    combine: bool = False
+    """Whether the layer was added with ``combine=True``."""
+
+
 @dataclasses.dataclass(frozen=True)
 class Exec:
     """Mock data for simulated :meth:`ops.Container.exec` calls."""

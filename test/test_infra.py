@@ -85,6 +85,7 @@ def test_ops_testing_doc():
                 for line in testing_doc
                 if line.strip().startswith((
                     '.. autoclass:: ops.testing.',
+                    '.. autofunction:: ops.testing.',
                     '.. automethod:: ops.testing.',
                 ))
             })

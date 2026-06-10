@@ -5,14 +5,11 @@
 
 from __future__ import annotations
 
-import base64
 import datetime
 import json
 import pathlib
 
 import pytest
-from ops import SecretRotate, pebble
-
 from scenario._state_serde import (
     STATE_SCHEMA_VERSION,
     StateSchemaVersionError,
@@ -26,24 +23,22 @@ from scenario.state import (
     CheckInfo,
     Container,
     DeferredEvent,
-    Exec,
     MaintenanceStatus,
-    Model,
     Mount,
-    Network,
     Notice,
     PeerRelation,
     Relation,
     Resource,
     Secret,
     State,
-    Storage,
     StoredState,
     TCPPort,
     UnknownStatus,
     WaitingStatus,
+    _EntityStatus,
 )
 
+from ops import SecretRotate, pebble
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,8 +68,10 @@ class TestFrozensetRoundtrip:
             ])
         )
         out = _roundtrip(state)
-        assert len(out.relations) == 1
-        rel = next(iter(out.relations))
+        rels = list(out.relations)
+        assert len(rels) == 1
+        rel = rels[0]
+        assert isinstance(rel, Relation)
         assert rel.endpoint == 'db'
         assert rel.remote_app_name == 'pg'
 
@@ -82,21 +79,21 @@ class TestFrozensetRoundtrip:
 class TestDatetimeRoundtrip:
     def test_naive_datetime(self):
         dt = datetime.datetime(2030, 6, 15, 12, 0, 0)
-        state = State(secrets=frozenset([
-            Secret(
-                tracked_content={'k': 'v'},
-                expire=dt,
-            )
-        ]))
+        state = State(
+            secrets=frozenset([
+                Secret(
+                    tracked_content={'k': 'v'},
+                    expire=dt,
+                )
+            ])
+        )
         out = _roundtrip(state)
         secret = next(iter(out.secrets))
         assert secret.expire == dt
 
     def test_aware_datetime(self):
         dt = datetime.datetime(2030, 1, 1, tzinfo=datetime.timezone.utc)
-        state = State(secrets=frozenset([
-            Secret(tracked_content={'k': 'v'}, expire=dt)
-        ]))
+        state = State(secrets=frozenset([Secret(tracked_content={'k': 'v'}, expire=dt)]))
         out = _roundtrip(state)
         assert next(iter(out.secrets)).expire == dt
 
@@ -110,9 +107,7 @@ class TestTimedeltaRoundtrip:
     def test_repeat_after(self):
         td = datetime.timedelta(hours=2, minutes=30)
         notice = Notice(key='example.com/test', repeat_after=td)
-        state = State(containers=frozenset([
-            Container(name='c', notices=[notice])
-        ]))
+        state = State(containers=frozenset([Container(name='c', notices=[notice])]))
         out = _roundtrip(state)
         container = next(iter(out.containers))
         assert container.notices[0].repeat_after == td
@@ -120,9 +115,7 @@ class TestTimedeltaRoundtrip:
     def test_expire_after(self):
         td = datetime.timedelta(days=7)
         notice = Notice(key='example.com/test', expire_after=td)
-        state = State(containers=frozenset([
-            Container(name='c', notices=[notice])
-        ]))
+        state = State(containers=frozenset([Container(name='c', notices=[notice])]))
         out = _roundtrip(state)
         assert next(iter(out.containers)).notices[0].expire_after == td
 
@@ -135,7 +128,7 @@ class TestTimedeltaRoundtrip:
 
 class TestPathRoundtrip:
     def test_path_in_resource(self):
-        p = pathlib.Path('/tmp/resource.tar.gz')
+        p = pathlib.Path('/tmp/resource.tar.gz')  # noqa: S108
         state = State(resources=frozenset([Resource(name='oci-image', path=p)]))
         out = _roundtrip(state)
         resource = next(iter(out.resources))
@@ -153,12 +146,14 @@ class TestPathRoundtrip:
 class TestPurePosixPathRoundtrip:
     def test_pure_posix_path_in_mount(self):
         loc = pathlib.PurePosixPath('/etc/config')
-        state = State(containers=frozenset([
-            Container(
-                name='myapp',
-                mounts={'cfg': Mount(location=loc, source=pathlib.Path('/tmp/cfg'))},
-            )
-        ]))
+        state = State(
+            containers=frozenset([
+                Container(
+                    name='myapp',
+                    mounts={'cfg': Mount(location=loc, source=pathlib.Path('/tmp/cfg'))},  # noqa: S108
+                )
+            ])
+        )
         out = _roundtrip(state)
         container = next(iter(out.containers))
         mount = container.mounts['cfg']
@@ -166,12 +161,14 @@ class TestPurePosixPathRoundtrip:
         assert isinstance(mount.location, pathlib.PurePosixPath)
 
     def test_string_location_stays_string(self):
-        state = State(containers=frozenset([
-            Container(
-                name='myapp',
-                mounts={'cfg': Mount(location='/etc/config', source='/tmp/cfg')},
-            )
-        ]))
+        state = State(
+            containers=frozenset([
+                Container(
+                    name='myapp',
+                    mounts={'cfg': Mount(location='/etc/config', source='/tmp/cfg')},  # noqa: S108
+                )
+            ])
+        )
         out = _roundtrip(state)
         container = next(iter(out.containers))
         assert container.mounts['cfg'].location == '/etc/config'
@@ -180,12 +177,14 @@ class TestPurePosixPathRoundtrip:
 
 class TestPebbleEnumRoundtrip:
     def test_service_status(self):
-        state = State(containers=frozenset([
-            Container(
-                name='app',
-                service_statuses={'svc': pebble.ServiceStatus.ACTIVE},
-            )
-        ]))
+        state = State(
+            containers=frozenset([
+                Container(
+                    name='app',
+                    service_statuses={'svc': pebble.ServiceStatus.ACTIVE},
+                )
+            ])
+        )
         out = _roundtrip(state)
         container = next(iter(out.containers))
         assert container.service_statuses['svc'] is pebble.ServiceStatus.ACTIVE
@@ -198,9 +197,7 @@ class TestPebbleEnumRoundtrip:
 
     def test_check_status(self):
         ci = CheckInfo(name='http', status=pebble.CheckStatus.DOWN, failures=3)
-        state = State(containers=frozenset([
-            Container(name='app', check_infos=frozenset([ci]))
-        ]))
+        state = State(containers=frozenset([Container(name='app', check_infos=frozenset([ci]))]))
         out = _roundtrip(state)
         container = next(iter(out.containers))
         info = container.get_check_info('http')
@@ -215,9 +212,11 @@ class TestPebbleEnumRoundtrip:
         assert info.level is pebble.CheckLevel.READY
 
     def test_secret_rotate(self):
-        state = State(secrets=frozenset([
-            Secret(tracked_content={'k': 'v'}, rotate=SecretRotate.HOURLY, owner='app')
-        ]))
+        state = State(
+            secrets=frozenset([
+                Secret(tracked_content={'k': 'v'}, rotate=SecretRotate.HOURLY, owner='app')
+            ])
+        )
         out = _roundtrip(state)
         secret = next(iter(out.secrets))
         assert secret.rotate is SecretRotate.HOURLY
@@ -234,9 +233,7 @@ class TestPebbleLayerRoundtrip:
                 }
             }
         })
-        state = State(containers=frozenset([
-            Container(name='app', layers={'base': layer})
-        ]))
+        state = State(containers=frozenset([Container(name='app', layers={'base': layer})]))
         out = _roundtrip(state)
         container = next(iter(out.containers))
         assert 'app' in container.layers['base'].services
@@ -250,13 +247,15 @@ class TestPebbleLayerRoundtrip:
 
 class TestIntKeyedDictRoundtrip:
     def test_remote_grants(self):
-        state = State(secrets=frozenset([
-            Secret(
-                tracked_content={'pass': 'abc'},
-                owner='app',
-                remote_grants={0: {'related-app'}, 2: {'other-app/0'}},
-            )
-        ]))
+        state = State(
+            secrets=frozenset([
+                Secret(
+                    tracked_content={'pass': 'abc'},
+                    owner='app',
+                    remote_grants={0: {'related-app'}, 2: {'other-app/0'}},
+                )
+            ])
+        )
         out = _roundtrip(state)
         secret = next(iter(out.secrets))
         assert secret.remote_grants[0] == {'related-app'}
@@ -264,14 +263,17 @@ class TestIntKeyedDictRoundtrip:
         assert all(isinstance(k, int) for k in secret.remote_grants)
 
     def test_remote_units_data(self):
-        state = State(relations=frozenset([
-            Relation(
-                endpoint='db',
-                remote_units_data={0: {'key': 'val'}, 1: {'key': 'other'}},
-            )
-        ]))
+        state = State(
+            relations=frozenset([
+                Relation(
+                    endpoint='db',
+                    remote_units_data={0: {'key': 'val'}, 1: {'key': 'other'}},
+                )
+            ])
+        )
         out = _roundtrip(state)
         rel = next(iter(out.relations))
+        assert isinstance(rel, Relation)
         assert rel.remote_units_data[0] == {'key': 'val'}
         assert rel.remote_units_data[1] == {'key': 'other'}
         assert all(isinstance(k, int) for k in rel.remote_units_data)
@@ -285,9 +287,7 @@ class TestIntKeyedDictRoundtrip:
 class TestBytesEscapeHatch:
     def test_bytes_in_stored_state(self):
         data = b'\x00\x01\x02\xff'
-        state = State(stored_states=frozenset([
-            StoredState(content={'blob': data})
-        ]))
+        state = State(stored_states=frozenset([StoredState(content={'blob': data})]))
         out = _roundtrip(state)
         ss = next(iter(out.stored_states))
         assert ss.content['blob'] == data
@@ -340,17 +340,13 @@ class TestSetEscapeHatch:
 
 class TestEncoderTypeError:
     def test_unrecognised_type_raises(self):
-        state = State(stored_states=frozenset([
-            StoredState(content={'obj': object()})
-        ]))
+        state = State(stored_states=frozenset([StoredState(content={'obj': object()})]))
         with pytest.raises(TypeError, match="No JSON encoding for type 'object'"):
             encode_state(state)
 
     def test_error_includes_path(self):
-        state = State(stored_states=frozenset([
-            StoredState(content={'bad': object()})
-        ]))
-        with pytest.raises(TypeError, match="path"):
+        state = State(stored_states=frozenset([StoredState(content={'bad': object()})]))
+        with pytest.raises(TypeError, match='path'):
             encode_state(state)
 
     def test_unrecognised_enum_raises(self):
@@ -359,31 +355,29 @@ class TestEncoderTypeError:
         class MyEnum(enum.Enum):
             VAL = 'val'
 
-        state = State(stored_states=frozenset([
-            StoredState(content={'e': MyEnum.VAL})
-        ]))
-        with pytest.raises(TypeError, match="Unrecognised enum type"):
+        state = State(stored_states=frozenset([StoredState(content={'e': MyEnum.VAL})]))
+        with pytest.raises(TypeError, match='Unrecognised enum type'):
             encode_state(state)
 
 
 class TestDecoderTypeError:
     def test_unknown_type_tag_raises(self):
-        with pytest.raises(TypeError, match="Unknown wire type tag"):
+        with pytest.raises(TypeError, match='Unknown wire type tag'):
             _decode_v1({'__t__': '__no_such_type__', 'v': None})
 
     def test_unknown_dataclass_raises(self):
-        with pytest.raises(TypeError, match="Unknown dataclass"):
+        with pytest.raises(TypeError, match='Unknown dataclass'):
             _decode_v1({'__t__': 'dc', 'cls': 'NoSuchClass', 'f': {}})
 
     def test_unknown_enum_class_raises(self):
-        with pytest.raises(TypeError, match="Unknown enum class"):
+        with pytest.raises(TypeError, match='Unknown enum class'):
             _decode_v1({'__t__': 'enum', 'cls': 'NoSuchEnum', 'name': 'FOO'})
 
 
 class TestSchemaVersionMismatch:
     def test_unknown_version_raises(self):
         payload = json.dumps({'state_schema_version': 9999, 'state': {}})
-        with pytest.raises(StateSchemaVersionError, match="9999"):
+        with pytest.raises(StateSchemaVersionError, match='9999'):
             decode_state(payload)
 
     def test_missing_version_raises(self):
@@ -404,14 +398,17 @@ class TestSchemaVersionMismatch:
 
 
 class TestStatusRoundtrip:
-    @pytest.mark.parametrize('status,cls', [
-        (ActiveStatus('ready'), ActiveStatus),
-        (BlockedStatus('needs config'), BlockedStatus),
-        (WaitingStatus('waiting for db'), WaitingStatus),
-        (MaintenanceStatus('updating'), MaintenanceStatus),
-        (UnknownStatus(), UnknownStatus),
-    ])
-    def test_status_roundtrip(self, status, cls):
+    @pytest.mark.parametrize(
+        'status,cls',
+        [
+            (ActiveStatus('ready'), ActiveStatus),
+            (BlockedStatus('needs config'), BlockedStatus),
+            (WaitingStatus('waiting for db'), WaitingStatus),
+            (MaintenanceStatus('updating'), MaintenanceStatus),
+            (UnknownStatus(), UnknownStatus),
+        ],
+    )
+    def test_status_roundtrip(self, status: _EntityStatus, cls: type[_EntityStatus]):
         state = State(unit_status=status, app_status=status)
         out = _roundtrip(state)
         assert isinstance(out.unit_status, cls)
@@ -425,7 +422,7 @@ class TestStatusRoundtrip:
 
 class TestFullStateRoundtrip:
     def test_non_trivial_state(self):
-        _first = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
+        first = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
         state = State(
             config={'log_level': 'debug', 'port': 8080, 'enabled': True},
             relations=frozenset([
@@ -461,9 +458,9 @@ class TestFullStateRoundtrip:
                             key='example.com/event',
                             type=pebble.NoticeType.CUSTOM,
                             repeat_after=datetime.timedelta(minutes=30),
-                            first_occurred=_first,
-                            last_occurred=_first,
-                            last_repeated=_first,
+                            first_occurred=first,
+                            last_occurred=first,
+                            last_repeated=first,
                         )
                     ],
                     check_infos=frozenset([
@@ -484,9 +481,7 @@ class TestFullStateRoundtrip:
                     remote_grants={0: {'related-app'}},
                 )
             ]),
-            resources=frozenset([
-                Resource(name='oci-image', path=pathlib.Path('/tmp/image.tar'))
-            ]),
+            resources=frozenset([Resource(name='oci-image', path=pathlib.Path('/tmp/image.tar'))]),  # noqa: S108
             stored_states=frozenset([
                 StoredState(
                     name='_stored',
@@ -523,6 +518,8 @@ class TestFullStateRoundtrip:
         # Relations
         db_in = next(r for r in state.relations if r.endpoint == 'db')
         db_out = next(r for r in out.relations if r.endpoint == 'db')
+        assert isinstance(db_in, Relation)
+        assert isinstance(db_out, Relation)
         assert db_out.remote_units_data == db_in.remote_units_data
         assert db_out.remote_app_data == db_in.remote_app_data
         assert all(isinstance(k, int) for k in db_out.remote_units_data)
@@ -530,6 +527,8 @@ class TestFullStateRoundtrip:
         # Peers
         peer_in = next(r for r in state.relations if r.endpoint == 'peers')
         peer_out = next(r for r in out.relations if r.endpoint == 'peers')
+        assert isinstance(peer_in, PeerRelation)
+        assert isinstance(peer_out, PeerRelation)
         assert peer_out.peers_data == peer_in.peers_data
 
         # Container
@@ -551,7 +550,7 @@ class TestFullStateRoundtrip:
         assert secret_out.tracked_content == {'password': 'hunter2'}
         assert secret_out.rotate is SecretRotate.DAILY
         assert secret_out.remote_grants[0] == {'related-app'}
-        assert isinstance(list(secret_out.remote_grants.keys())[0], int)
+        assert isinstance(next(iter(secret_out.remote_grants.keys())), int)
 
         # Resource
         res_out = next(iter(out.resources))

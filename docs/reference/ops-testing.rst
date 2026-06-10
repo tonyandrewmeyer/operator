@@ -117,6 +117,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.Resource
 .. autoclass:: ops.testing.Secret
 .. autoclass:: ops.testing.State
+.. autoclass:: ops.testing.StateSchemaVersionError
 .. autoclass:: ops.testing.Storage
 .. autoclass:: ops.testing.StoredState
 .. autoclass:: ops.testing.SubordinateRelation
@@ -135,3 +136,5 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.errors.NoObserverError
 .. autoclass:: ops.testing.errors.BadOwnerPath
 .. automethod:: ops.testing.layer_from_rockcraft
+.. autofunction:: ops.testing.decode_state
+.. autofunction:: ops.testing.encode_state

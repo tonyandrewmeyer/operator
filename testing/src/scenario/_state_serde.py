@@ -23,18 +23,18 @@ Type envelopes
 ~~~~~~~~~~~~~~
 Non-primitive values are wrapped in a small envelope dict keyed on ``"__t__"``:
 
-    ``"dc"``          – any dataclass from ``scenario.state``
-    ``"status"``      – ``_EntityStatus`` subclasses (special ``__init__``)
-    ``"frozenset"``   – ``frozenset``
-    ``"set"``         – ``set``
-    ``"datetime"``    – ISO-8601 string
-    ``"timedelta"``   – ``total_seconds()`` float
-    ``"Path"``        – ``pathlib.Path`` string
-    ``"PurePosixPath"`` – ``pathlib.PurePosixPath`` string
-    ``"layer"``       – ``pebble.Layer`` via ``to_dict()``/``Layer(dict)``
-    ``"enum"``        – ``enum.Enum`` subclass (class name + member name)
-    ``"bytes"``       – base64-encoded bytes
-    ``"idict"``       – ``dict`` with ``int`` keys
+    ``"dc"``          - any dataclass from ``scenario.state``
+    ``"status"``      - ``_EntityStatus`` subclasses (special ``__init__``)
+    ``"frozenset"``   - ``frozenset``
+    ``"set"``         - ``set``
+    ``"datetime"``    - ISO-8601 string
+    ``"timedelta"``   - ``total_seconds()`` float
+    ``"Path"``        - ``pathlib.Path`` string
+    ``"PurePosixPath"`` - ``pathlib.PurePosixPath`` string
+    ``"layer"``       - ``pebble.Layer`` via ``to_dict()``/``Layer(dict)``
+    ``"enum"``        - ``enum.Enum`` subclass (class name + member name)
+    ``"bytes"``       - base64-encoded bytes
+    ``"idict"``       - ``dict`` with ``int`` keys
 
 Tuples use a list-based envelope: ``["__tuple__", elem, ...]``.
 
@@ -163,8 +163,8 @@ def _encode(obj: Any, path: str = 'state') -> Any:
         cls_name = type(obj).__name__
         if cls_name not in _PEBBLE_ENUM_TYPES:
             raise TypeError(
-                f"Unrecognised enum type {type(obj).__qualname__!r} at path {path!r}. "
-                "Add it to _PEBBLE_ENUM_TYPES in testing/src/scenario/_state_serde.py."
+                f'Unrecognised enum type {type(obj).__qualname__!r} at path {path!r}. '
+                'Add it to _PEBBLE_ENUM_TYPES in testing/src/scenario/_state_serde.py.'
             )
         return {_T: 'enum', 'cls': cls_name, 'name': obj.name}
 
@@ -215,8 +215,8 @@ def _encode(obj: Any, path: str = 'state') -> Any:
         return {str(k): _encode(v, f'{path}.{k}') for k, v in obj.items()}
 
     raise TypeError(
-        f"No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}. "
-        "If this type is intentional, extend testing/src/scenario/_state_serde.py."
+        f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}. '
+        'If this type is intentional, extend testing/src/scenario/_state_serde.py.'
     )
 
 
@@ -261,7 +261,7 @@ def _decode_v1(obj: Any) -> Any:
         name = obj['name']
         cls = _STATUS_TYPES.get(name)
         if cls is None:
-            raise TypeError(f"Unknown status name {name!r} in wire payload.")
+            raise TypeError(f'Unknown status name {name!r} in wire payload.')
         return cls() if name == 'unknown' else cls(obj['msg'])
 
     if kind == 'layer':
@@ -271,7 +271,7 @@ def _decode_v1(obj: Any) -> Any:
         cls_name = obj['cls']
         cls = _PEBBLE_ENUM_TYPES.get(cls_name)
         if cls is None:
-            raise TypeError(f"Unknown enum class {cls_name!r} in wire payload.")
+            raise TypeError(f'Unknown enum class {cls_name!r} in wire payload.')
         return cls[obj['name']]
 
     if kind == 'dc':
@@ -279,7 +279,7 @@ def _decode_v1(obj: Any) -> Any:
         cls_name = obj['cls']
         cls = _DC_TYPES.get(cls_name)
         if cls is None:
-            raise TypeError(f"Unknown dataclass {cls_name!r} in wire payload.")
+            raise TypeError(f'Unknown dataclass {cls_name!r} in wire payload.')
         fields = {k: _decode_v1(v) for k, v in obj['f'].items()}
         return cls(**fields)
 
@@ -307,7 +307,7 @@ def _decode_v1(obj: Any) -> Any:
     if kind == 'idict':
         return {int(k): _decode_v1(v) for k, v in obj['v'].items()}
 
-    raise TypeError(f"Unknown wire type tag {kind!r} in payload.")
+    raise TypeError(f'Unknown wire type tag {kind!r} in payload.')
 
 
 # Dispatch table keyed by schema version; new versions add an entry here.
@@ -329,13 +329,11 @@ def decode_state(payload: str) -> _state.State:
     decode_fn = _VERSION_DECODERS.get(version)  # type: ignore[arg-type]
     if decode_fn is None:
         raise StateSchemaVersionError(
-            f"Unsupported state_schema_version={version!r}. "
-            f"Supported versions: {sorted(_VERSION_DECODERS)}. "
-            "Upgrade ops to a version that supports this payload."
+            f'Unsupported state_schema_version={version!r}. '
+            f'Supported versions: {sorted(_VERSION_DECODERS)}. '
+            'Upgrade ops to a version that supports this payload.'
         )
     result = decode_fn(data['state'])
     if not isinstance(result, _state.State):
-        raise TypeError(
-            f"Decoded payload root is not a State: got {type(result).__name__!r}."
-        )
+        raise TypeError(f'Decoded payload root is not a State: got {type(result).__name__!r}.')
     return result

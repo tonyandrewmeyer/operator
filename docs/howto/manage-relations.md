@@ -14,11 +14,11 @@ To integrate with another charm, or with itself (to communicate with other units
 
 **If you're using an existing interface:**
 
-Make sure to consult [the `charm-relations-interfaces` repository](https://github.com/canonical/charm-relation-interfaces) for guidance about how to implement them correctly.
+Make sure to consult [the `interfaces` directory of the `charmlibs` repository](https://github.com/canonical/charmlibs/tree/main/interfaces) for guidance about how to implement them correctly.
 
 **If you're defining a new interface:**
 
-Make sure to add your interface to [the `charm-relations-interfaces` repository](https://github.com/canonical/charm-relation-interfaces).
+Make sure to add your interface to [the `interfaces` directory of the `charmlibs` repository](https://github.com/canonical/charmlibs/tree/main/interfaces).
 ```
 
 To exchange data with other units of the same charm, define one or more `peers` endpoints including an interface name for each. Each peer relation must have an endpoint, which your charm will use to refer to the relation (as [](ops.Relation.name)).

@@ -1,7 +1,7 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Unit tests for the typed State JSON encoder/decoder (Saddle step 2)."""
+"""Unit tests for the typed State JSON encoder/decoder."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import pathlib
 
 import pytest
+
 from scenario._state_serde import (
     STATE_SCHEMA_VERSION,
     StateSchemaVersionError,
@@ -40,18 +41,14 @@ from scenario.state import (
 
 from ops import SecretRotate, pebble
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _roundtrip(state: State) -> State:
     return decode_state(encode_state(state))
 
 
-# ---------------------------------------------------------------------------
 # Leaf-type round-trips
-# ---------------------------------------------------------------------------
 
 
 class TestFrozensetRoundtrip:
@@ -279,9 +276,7 @@ class TestIntKeyedDictRoundtrip:
         assert all(isinstance(k, int) for k in rel.remote_units_data)
 
 
-# ---------------------------------------------------------------------------
 # StoredState escape hatch
-# ---------------------------------------------------------------------------
 
 
 class TestBytesEscapeHatch:
@@ -333,9 +328,7 @@ class TestSetEscapeHatch:
         assert isinstance(ss.content['s'], set)
 
 
-# ---------------------------------------------------------------------------
 # Error paths
-# ---------------------------------------------------------------------------
 
 
 class TestEncoderTypeError:
@@ -392,9 +385,7 @@ class TestSchemaVersionMismatch:
         assert data['state_schema_version'] == STATE_SCHEMA_VERSION
 
 
-# ---------------------------------------------------------------------------
 # Status round-trips
-# ---------------------------------------------------------------------------
 
 
 class TestStatusRoundtrip:
@@ -415,9 +406,7 @@ class TestStatusRoundtrip:
         assert out.unit_status == status
 
 
-# ---------------------------------------------------------------------------
 # Full State round-trip (non-trivial fixture)
-# ---------------------------------------------------------------------------
 
 
 class TestFullStateRoundtrip:

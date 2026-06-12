@@ -1,9 +1,9 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Typed JSON encoder/decoder for ops.testing.State (Saddle, step 2).
+"""Typed JSON encoder/decoder for ops.testing.State.
 
-Public surface (re-exported via scenario and ops.testing):
+Public surface (re-exported via ops.testing):
 
     encode_state(state: State) -> str
     decode_state(payload: str) -> State
@@ -83,9 +83,7 @@ STATE_SCHEMA_VERSION = 1
 _T = '__t__'
 _TUPLE_SENTINEL = '__tuple__'
 
-# ---------------------------------------------------------------------------
 # Type registries
-# ---------------------------------------------------------------------------
 
 _PEBBLE_ENUM_TYPES: dict[str, type[enum.Enum]] = {
     'CheckLevel': pebble.CheckLevel,
@@ -123,18 +121,14 @@ def _build_dc_registry() -> None:
             _DC_TYPES[value.__name__] = value
 
 
-# ---------------------------------------------------------------------------
 # Errors
-# ---------------------------------------------------------------------------
 
 
 class StateSchemaVersionError(Exception):
     """Raised when a payload's ``state_schema_version`` is not supported by this ops version."""
 
 
-# ---------------------------------------------------------------------------
 # Encoder
-# ---------------------------------------------------------------------------
 
 
 def _encode(obj: Any, path: str = 'state') -> Any:
@@ -163,8 +157,7 @@ def _encode(obj: Any, path: str = 'state') -> Any:
         cls_name = type(obj).__name__
         if cls_name not in _PEBBLE_ENUM_TYPES:
             raise TypeError(
-                f'Unrecognised enum type {type(obj).__qualname__!r} at path {path!r}. '
-                'Add it to _PEBBLE_ENUM_TYPES in testing/src/scenario/_state_serde.py.'
+                f'Unrecognised enum type {type(obj).__qualname__!r} at path {path!r}.'
             )
         return {_T: 'enum', 'cls': cls_name, 'name': obj.name}
 
@@ -215,8 +208,7 @@ def _encode(obj: Any, path: str = 'state') -> Any:
         return {str(k): _encode(v, f'{path}.{k}') for k, v in obj.items()}
 
     raise TypeError(
-        f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}. '
-        'If this type is intentional, extend testing/src/scenario/_state_serde.py.'
+        f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}.'
     )
 
 
@@ -237,9 +229,7 @@ def encode_state(state: _state.State) -> str:
     return json.dumps(payload)
 
 
-# ---------------------------------------------------------------------------
 # Decoder
-# ---------------------------------------------------------------------------
 
 
 def _decode_v1(obj: Any) -> Any:

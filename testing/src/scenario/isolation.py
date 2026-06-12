@@ -1,4 +1,4 @@
-# Copyright 2025 Canonical Ltd.
+# Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
 """Per-charm dependency isolation for ops.testing.
@@ -9,8 +9,7 @@ isolated subprocess with its own ``sys.path`` / venv.  No convergence loop, no
 multi-charm model: just the ability to run a single on-disk charm when its
 dependency set conflicts with the test process's packages.
 
-The isolation mechanism is a subprocess + per-charm interpreter, as recommended
-by the spike (see ``saddle-spec.md`` §4 and ``dependency-isolation-findings.md``):
+The isolation mechanism is a subprocess + per-charm interpreter:
 
 * **Each charm event is dispatched to a separate process** whose Python
   interpreter is selected per charm (e.g. a per-charm venv's ``bin/python``).
@@ -86,9 +85,7 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Public data types
-# ---------------------------------------------------------------------------
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,16 +143,14 @@ class IsolationError(RuntimeError):
     """Raised when a charm event fails inside the isolated worker subprocess.
 
     This wraps any exception raised by the worker — either an uncaught charm
-    exception or a worker-infrastructure error (e.g. the charm module could not
+    exception or a worker-infrastructure error (for example, the charm module could not
     be imported, or the worker process crashed without producing a response).
 
     The original traceback from the worker is included in the message.
     """
 
 
-# ---------------------------------------------------------------------------
 # Metadata helpers (reads charm metadata without importing the charm)
-# ---------------------------------------------------------------------------
 
 
 def _read_yaml(path: pathlib.Path) -> dict[str, Any] | None:
@@ -170,7 +165,7 @@ def _read_charm_metadata(charm_root: pathlib.Path) -> dict[str, Any]:
     """Read charm metadata from disk without importing the charm.
 
     Prefers ``metadata.yaml`` but falls back to the metadata embedded in a
-    ``charmcraft.yaml`` (Juju's newer single-file format).
+    ``charmcraft.yaml``.
 
     Raises:
         RuntimeError: if neither file is found or neither contains a ``name``
@@ -188,9 +183,7 @@ def _read_charm_metadata(charm_root: pathlib.Path) -> dict[str, Any]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Worker dispatch (spawn-per-event, step-1 mode)
-# ---------------------------------------------------------------------------
+# Worker dispatch (spawn-per-event)
 
 
 def _dispatch(
@@ -205,10 +198,6 @@ def _dispatch(
     state_in: State,
 ) -> State:
     """Serialise a charm event request, spawn the worker, and return the output State.
-
-    This is the *spawn-per-event* path (step 1 of the incremental plan).  A
-    persistent-worker mode (step 3) will be added later behind the same
-    :class:`IsolatedEnv` interface.
 
     The event and state cross the process boundary via JSON files in a
     short-lived temporary directory.  Both the parent and worker must therefore
@@ -297,9 +286,7 @@ def _child_environ() -> dict[str, str]:
     return child
 
 
-# ---------------------------------------------------------------------------
 # IsolatedContext — the public Context-like entry point
-# ---------------------------------------------------------------------------
 
 
 class IsolatedContext:

@@ -1,17 +1,14 @@
-# Copyright 2025 Canonical Ltd.
+# Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
 """Tests for ops.testing.IsolatedContext and ops.testing.IsolatedEnv.
-
-These tests cover the §7 step-1 primitive from the Saddle incremental plan:
-running *one* charm in an isolated subprocess from a Scenario-style test,
-without the full multi-charm Model / convergence loop.
 
 Test structure
 --------------
 ``test_in_process_collision_is_real``
     Sanity check: the two ``confdep`` versions really cannot coexist in one
     interpreter.  This is the problem statement, demonstrated concretely.
+    It also verifies that the following tests are actually solving a problem.
 
 ``test_isolated_context_runs_single_charm_*``
     Single-charm isolation: alpha charm with confdep v1, beta charm with confdep
@@ -56,9 +53,7 @@ HERE = pathlib.Path(__file__).parent
 CHARMS = HERE / 'charms'
 DEPS = HERE / 'deps'
 
-# ---------------------------------------------------------------------------
 # Problem statement (sanity check)
-# ---------------------------------------------------------------------------
 
 
 def test_in_process_collision_is_real():
@@ -90,9 +85,7 @@ def test_in_process_collision_is_real():
         sys.modules.pop('confdep', None)
 
 
-# ---------------------------------------------------------------------------
 # Single-charm isolation via extra_sys_path
-# ---------------------------------------------------------------------------
 
 
 class TestIsolatedContextExtraSysPath:
@@ -177,9 +170,7 @@ class TestIsolatedContextExtraSysPath:
         assert state_out2.unit_status.message == state_out1.unit_status.message
 
 
-# ---------------------------------------------------------------------------
 # Full venv isolation (opt-in)
-# ---------------------------------------------------------------------------
 
 
 _VENV_TEST_MARKER = pytest.mark.skipif(
@@ -249,9 +240,7 @@ class TestVenvIsolation:
         assert 'confdep=2.0' in beta_out.unit_status.message
 
 
-# ---------------------------------------------------------------------------
 # Error propagation
-# ---------------------------------------------------------------------------
 
 
 class TestIsolationError:
@@ -287,9 +276,7 @@ class TestIsolationError:
             IsolatedContext(charm_source='/totally/does/not/exist')
 
 
-# ---------------------------------------------------------------------------
 # IsolatedEnv unit tests
-# ---------------------------------------------------------------------------
 
 
 class TestIsolatedEnv:
@@ -324,9 +311,7 @@ class TestIsolatedEnv:
         assert env.extra_sys_path == ('/foo', '/bar')
 
 
-# ---------------------------------------------------------------------------
 # Metadata resolution
-# ---------------------------------------------------------------------------
 
 
 class TestMetadataResolution:
@@ -366,8 +351,6 @@ class TestMetadataResolution:
     def test_nonexistent_metadata_raises_runtime_error(self):
         """_read_charm_metadata raises RuntimeError if no metadata is found."""
         # Create a charm directory with no metadata files.
-        import tempfile
-
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
             (tmp_path / 'src').mkdir()

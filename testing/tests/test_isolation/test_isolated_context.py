@@ -348,11 +348,9 @@ class TestMetadataResolution:
         )
         assert ctx._meta['name'] == 'override'
 
-    def test_nonexistent_metadata_raises_runtime_error(self):
+    def test_nonexistent_metadata_raises_runtime_error(self, tmp_path: pathlib.Path):
         """_read_charm_metadata raises RuntimeError if no metadata is found."""
         # Create a charm directory with no metadata files.
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = pathlib.Path(tmp)
-            (tmp_path / 'src').mkdir()
-            with pytest.raises(RuntimeError, match='metadata'):
-                _read_charm_metadata(tmp_path)
+        (tmp_path / 'src').mkdir()
+        with pytest.raises(RuntimeError, match='metadata'):
+            _read_charm_metadata(tmp_path)

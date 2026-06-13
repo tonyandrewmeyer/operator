@@ -1,0 +1,6 @@
+name: iso-bench-1
+summary: Benchmark charm 1 for persistent-worker isolation benchmarking.
+description: |
+  Synthetic charm used by the Saddle step-3 isolation benchmark. It performs a
+  modest, representative reconcile (read config, set workload version, set unit
+  status) on each of several lifecycle events.

@@ -10,7 +10,6 @@ import json
 import pathlib
 
 import pytest
-
 from scenario._state_serde import (
     STATE_SCHEMA_VERSION,
     StateSchemaVersionError,

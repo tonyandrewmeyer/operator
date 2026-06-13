@@ -156,9 +156,7 @@ def _encode(obj: Any, path: str = 'state') -> Any:
     if isinstance(obj, enum.Enum):
         cls_name = type(obj).__name__
         if cls_name not in _PEBBLE_ENUM_TYPES:
-            raise TypeError(
-                f'Unrecognised enum type {type(obj).__qualname__!r} at path {path!r}.'
-            )
+            raise TypeError(f'Unrecognised enum type {type(obj).__qualname__!r} at path {path!r}.')
         return {_T: 'enum', 'cls': cls_name, 'name': obj.name}
 
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
@@ -207,9 +205,7 @@ def _encode(obj: Any, path: str = 'state') -> Any:
             }
         return {str(k): _encode(v, f'{path}.{k}') for k, v in obj.items()}
 
-    raise TypeError(
-        f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}.'
-    )
+    raise TypeError(f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}.')
 
 
 def encode_state(state: _state.State) -> str:

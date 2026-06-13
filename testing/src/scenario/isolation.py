@@ -11,8 +11,8 @@ dependency set conflicts with the test process's packages.
 
 The isolation mechanism is a subprocess + per-charm interpreter:
 
-* **Each charm event is dispatched to a separate process** whose Python
-  interpreter is selected per charm (e.g. a per-charm venv's ``bin/python``).
+* **Each charm runs in a separate process** whose Python interpreter is selected
+  per charm (e.g. a per-charm venv's ``bin/python``).
 * **The parent test process never imports the charm.**  It reads only the
   charm's metadata (``metadata.yaml`` / ``charmcraft.yaml``) and serialises the
   :class:`~ops.testing.State` and event across the process boundary.
@@ -23,13 +23,32 @@ Subinterpreters are explicitly *not* used — they do not solve C-extension bina
 conflicts and cost the same serialisation overhead.  See §4 of the spec for the
 full rationale.
 
+Persistent vs spawn-per-event
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+By default the worker is **persistent**: one long-lived process per
+:class:`IsolatedEnv`, spawned lazily on the first dispatch and reused for every
+subsequent event.  The charm module is imported once, so only the first event
+pays interpreter startup and ``import ops`` cost.  The worker is torn down at
+:meth:`IsolatedContext.close` (or when the context is used as a context manager)
+and, optionally, after an idle timeout.
+
+Spawn-per-event remains available as an explicit **debug mode**
+(``spawn_per_event=True``): a fresh process per event, so there is no shared
+interpreter state between events and it is trivial to attach a debugger.  It is
+much slower and is intended only for debugging.
+
+A worker *crash* (the process dies without producing a response) surfaces as an
+:class:`IsolationError`; the harness never silently re-spawns a crashed worker
+mid-test — create a new :class:`IsolatedContext` to continue.
+
 Serialisation
 ~~~~~~~~~~~~~
-The event and state cross the process boundary as **JSON** files in a temporary
-directory.  The wire format is a typed envelope produced by
-:mod:`scenario._isolated_serde` that round-trips frozen dataclasses,
-``set``/``frozenset``/``tuple``, ``datetime``, ``pathlib.Path``, the
-``_EntityStatus`` family, and ``pebble.Layer``.
+The event and state cross the process boundary as **JSON**.  The wire format is
+the typed, schema-versioned codec in :mod:`scenario._isolated_serde` (which
+delegates State to the canonical :mod:`scenario._state_serde`); it round-trips
+frozen dataclasses, ``set``/``frozenset``/``tuple``, ``datetime``,
+``pathlib.Path``, the ``_EntityStatus`` family, pebble enums, ``bytes``, and
+``pebble.Layer``.
 
 The parent and the per-charm worker must have **the same** ``ops`` /
 ``ops.testing`` version installed (the worker reconstructs dataclasses by name,
@@ -51,18 +70,22 @@ Typical usage
     )
     state_out = ctx.run(ctx.on.install(), testing.State())
     assert state_out.unit_status == testing.ActiveStatus('ready')
+    ctx.close()
 
 For fast offline tests, ``extra_sys_path`` lets you inject a pre-built
 dependency directory without a full venv::
 
-    ctx = testing.IsolatedContext(
+    with testing.IsolatedContext(
         charm_source=pathlib.Path('./charms/myapp'),
         extra_sys_path=('./deps/mylib_v2',),
-    )
+    ) as ctx:
+        state_out = ctx.run(ctx.on.start(), testing.State())
 """
 
 from __future__ import annotations
 
+import collections
+import contextlib
 import dataclasses
 import json
 import os
@@ -70,11 +93,12 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Any
 
 import yaml
 
-from . import _isolated_serde
+from . import _isolated_serde, _worker_protocol
 from .context import _DEFAULT_JUJU_VERSION, CharmEvents
 from .state import State, _Event
 
@@ -143,8 +167,9 @@ class IsolationError(RuntimeError):
     """Raised when a charm event fails inside the isolated worker subprocess.
 
     This wraps any exception raised by the worker — either an uncaught charm
-    exception or a worker-infrastructure error (for example, the charm module could not
-    be imported, or the worker process crashed without producing a response).
+    exception or a worker-infrastructure error (for example, the charm module
+    could not be imported, or the worker process crashed without producing a
+    response).
 
     The original traceback from the worker is included in the message.
     """
@@ -183,43 +208,38 @@ def _read_charm_metadata(charm_root: pathlib.Path) -> dict[str, Any]:
     )
 
 
-# Worker dispatch (spawn-per-event)
+def _child_environ() -> dict[str, str]:
+    """Build the environment for the worker subprocess.
+
+    Prepends the parent's ``scenario`` package source directory to
+    ``PYTHONPATH`` so the worker uses the same ``ops.testing`` (scenario)
+    classes as the parent, ensuring wire-format compatibility.
+    """
+    # The scenario package lives at testing/src/scenario/; the importable root
+    # is two levels up: testing/src/.
+    scenario_src = str(pathlib.Path(__file__).resolve().parent.parent)
+
+    child = dict(os.environ)
+    existing = child.get('PYTHONPATH', '')
+    parts = [scenario_src] + ([existing] if existing else [])
+    child['PYTHONPATH'] = os.pathsep.join(parts)
+    return child
 
 
-def _dispatch(
-    env: IsolatedEnv,
-    *,
-    meta: dict[str, Any],
-    config: dict[str, Any] | None,
-    actions: dict[str, Any] | None,
-    app_name: str,
-    unit_id: int,
-    event: _Event,
-    state_in: State,
-) -> State:
-    """Serialise a charm event request, spawn the worker, and return the output State.
+# Spawn-per-event dispatch (debug mode)
 
-    The event and state cross the process boundary via JSON files in a
-    short-lived temporary directory.  Both the parent and worker must therefore
-    use the same ``ops`` version (the wire format reconstructs dataclasses by
-    name).
+
+def _dispatch_spawn(env: IsolatedEnv, child_env: dict[str, str], request: dict[str, Any]) -> State:
+    """Run a single charm event in a fresh subprocess and return the output State.
+
+    This is the spawn-per-event debug transport: the request and response cross
+    via JSON files in a short-lived temporary directory and the process is torn
+    down after the single event.
 
     Raises:
         IsolationError: if the worker exits without producing a response, or if
             the charm raised an uncaught exception inside the worker.
     """
-    request = {
-        'charm_source': str(env.charm_source),
-        'extra_sys_path': list(env.extra_sys_path),
-        'meta': meta,
-        'config': config,
-        'actions': actions,
-        'app_name': app_name,
-        'unit_id': unit_id,
-        'event': _isolated_serde.encode_event(event),
-        'state_in': _isolated_serde.encode_state(state_in),
-    }
-
     with tempfile.TemporaryDirectory(prefix='ops-iso-') as tmp:
         req_file = pathlib.Path(tmp) / 'request.json'
         resp_file = pathlib.Path(tmp) / 'response.json'
@@ -234,20 +254,7 @@ def _dispatch(
             str(resp_file),
         ]
 
-        # Make the ops.testing package importable inside the worker regardless
-        # of the worker interpreter's site-packages.  The worker venv may not
-        # have ops installed in editable/dev mode, but it will have the release
-        # package; the PYTHONPATH override ensures the parent's testing src is
-        # available so the worker imports the same scenario.* dataclasses (the
-        # wire format references them by name).
-        child_env = _child_environ()
-
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            env=child_env,
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env)
 
         if not resp_file.exists():
             raise IsolationError(
@@ -261,29 +268,215 @@ def _dispatch(
         response = json.loads(resp_file.read_text())
 
     if 'error' in response:
-        raise IsolationError(
-            f'Isolated charm run failed for {app_name}/{unit_id}:\n{response["error"]}'
-        )
+        raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
 
     return _isolated_serde.decode_state(response['state_out'])
 
 
-def _child_environ() -> dict[str, str]:
-    """Build the environment for the worker subprocess.
+# Persistent worker (default transport)
 
-    Prepends the parent's ``scenario`` package source directory to
-    ``PYTHONPATH`` so the worker uses the same ``ops.testing`` (scenario)
-    classes as the parent, ensuring pickle compatibility.
+
+class _PersistentWorker:
+    """A long-lived worker subprocess for one :class:`IsolatedEnv`.
+
+    The process is spawned lazily on the first :meth:`dispatch` and reused for
+    every subsequent event.  Communication is a length-prefixed framed JSON
+    protocol over the worker's stdin/stdout (see
+    :mod:`scenario._worker_protocol`).
+
+    Thread-safety: a reentrant lock serialises dispatches and the idle-timeout
+    teardown, so the idle timer (which fires on a background thread) can never
+    race a dispatch.
     """
-    # The scenario package lives at testing/src/scenario/; the importable root
-    # is two levels up: testing/src/.
-    scenario_src = str(pathlib.Path(__file__).resolve().parent.parent)
 
-    child = dict(os.environ)
-    existing = child.get('PYTHONPATH', '')
-    parts = [scenario_src] + ([existing] if existing else [])
-    child['PYTHONPATH'] = os.pathsep.join(parts)
-    return child
+    def __init__(
+        self,
+        env: IsolatedEnv,
+        child_env: dict[str, str],
+        idle_timeout: float | None = None,
+    ):
+        self._env = env
+        self._child_env = child_env
+        self._idle_timeout = idle_timeout
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._lock = threading.RLock()
+        self._timer: threading.Timer | None = None
+        self._timer_generation = 0
+        self._crashed = False
+        self._stderr_tail: collections.deque[str] = collections.deque(maxlen=200)
+        self._stderr_thread: threading.Thread | None = None
+
+    # Spawn / drain
+
+    def _spawn(self) -> None:
+        cmd = [self._env.python_executable, '-m', 'scenario._isolated_worker', '--serve']
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self._child_env,
+        )
+        # Drain stderr on a background thread so the worker can never deadlock on
+        # a full stderr pipe, and so we have a tail to report if it crashes.
+        self._stderr_tail.clear()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(self._proc.stderr,),
+            daemon=True,
+        )
+        self._stderr_thread.start()
+
+    def _drain_stderr(self, stream: Any) -> None:
+        try:
+            for line in iter(stream.readline, b''):
+                self._stderr_tail.append(line.decode('utf8', 'replace'))
+        except (ValueError, OSError):
+            pass  # Stream closed underneath us; nothing more to drain.
+
+    # Idle timer
+
+    def _arm_timer(self) -> None:
+        if self._idle_timeout is None:
+            return
+        self._timer_generation += 1
+        generation = self._timer_generation
+        self._timer = threading.Timer(self._idle_timeout, self._on_idle, args=(generation,))
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _cancel_timer(self) -> None:
+        # Bump the generation so any already-fired-but-waiting timer is ignored.
+        self._timer_generation += 1
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _on_idle(self, generation: int) -> None:
+        with self._lock:
+            if generation != self._timer_generation:
+                return  # A newer dispatch superseded this timer; do nothing.
+            # Idle teardown is a *clean* shutdown: the next dispatch may re-spawn.
+            self.close()
+
+    # Crash handling
+
+    @staticmethod
+    def _close_pipes(proc: subprocess.Popen[bytes]) -> None:
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    def _mark_crashed(self) -> None:
+        self._crashed = True
+        self._cancel_timer()
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=1.0)
+            self._stderr_thread = None
+        if proc is not None:
+            self._close_pipes(proc)
+
+    def _crash_message(self) -> str:
+        returncode = self._proc.poll() if self._proc is not None else None
+        tail = ''.join(self._stderr_tail).strip()
+        return (
+            'The isolated worker process crashed without producing a response.\n'
+            f'Return code: {returncode}\n'
+            f'Worker stderr (tail):\n{tail}'
+        )
+
+    # Dispatch
+
+    def dispatch(self, request: dict[str, Any]) -> State:
+        """Send one event request to the worker and return the output State.
+
+        Raises:
+            IsolationError: if the worker has crashed (it is not re-spawned), if
+                it crashes during this dispatch, or if the charm raised an
+                uncaught exception (the worker survives the latter and stays
+                reusable).
+        """
+        with self._lock:
+            if self._crashed:
+                raise IsolationError(
+                    'The isolated worker for this charm crashed earlier in the '
+                    'test and is not re-spawned mid-test. Create a new '
+                    'IsolatedContext to run further events.'
+                )
+
+            self._cancel_timer()
+
+            if self._proc is not None and self._proc.poll() is not None:
+                # Started earlier but has since exited unexpectedly: a crash.
+                self._mark_crashed()
+                raise IsolationError(self._crash_message())
+
+            if self._proc is None:
+                self._spawn()  # Lazy spawn on first dispatch (or after idle teardown).
+
+            assert self._proc is not None
+            assert self._proc.stdin is not None and self._proc.stdout is not None
+            payload = json.dumps({'cmd': 'run', **request}).encode('utf8')
+            try:
+                _worker_protocol.write_frame(self._proc.stdin, payload)
+                raw = _worker_protocol.read_frame(self._proc.stdout)
+            except (BrokenPipeError, OSError) as exc:
+                self._mark_crashed()
+                raise IsolationError(self._crash_message()) from exc
+
+            if raw is None:
+                self._mark_crashed()
+                raise IsolationError(self._crash_message())
+
+            response = json.loads(raw.decode('utf8'))
+
+            if 'error' in response:
+                # A clean charm error: the worker caught it and is still alive,
+                # so it stays reusable. Re-arm the idle timer and raise.
+                self._arm_timer()
+                raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
+
+            self._arm_timer()
+            return _isolated_serde.decode_state(response['state_out'])
+
+    def close(self) -> None:
+        """Shut the worker down cleanly (idempotent)."""
+        with self._lock:
+            self._cancel_timer()
+            proc = self._proc
+            self._proc = None
+            if proc is None:
+                return
+            if proc.poll() is None and proc.stdin is not None:
+                try:
+                    _worker_protocol.write_frame(
+                        proc.stdin, json.dumps({'cmd': 'shutdown'}).encode('utf8')
+                    )
+                    proc.stdin.close()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=1.0)
+                self._stderr_thread = None
+            self._close_pipes(proc)
 
 
 # IsolatedContext — the public Context-like entry point
@@ -298,13 +491,16 @@ class IsolatedContext:
 
     1. Reads the charm's metadata from disk (without importing the charm).
     2. Serialises the event and input :class:`~ops.testing.State`.
-    3. Spawns (or sends to) a worker subprocess running the charm's own
+    3. Sends them to a worker subprocess running the charm's own
        interpreter / venv.
     4. Returns the output :class:`~ops.testing.State`.
 
     The charm class is **never imported into the test process**, making it
     safe to test charms whose dependencies would otherwise conflict with the
     test runner's installed packages.
+
+    By default a single persistent worker is reused across events; call
+    :meth:`close` (or use the context as a context manager) to tear it down.
 
     Args:
         charm_source: Path to the charm repository root (must contain
@@ -320,12 +516,19 @@ class IsolatedContext:
             ``charm_source/charmcraft.yaml``).
         config: Charm config dict (``config.yaml`` format).  If omitted, read
             from ``charm_source/config.yaml``.
-        actions: Charm actions dict (``actions.yaml`` format).  If omitted,
-            read from ``charm_source/actions.yaml``.
+        actions: Charm actions dict (``actions.yaml`` format).  If omitted, read
+            from ``charm_source/actions.yaml``.
         app_name: Application name as seen by the charm.  Defaults to the
             charm name from the metadata.
         unit_id: Unit ID.  Defaults to ``0``.
         juju_version: Juju agent version to simulate.
+        spawn_per_event: If ``True``, use the spawn-per-event **debug** transport
+            — a fresh process per event, with no shared interpreter state and an
+            easy place to attach a debugger.  Much slower; defaults to ``False``
+            (the persistent worker).
+        idle_timeout: If set, tear the persistent worker down after this many
+            seconds of inactivity.  A later event lazily re-spawns a fresh
+            worker.  Ignored in ``spawn_per_event`` mode.
 
     Invariant:
         The per-charm venv must have the **same** ``ops`` version installed as
@@ -343,14 +546,15 @@ class IsolatedContext:
         )
         state_out = ctx.run(ctx.on.install(), testing.State())
         assert state_out.unit_status == testing.ActiveStatus('ready')
+        ctx.close()
 
-    Example — ``extra_sys_path`` for fast, offline tests::
+    Example — ``extra_sys_path`` for fast, offline tests, as a context manager::
 
-        ctx = testing.IsolatedContext(
+        with testing.IsolatedContext(
             charm_source=pathlib.Path('./charms/alpha'),
             extra_sys_path=('./deps/mylib_v1',),
-        )
-        state_out = ctx.run(ctx.on.start(), testing.State())
+        ) as ctx:
+            state_out = ctx.run(ctx.on.start(), testing.State())
     """
 
     #: Use ``ctx.on.<event>(...)`` to construct events for :meth:`run`.
@@ -368,6 +572,8 @@ class IsolatedContext:
         app_name: str | None = None,
         unit_id: int = 0,
         juju_version: str = _DEFAULT_JUJU_VERSION,
+        spawn_per_event: bool = False,
+        idle_timeout: float | None = None,
     ):
         charm_root = pathlib.Path(charm_source)
         if not charm_root.exists():
@@ -387,17 +593,36 @@ class IsolatedContext:
         self._unit_id = unit_id
         self._juju_version = juju_version
 
+        self._spawn_per_event = spawn_per_event
+        self._idle_timeout = idle_timeout
+        self._child_env = _child_environ()
+        self._worker: _PersistentWorker | None = None
+
     @property
     def env(self) -> IsolatedEnv:
         """The :class:`IsolatedEnv` that describes this context's execution environment."""
         return self._env
+
+    def _build_request(self, event: _Event, state: State) -> dict[str, Any]:
+        return {
+            'charm_source': str(self._env.charm_source),
+            'extra_sys_path': list(self._env.extra_sys_path),
+            'meta': self._meta,
+            'config': self._config,
+            'actions': self._actions,
+            'app_name': self._app_name,
+            'unit_id': self._unit_id,
+            'event': _isolated_serde.encode_event(event),
+            'state_in': _isolated_serde.encode_state(state),
+        }
 
     def run(self, event: _Event, state: State) -> State:
         """Trigger a charm execution with an event and a State.
 
         Serialises ``event`` and ``state``, dispatches them to a worker
         subprocess running in :attr:`env`'s interpreter, and returns the output
-        :class:`~ops.testing.State`.
+        :class:`~ops.testing.State`.  In the default persistent mode the worker
+        is spawned on the first call and reused thereafter.
 
         .. note::
             Unlike :class:`~ops.testing.Context`, :class:`IsolatedContext` does
@@ -423,13 +648,33 @@ class IsolatedContext:
             state_out = ctx.run(ctx.on.install(), State())
             assert state_out.unit_status == ActiveStatus('ready')
         """
-        return _dispatch(
-            self._env,
-            meta=self._meta,
-            config=self._config,
-            actions=self._actions,
-            app_name=self._app_name,
-            unit_id=self._unit_id,
-            event=event,
-            state_in=state,
-        )
+        request = self._build_request(event, state)
+
+        if self._spawn_per_event:
+            return _dispatch_spawn(self._env, self._child_env, request)
+
+        if self._worker is None:
+            self._worker = _PersistentWorker(self._env, self._child_env, self._idle_timeout)
+        return self._worker.dispatch(request)
+
+    def close(self) -> None:
+        """Tear down the persistent worker, if one is running.
+
+        Safe to call more than once and a no-op in ``spawn_per_event`` mode (no
+        persistent worker is held there).
+        """
+        if self._worker is not None:
+            self._worker.close()
+            self._worker = None
+
+    def __enter__(self) -> IsolatedContext:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Best-effort cleanup if the caller forgot to close(); never raise during
+        # interpreter shutdown.
+        with contextlib.suppress(Exception):
+            self.close()

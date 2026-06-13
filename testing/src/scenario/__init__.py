@@ -68,6 +68,7 @@ from __future__ import annotations
 
 from ops._private.harness import ActionFailed  # For backwards compatibility.
 
+from ._state_serde import StateSchemaVersionError, decode_state, encode_state
 from .context import CharmEvents, Context, Manager
 from .errors import StateValidationError  # For backwards compatibility.
 from .isolation import IsolatedContext, IsolatedEnv, IsolationError
@@ -149,6 +150,7 @@ __all__ = [
     'Resource',
     'Secret',
     'State',
+    'StateSchemaVersionError',
     'StateValidationError',
     'Storage',
     'StoredState',
@@ -158,5 +160,7 @@ __all__ = [
     'UnitID',
     'UnknownStatus',
     'WaitingStatus',
+    'decode_state',
+    'encode_state',
     'layer_from_rockcraft',
 ]

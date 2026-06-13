@@ -9,9 +9,9 @@ conflicting dependency versions can coexist in one test run when each runs in
 its own isolated subprocess.
 """
 
-VERSION = '1.0'
-LEGACY_NAME = 'alpha-only-name'
+VERSION = '1.0'  # noqa: RUF067
+LEGACY_NAME = 'alpha-only-name'  # noqa: RUF067
 
 
-def compute() -> int:
+def compute() -> int:  # noqa: RUF067
     return 1

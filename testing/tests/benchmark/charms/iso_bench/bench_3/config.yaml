@@ -1,0 +1,5 @@
+options:
+  log-level:
+    type: string
+    default: info
+    description: Logging verbosity for the workload.

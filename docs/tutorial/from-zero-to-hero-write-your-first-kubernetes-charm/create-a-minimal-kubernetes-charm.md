@@ -216,6 +216,12 @@ The first time you run `charmcraft pack`, Charmcraft takes several minutes to pa
 
 If you run into inexplicable issues when running `charmcraft pack`, this may be because some of the cached information is out of date. Run `charmcraft clean` to fix this.
 
+```{tip}
+
+**If packing fails with `OSError: [Errno 40] Too many levels of symbolic links`:** this is a known interaction between Charmcraft's non-destructive packing mode and virtual-environment directories left over from `uv` or `tox`. Delete `.venv` and `.tox` from your project directory, then run `charmcraft pack` again. If the error persists, please add a comment with your environment details to [canonical/charmcraft#2661](https://github.com/canonical/charmcraft/issues/2661) to help the Charmcraft team narrow down the cause.
+
+```
+
 ```{important}
 
 **Did you know?** A `.charm` file is really just a zip file of your charm files and code dependencies that makes it more convenient to share, publish, and retrieve your charm contents.

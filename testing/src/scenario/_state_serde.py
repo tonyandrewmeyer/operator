@@ -162,6 +162,10 @@ def _encode(obj: Any, path: str = 'state') -> Any:
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         encoded_fields = {}
         for f in dataclasses.fields(obj):
+            # init=False fields are derived in __post_init__ from other fields
+            # and can't be passed to cls(**fields) on the decode side; skip them.
+            if not f.init:
+                continue
             val = getattr(obj, f.name)
             encoded_fields[f.name] = _encode(val, f'{path}.{f.name}')
         return {_T: 'dc', 'cls': type(obj).__name__, 'f': encoded_fields}

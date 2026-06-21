@@ -66,6 +66,17 @@ def test_base():
     assert_consistent(state, event, spec)
 
 
+def test_charm_spec_is_covariant():
+    # _CharmSpec[Subclass] must be assignable where _CharmSpec[CharmBase] is
+    # expected, so charm libraries can pass a spec for their own CharmBase
+    # subclass into a callable typed against the base class. See #2242.
+    def takes_base_spec(spec: _CharmSpec[ops.CharmBase]) -> type[ops.CharmBase]:
+        return spec.charm_type
+
+    spec_specific: _CharmSpec[MyCharm] = _CharmSpec(MyCharm, {})
+    assert takes_base_spec(spec_specific) is MyCharm
+
+
 def test_workload_event_without_container():
     assert_inconsistent(
         State(),
@@ -219,17 +230,19 @@ def test_evt_bad_container_name():
     ],
 )
 def test_checkinfo_matches_layer(check: CheckInfo, consistent: bool):
-    layer = ops.pebble.Layer({
-        'checks': {
-            'chk1': {
-                'override': 'replace',
-                'level': 'ready',
-                'startup': 'disabled',
-                'threshold': 42,
-                'http': {'url': 'http://localhost:5000/version'},
+    layer = ops.pebble.Layer(
+        {
+            'checks': {
+                'chk1': {
+                    'override': 'replace',
+                    'level': 'ready',
+                    'startup': 'disabled',
+                    'threshold': 42,
+                    'http': {'url': 'http://localhost:5000/version'},
+                }
             }
         }
-    })
+    )
     state = State(containers={Container('foo', check_infos={check}, layers={'base': layer})})
     asserter = assert_consistent if consistent else assert_inconsistent
     asserter(
@@ -243,9 +256,9 @@ def test_checkinfo_matches_layer_with_defaults():
     # Pebble fills in default values for attributes the plan omits, so a
     # CheckInfo reporting the Pebble defaults must be considered consistent
     # with a layer that does not specify them. See #2566.
-    layer = ops.pebble.Layer({
-        'checks': {'chk1': {'override': 'replace', 'exec': {'command': 'echo'}}}
-    })
+    layer = ops.pebble.Layer(
+        {'checks': {'chk1': {'override': 'replace', 'exec': {'command': 'echo'}}}}
+    )
     check = CheckInfo(
         'chk1',
         level=ops.pebble.CheckLevel.UNSET,

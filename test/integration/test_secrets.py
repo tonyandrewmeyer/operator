@@ -22,7 +22,7 @@ import jubilant
 import pytest
 
 from test.charms.test_secrets.src.charm import Result
-from test.integration.conftest import JUJU4_K8S_SECRET_RBAC_BUG, _xfail_on_caas_juju4
+from test.integration.conftest import JUJU4_K8S_SECRET_RBAC_BUG, _xfail_on_k8s_juju4
 
 
 def test_setup(build_secrets_charm: Callable[[], str], juju: jubilant.Juju):
@@ -32,7 +32,7 @@ def test_setup(build_secrets_charm: Callable[[], str], juju: jubilant.Juju):
 
 
 def test_add_secret(juju: jubilant.Juju, cleanup: None, leader: str):
-    _xfail_on_caas_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
+    _xfail_on_k8s_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
     rv = juju.run(leader, 'add-secret')
     result = cast('Result', rv.results)
 
@@ -58,7 +58,7 @@ def test_add_secret(juju: jubilant.Juju, cleanup: None, leader: str):
     ],
 )
 def test_add_with_meta(juju: jubilant.Juju, cleanup: None, leader: str, fields: str):
-    _xfail_on_caas_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
+    _xfail_on_k8s_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
     rv = juju.run(leader, 'add-with-meta', params={'fields': fields})
     result = cast('Result', rv.results)
 
@@ -118,7 +118,7 @@ def test_set_secret(
     else:
         params = {'flow': flow, 'secretlabel': 'thelabel'}
 
-    _xfail_on_caas_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
+    _xfail_on_k8s_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
     rv = juju.run(leader, 'set-secret-flow', params=params)
     result = cast('Result', rv.results)
 
@@ -169,7 +169,7 @@ def cleanup(juju: jubilant.Juju, leader: str) -> None:
 @pytest.fixture
 def fresh_secret(juju: jubilant.Juju, leader: str, cleanup: None) -> str:
     """Remove all old secrets (via cleanup) and add a new secret owned by the test app."""
-    _xfail_on_caas_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
+    _xfail_on_k8s_juju4(juju, JUJU4_K8S_SECRET_RBAC_BUG)
     juju.exec('secret-add --label thelabel some=content', unit=leader)
     secrets = juju.secrets()
     assert secrets

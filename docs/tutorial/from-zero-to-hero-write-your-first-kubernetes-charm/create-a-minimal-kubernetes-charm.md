@@ -83,6 +83,17 @@ resources:
     upstream-source: ghcr.io/canonical/api_demo_server:1.0.4
 ```
 
+Finally, follow the principle of least privilege by running the charm dispatch
+process as a non-root user. In `charmcraft.yaml`, add:
+
+```yaml
+charm-user: non-root
+```
+
+Switch to `sudoer` (passwordless `sudo` available) or `root` only if the charm
+needs elevated permissions. See the {external+charmcraft:ref}`charm-user key
+in charmcraft.yaml <charmcraft-yaml-key-charm-user>` for details.
+
 ### Define the charm class
 
 We'll now write the charm code that handles events from Juju. Charmcraft created `src/charm.py` as the location for this logic.

@@ -16,6 +16,12 @@ assumes:
   - juju >= 3.6
   - k8s-api
 
+# Run the charm dispatch process as a non-root user in the charm container.
+# Defaulting to reduced privileges follows the principle of least privilege;
+# switch to "sudoer" or "root" only if the charm needs elevated permissions.
+# See https://documentation.ubuntu.com/charmcraft/stable/reference/files/charmcraft-yaml-file/#charm-user
+charm-user: non-root
+
 parts:
   charm:
     plugin: uv

@@ -58,7 +58,7 @@ Since the version isn't set by the charm code itself, you may want to test that
 the version is correctly set with an integration test, and don't need to write
 a unit test.
 
-> See first: {ref}`write-integration-tests-for-a-charm`
+See first: {ref}`write-integration-tests-for-a-charm`
 
 To verify that setting the charm version works correctly in an integration test,
 in your `tests/integration/test_charm.py` file, add a new test:

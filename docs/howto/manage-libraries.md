@@ -1,7 +1,7 @@
 (manage-libraries)=
 # How to manage libraries
 
-> See first: {external+charmcraft:ref}`Charmcraft | Manage libraries <manage-libraries>`
+See first: {external+charmcraft:ref}`Charmcraft | Manage libraries <manage-libraries>`
 
 ## Use a library
 
@@ -232,7 +232,7 @@ populate its local data with a request, and the providing charm will use that to
 provide a suitable response. In more complex cases, this conversation might have
 multiple stages.
 
-> See more: {ref}`manage-interfaces`
+See more: {ref}`manage-interfaces`
 
 If the library is implementing an existing interface, find the interface documentation by following links from the Integrations tab on Charmhub, or by navigating to `https://charmhub.io/integrations/{integration-name}`.
 Alternatively, the interface documentation can be found in the
@@ -350,4 +350,4 @@ def _publish_provider(
     relation.save(data, self._charm.app)
 ```
 
-> See more: [](ops.Relation.save)
+See more: [](ops.Relation.save)

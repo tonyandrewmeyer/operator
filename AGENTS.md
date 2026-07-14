@@ -21,8 +21,7 @@ This is a mature, production framework used by thousands of charms. Changes requ
 | `ops/pebble.py` | Pebble API for container workload management |
 | `ops/__init__.py` | Public API exports |
 | `STYLE.md` | Team Python style guide |
-| `CONTRIBUTING.md` | PR and contribution process |
-| `HACKING.md` | Detailed development setup and workflow |
+| `CONTRIBUTING.md` | Contribution process and detailed development setup and workflow |
 
 ## Important Notes
 

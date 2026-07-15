@@ -283,6 +283,17 @@ def test_config_changed_invalid_port(mock_version):
 
 Run `tox -e unit` to check that all tests pass.
 
+## Try it: add an integration test
+
+To exercise the new `server-port` option end-to-end, add an integration test that
+changes the config with `juju.config()` and waits for the charm to settle. The
+example charm for this chapter includes such a test, along with one that
+verifies the charm blocks when the port is set to 22. Study the tests, then try
+writing your own.
+
+- [Example integration tests for this chapter](https://github.com/canonical/operator/blob/main/examples/k8s-2-configurable/tests/integration/test_charm.py)
+- {ref}`write-integration-tests-for-a-charm-write-your-tests`
+
 ## Review the final code
 
 For the full code, see [our example charm for this chapter](https://github.com/canonical/operator/tree/main/examples/k8s-2-configurable).

@@ -217,6 +217,16 @@ def test_get_db_info_action_show_password():
 
 Run `tox -e unit` to check that all tests pass.
 
+## Try it: add an integration test
+
+To exercise `get-db-info` end-to-end, add an integration test that runs the
+action against the deployed charm and checks the returned values. The example
+charm for this chapter includes tests that cover both the default output and
+the `show-password=true` case. Study the tests, then try writing your own.
+
+- [Example integration tests for this chapter](https://github.com/canonical/operator/blob/main/examples/k8s-4-action/tests/integration/test_charm.py)
+- {ref}`write-integration-tests-for-a-charm-write-your-tests`
+
 ## Review the final code
 
 For the full code, see [our example charm for this chapter](https://github.com/canonical/operator/tree/main/examples/k8s-4-action).

@@ -61,3 +61,30 @@ def test_database_integration(charm: pathlib.Path, juju: jubilant.Juju):
     juju.deploy("postgresql-k8s", channel="14/stable", trust=True)
     juju.integrate(APP_NAME, "postgresql-k8s")
     juju.wait(jubilant.all_active)
+
+
+# The tests below extend beyond the tutorial scope, but demonstrate how to
+# exercise the `get-db-info` action added in the "Expose operational tasks
+# via actions" chapter from integration tests. See the "How to write
+# integration tests for a charm" guide for background.
+
+
+def test_get_db_info_action(charm: pathlib.Path, juju: jubilant.Juju):
+    """The action returns host/port and, by default, omits credentials."""
+    task = juju.run(f"{APP_NAME}/0", "get-db-info")
+    assert task.success
+    assert task.results.get("db-host")
+    assert task.results.get("db-port")
+    # `show-password` defaults to false, so credentials should not be present.
+    assert "db-username" not in task.results
+    assert "db-password" not in task.results
+
+
+def test_get_db_info_action_show_password(charm: pathlib.Path, juju: jubilant.Juju):
+    """With `show-password=true`, the action returns username and password too."""
+    task = juju.run(f"{APP_NAME}/0", "get-db-info", params={"show-password": True})
+    assert task.success
+    assert task.results.get("db-host")
+    assert task.results.get("db-port")
+    assert task.results.get("db-username")
+    assert task.results.get("db-password")

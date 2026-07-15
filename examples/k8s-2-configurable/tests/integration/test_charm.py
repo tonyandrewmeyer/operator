@@ -45,3 +45,25 @@ def test_workload_version_is_set(charm: pathlib.Path, juju: jubilant.Juju):
     """Verify that the workload version has been set."""
     version = juju.status().apps[APP_NAME].version
     assert version == "1.0.4"  # Hardcoded for simplicity.
+
+
+# The tests below extend beyond the tutorial scope, but demonstrate how to
+# exercise the `server-port` config option added in the "Make your charm
+# configurable" chapter from integration tests. See the "How to write
+# integration tests for a charm" guide for background.
+
+
+def test_configure_server_port(charm: pathlib.Path, juju: jubilant.Juju):
+    """Setting a non-default `server-port` should leave the charm active."""
+    juju.config(APP_NAME, {"server-port": 8080})
+    juju.wait(jubilant.all_active)
+    juju.config(APP_NAME, reset="server-port")
+    juju.wait(jubilant.all_active)
+
+
+def test_reserved_server_port_blocks(charm: pathlib.Path, juju: jubilant.Juju):
+    """The charm rejects port 22 (reserved for SSH) and reports blocked."""
+    juju.config(APP_NAME, {"server-port": 22})
+    juju.wait(jubilant.all_blocked)
+    juju.config(APP_NAME, reset="server-port")
+    juju.wait(jubilant.all_active)

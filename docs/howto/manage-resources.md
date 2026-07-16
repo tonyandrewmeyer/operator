@@ -5,13 +5,9 @@
 
 ## Implement the feature
 
-<!--COMMENT: MOVE TO HOW TO UPLOAD
-Because resources are defined in a charm’s `charmcraft.yaml`, they are intrinsically linked to a charm. As such, there is no need to register them separately in Charmhub. Other charms may have resources with the same name, but this is not a problem; references to resources always contain the charm name and resource name.
--->
+Resources are declared in your charm's `charmcraft.yaml`. To use one in your charm, fetch its on-disk path from the model and read the file as normal.
 
-In your charm's `src/charm.py` file, use `ops` to fetch the path to the resource and then manipulate it as needed.
-
-For example, suppose your `charmcraft.yaml` file contains this simple resource definition:
+For example, suppose your `charmcraft.yaml` contains this resource definition:
 
 ```yaml
 resources:
@@ -21,46 +17,40 @@ resources:
     description: test resource
 ```
 
-In your charm's `src/charm.py` you can now use [`Model.resources.fetch(<resource_name>)`](ops.Resources.fetch) to get the path to the resource, then manipulate it as needed. For example:
+In `src/charm.py`, use [`Model.resources.fetch()`](ops.Resources.fetch) to get the path to the resource, then read it as you would any other file:
 
 ```python
-# ...
 import logging
 import ops
 
-# ...
 logger = logging.getLogger(__name__)
 
 
-def _on_config_changed(self, event):
-    # Get the path to the file resource named 'my-resource'
-    try:
-        resource_path = self.model.resources.fetch('my-resource')
-    except ops.ModelError as e:
-        self.unit.status = ops.BlockedStatus(
-            "Something went wrong when claiming resource 'my-resource; "
-            "run `juju debug-log` for more info'"
-        )
-        # might actually be worth it to just reraise this exception and let the charm error out;
-        # depends on whether we can recover from this.
-        logger.error(e)
-        return
-    except NameError as e:
-        self.unit.status = ops.BlockedStatus(
-            "Resource 'my-resource' not found; did you forget to declare it in charmcraft.yaml?"
-        )
-        logger.error(e)
-        return
+class MyCharm(ops.CharmBase):
+    def _on_config_changed(self, event: ops.ConfigChangedEvent):
+        try:
+            resource_path = self.model.resources.fetch('my-resource')
+        except ops.ModelError:
+            self.unit.status = ops.BlockedStatus(
+                "Couldn't fetch resource 'my-resource'; run `juju debug-log` for more info."
+            )
+            logger.exception("Couldn't fetch resource 'my-resource'.")
+            return
+        except NameError:
+            self.unit.status = ops.BlockedStatus(
+                "Resource 'my-resource' not found; is it declared in charmcraft.yaml?"
+            )
+            logger.exception("Resource 'my-resource' not declared in charmcraft.yaml.")
+            return
 
-    # Open the file and read it
-    with open(resource_path, 'r') as f:
-        content = f.read()
-    # do something
+        with resource_path.open() as f:
+            content = f.read()
+        # Use `content` as needed.
 ```
 
-The [`fetch()`](ops.Resources.fetch) method will raise a [`NameError`](https://docs.python.org/3/library/exceptions.html#NameError) if the resource does not exist, and returns a Python [`Path`](https://docs.python.org/3/library/pathlib.html#pathlib.Path) object to the resource if it does.
+[`fetch()`](ops.Resources.fetch) returns a [`pathlib.Path`](https://docs.python.org/3/library/pathlib.html#pathlib.Path) on success. It raises [`NameError`](https://docs.python.org/3/library/exceptions.html#NameError) if the resource isn't declared in `charmcraft.yaml`, and [`ops.ModelError`](ops.ModelError) if Juju can't provide the resource — for example, when deploying from a local charm file without passing `--resource`.
 
-Note: During development, it may be useful to specify the resource at deploy time to facilitate faster testing without the need to publish a new charm/resource in between minor fixes. In the below snippet, we create a simple file with some text content, and pass it to the Juju controller to use in place of any published `my-resource` resource:
+During development, attach a local file at deploy time to iterate without republishing the charm:
 
 ```text
 echo "TEST" > /tmp/somefile.txt
@@ -72,9 +62,7 @@ juju deploy ./my-charm.charm --resource my-resource=/tmp/somefile.txt
 
 > See first: {ref}`write-unit-tests-for-a-charm`
 
-If your charm requires access to resources, you can make them available to it
-through ``State.resources``. For example, to make a ``foo`` resource that is a
-path to an OCI image available:
+Make resources available to the charm through [`State.resources`](ops.testing.State.resources). Each entry is a [`testing.Resource`](ops.testing.Resource) pointing at a local file that stands in for the real resource content:
 
 ```python
 import pathlib
@@ -82,10 +70,10 @@ import pathlib
 from ops import testing
 
 ctx = testing.Context(
-    MyCharm, meta={'name': 'julie', 'resources': {'foo': {'type': 'oci-image'}}}
+    MyCharm, meta={'name': 'my-charm', 'resources': {'my-resource': {'type': 'file', 'filename': 'somefile.txt'}}}
 )
-resource = testing.Resource(name='foo', path='/path/to/resource.tar')
-with ctx(ctx.on.start(), testing.State(resources={resource})) as mgr:
-    path = mgr.charm.model.resources.fetch('foo')
-    assert path == pathlib.Path('/path/to/resource.tar')
+resource = testing.Resource(name='my-resource', path='/path/to/somefile.txt')
+with ctx(ctx.on.config_changed(), testing.State(resources={resource})) as mgr:
+    path = mgr.charm.model.resources.fetch('my-resource')
+    assert path == pathlib.Path('/path/to/somefile.txt')
 ```

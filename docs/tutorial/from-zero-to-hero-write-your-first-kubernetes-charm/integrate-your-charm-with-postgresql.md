@@ -300,8 +300,13 @@ def _on_collect_status(self, event: ops.CollectStatusEvent) -> None:
     if not self.model.get_relation("database"):
         # We need the user to do 'juju integrate'.
         event.add_status(ops.BlockedStatus("Waiting for database relation"))
-    elif not self.database.fetch_relation_data():
-        # We need the charms to finish integrating.
+    elif not self.fetch_database_relation_data():
+        # The relation exists but the remote hasn't populated the databag
+        # yet (typically because postgresql-k8s is still starting up).
+        # `self.database.fetch_relation_data()` returns `{relation_id: {}}`
+        # in that case, which is truthy, so we go through our own helper
+        # which returns `{}` unless the endpoints/username/password keys
+        # are actually present.
         event.add_status(ops.WaitingStatus("Waiting for database relation"))
     try:
         status = self.container.get_service(self.pebble_service_name)
@@ -464,6 +469,33 @@ def test_no_database_blocked(mock_version):
     state_out = ctx.run(ctx.on.collect_unit_status(), state_in)
 
     assert state_out.unit_status == testing.BlockedStatus("Waiting for database relation")
+```
+
+The unit status should be `waiting` (not `active`) when the relation exists but its remote side hasn't finished setting up yet — for example, while the `postgresql-k8s` charm is still installing. Add a test for that case too:
+
+```python
+def test_database_not_ready_waiting(mock_version):
+    ctx = testing.Context(FastAPIDemoCharm)
+    # Relation exists, but the postgresql-k8s side hasn't populated the
+    # databag yet — no endpoints/username/password.
+    relation = testing.Relation(
+        endpoint="database",
+        interface="postgresql_client",
+        remote_app_name="postgresql-k8s",
+        remote_app_data={},
+    )
+    container = testing.Container(
+        name="demo-server", can_connect=True, layers={"rock": ROCK_LAYER}
+    )
+    state_in = testing.State(
+        containers={container},
+        relations={relation},
+        leader=True,
+    )
+
+    state_out = ctx.run(ctx.on.collect_unit_status(), state_in)
+
+    assert state_out.unit_status == testing.WaitingStatus("Waiting for database relation")
 ```
 
 Then modify `test_pebble_layer`. Since `test_pebble_layer` doesn't arrange a database relation, the unit will be in `blocked` status instead of `active`. Replace the `assert state_out.unit_status` line by:

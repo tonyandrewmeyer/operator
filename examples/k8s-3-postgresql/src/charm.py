@@ -82,8 +82,13 @@ class FastAPIDemoCharm(ops.CharmBase):
         if not self.model.get_relation("database"):
             # We need the user to do 'juju integrate'.
             event.add_status(ops.BlockedStatus("Waiting for database relation"))
-        elif not self.database.fetch_relation_data():
-            # We need the charms to finish integrating.
+        elif not self.fetch_database_relation_data():
+            # The relation exists but the remote hasn't populated the databag
+            # yet (typically because postgresql-k8s is still starting up).
+            # `self.database.fetch_relation_data()` returns `{relation_id: {}}`
+            # in that case, which is truthy, so we go through our own helper
+            # which returns `{}` unless the endpoints/username/password keys
+            # are actually present.
             event.add_status(ops.WaitingStatus("Waiting for database relation"))
         try:
             status = self.container.get_service(self.pebble_service_name)

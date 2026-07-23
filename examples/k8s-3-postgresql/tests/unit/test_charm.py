@@ -152,3 +152,33 @@ def test_no_database_blocked(mock_version):
     state_out = ctx.run(ctx.on.collect_unit_status(), state_in)
 
     assert state_out.unit_status == testing.BlockedStatus("Waiting for database relation")
+
+
+def test_database_not_ready_waiting(mock_version):
+    ctx = testing.Context(FastAPIDemoCharm)
+    # Relation exists but the postgresql-k8s side hasn't populated the databag
+    # yet - the situation right after 'juju integrate' when the postgresql
+    # unit is still installing. The fastapi service is up (Pebble started it
+    # with an empty environment on pebble_ready), so the only thing that
+    # should prevent us from going active is the missing database data.
+    relation = testing.Relation(
+        endpoint="database",
+        interface="postgresql_client",
+        remote_app_name="postgresql-k8s",
+        remote_app_data={},
+    )
+    container = testing.Container(
+        name="demo-server",
+        can_connect=True,
+        layers={"rock": ROCK_LAYER},
+        service_statuses={"fastapi": ops.pebble.ServiceStatus.ACTIVE},
+    )
+    state_in = testing.State(
+        containers={container},
+        relations={relation},
+        leader=True,
+    )
+
+    state_out = ctx.run(ctx.on.collect_unit_status(), state_in)
+
+    assert state_out.unit_status == testing.WaitingStatus("Waiting for database relation")

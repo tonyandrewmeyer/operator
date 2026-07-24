@@ -86,7 +86,12 @@ def _encode(obj: Any) -> Any:
         return {
             _TYPE_KEY: 'dc',
             'cls': type(obj).__name__,
-            'fields': {f.name: _encode(getattr(obj, f.name)) for f in dataclasses.fields(obj)},
+            # init=False fields (e.g. _Event._juju_name) are derived in
+            # __post_init__ from other fields and can't be passed to
+            # cls(**fields) on the decode side; skip them.
+            'fields': {
+                f.name: _encode(getattr(obj, f.name)) for f in dataclasses.fields(obj) if f.init
+            },
         }
     if isinstance(obj, datetime.datetime):
         return {_TYPE_KEY: 'datetime', 'value': obj.isoformat()}

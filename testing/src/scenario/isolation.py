@@ -50,11 +50,15 @@ frozen dataclasses, ``set``/``frozenset``/``tuple``, ``datetime``,
 ``pathlib.Path``, the ``_EntityStatus`` family, pebble enums, ``bytes``, and
 ``pebble.Layer``.
 
-The parent and the per-charm worker must have **the same** ``ops`` /
-``ops.testing`` version installed (the worker reconstructs dataclasses by name,
-so the class registry must match).  Only the charm's own runtime dependencies
-(``cryptography``, ``pydantic``, charm libs, ...) may differ between the worker
-venv and the parent.
+The per-charm worker's ``ops`` / ``ops.testing`` need not exactly match the
+parent's: the parent is authoritative and decodes any worker on a wire-format
+schema version up to its own (``1..N``, where ``N`` is the parent's current
+schema version) — in practice, the orchestrating test suite's ``ops`` must be
+**>=** every charm's ``ops``.  A worker on a *newer* schema than the parent
+(``>N``) is rejected with :class:`~ops.testing.StateSchemaVersionError`, since
+the parent has no decoder for a schema it doesn't know about yet.  Only the
+charm's own runtime dependencies (``cryptography``, ``pydantic``, charm libs,
+...) are otherwise expected to differ between the worker venv and the parent.
 
 Typical usage
 ~~~~~~~~~~~~~
@@ -137,11 +141,16 @@ class IsolatedEnv:
             the dependency directory is already available on disk.
 
     Invariant:
-        The per-charm venv selected via ``python_executable`` must have **the
-        same** ``ops`` version installed as the parent test process.  Only the
-        charm's own runtime dependencies may differ between the two environments.
-        A mismatch typically surfaces as an :class:`IsolationError` whose
-        traceback names an unknown dataclass on the wire.
+        The per-charm venv selected via ``python_executable`` need not have
+        the exact same ``ops`` version as the parent test process: the parent
+        is authoritative and decodes any worker on a wire-format schema
+        version up to its own.  Only a worker on a *newer* schema than the
+        parent (which the parent has no decoder for) is rejected.  Only the
+        charm's own runtime dependencies are otherwise expected to differ
+        between the two environments.  A rejected version raises
+        :class:`~ops.testing.StateSchemaVersionError`, which may arrive
+        wrapped in an :class:`IsolationError` if the worker is the side that
+        hits it.
 
     Examples::
 
@@ -531,9 +540,11 @@ class IsolatedContext:
             worker.  Ignored in ``spawn_per_event`` mode.
 
     Invariant:
-        The per-charm venv must have the **same** ``ops`` version installed as
-        the parent test process.  Mismatches surface as
-        :class:`IsolationError`.
+        The parent process is authoritative on wire-format schema version: it
+        decodes any worker on a version up to its own, and rejects a worker on
+        a newer one.  Mismatches raise
+        :class:`~ops.testing.StateSchemaVersionError` (possibly wrapped in
+        :class:`IsolationError`).
 
     Example — point at a pre-built venv::
 

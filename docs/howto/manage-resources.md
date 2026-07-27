@@ -40,7 +40,9 @@ class MyCharm(ops.CharmBase):
             self.unit.status = ops.BlockedStatus(
                 "Resource 'my-resource' not found; is it declared in charmcraft.yaml?"
             )
-            logger.exception("Resource 'my-resource' not declared in charmcraft.yaml.")
+            logger.exception(
+                "Resource 'my-resource' not declared in charmcraft.yaml."
+            )
             return
 
         with resource_path.open() as f:
@@ -70,7 +72,13 @@ import pathlib
 from ops import testing
 
 ctx = testing.Context(
-    MyCharm, meta={'name': 'my-charm', 'resources': {'my-resource': {'type': 'file', 'filename': 'somefile.txt'}}}
+    MyCharm,
+    meta={
+        'name': 'my-charm',
+        'resources': {
+            'my-resource': {'type': 'file', 'filename': 'somefile.txt'}
+        },
+    },
 )
 resource = testing.Resource(name='my-resource', path='/path/to/somefile.txt')
 with ctx(ctx.on.config_changed(), testing.State(resources={resource})) as mgr:

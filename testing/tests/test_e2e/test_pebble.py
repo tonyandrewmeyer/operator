@@ -11,7 +11,17 @@ from typing import TYPE_CHECKING
 
 import pytest
 from scenario import Context
-from scenario.state import CheckInfo, Container, Exec, Mount, Notice, State
+from scenario.state import (
+    CheckInfo,
+    Container,
+    Exec,
+    Mount,
+    Notice,
+    ServiceBehaviour,
+    ServiceFailureMode,
+    ServiceStart,
+    State,
+)
 
 import ops
 from ops import CharmBase, Framework, pebble
@@ -1107,3 +1117,247 @@ def test_no_warning_on_empty_container():
     assert not any(
         'mycontainer' in line.message and 'non-empty' in line.message for line in ctx.juju_log
     )
+
+
+def _crash_layer(on_failure: str | None = None) -> ops.pebble.Layer:
+    service: ServiceDict = {
+        'override': 'replace',
+        'command': '/bin/false',
+        'startup': 'enabled',
+    }
+    if on_failure is not None:
+        service['on-failure'] = on_failure  # type: ignore[typeddict-item]
+    return ops.pebble.Layer({'services': {'svc': service}})
+
+
+def test_service_fails_on_failure_ignore_yields_error_status():
+    layer = _crash_layer(on_failure='ignore')
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('svc')
+        assert 'will ignore' in exc_info.value.err
+        assert workload.get_service('svc').current == ops.pebble.ServiceStatus.ERROR
+
+
+@pytest.mark.parametrize('on_failure', (None, 'restart'))
+def test_service_fails_default_on_failure_yields_backoff_string(on_failure: str | None):
+    layer = _crash_layer(on_failure=on_failure)
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('svc')
+        assert 'will restart' in exc_info.value.err
+        current = workload.get_service('svc').current
+        # 'backoff' has no ServiceStatus member, so real Pebble (and this mock)
+        # reports the raw string -- see WORKLOAD-MOCK-DESIGN.md §11.1.
+        assert current == 'backoff'
+        assert not isinstance(current, ops.pebble.ServiceStatus)
+
+
+def test_service_fails_exec_error_yields_inactive():
+    layer = ops.pebble.Layer({
+        'services': {
+            'svc': {
+                'override': 'replace',
+                'command': '/definitely/not/a/binary',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            }
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={
+            ServiceBehaviour(
+                'svc', start=ServiceStart.FAILS, failure_mode=ServiceFailureMode.EXEC_ERROR
+            )
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('svc')
+        assert (
+            'fork/exec /definitely/not/a/binary: no such file or directory' in exc_info.value.err
+        )
+        assert workload.get_service('svc').current == ops.pebble.ServiceStatus.INACTIVE
+
+
+def test_service_fails_change_error_shape():
+    """The raised ChangeError should match the shape measured against real Pebble.
+
+    See WORKLOAD-MOCK-DESIGN.md §11.2.
+    """
+    layer = _crash_layer(on_failure='ignore')
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('svc')
+        err = exc_info.value
+        change = err.change
+
+        assert err.err == (
+            'cannot perform the following tasks:\n'
+            '- Start service "svc" (service start attempt: exited quickly with code 1, '
+            'will ignore)'
+        )
+        assert change.err == err.err
+        assert change.kind == 'start'
+        assert change.status == 'Error'
+        assert change.ready is True
+        assert change.spawn_time is not None
+        assert change.ready_time is not None
+        assert change.ready_time >= change.spawn_time
+
+        assert len(change.tasks) == 1
+        task = change.tasks[0]
+        assert task.kind == 'start'
+        assert task.status == 'Error'
+        assert task.summary == 'Start service "svc"'
+        assert task.progress.label == ''
+        assert task.progress.done == 1
+        assert task.progress.total == 1
+        assert len(task.log) == 2
+        assert task.log[0].endswith('INFO Most recent service output:')
+        assert task.log[1].endswith(
+            'ERROR service start attempt: exited quickly with code 1, will ignore'
+        )
+
+
+def test_service_fails_exec_error_log_has_one_entry():
+    layer = ops.pebble.Layer({
+        'services': {
+            'svc': {
+                'override': 'replace',
+                'command': '/definitely/not/a/binary',
+                'startup': 'enabled',
+            }
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={
+            ServiceBehaviour(
+                'svc', start=ServiceStart.FAILS, failure_mode=ServiceFailureMode.EXEC_ERROR
+            )
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('svc')
+        task = exc_info.value.change.tasks[0]
+        assert len(task.log) == 1
+        assert task.log[0].endswith(
+            'ERROR cannot start service: fork/exec /definitely/not/a/binary: '
+            'no such file or directory'
+        )
+
+
+@pytest.mark.parametrize('trigger_op', ('restart', 'replan'))
+def test_service_fails_via_restart_and_replan(trigger_op: str):
+    layer = _crash_layer(on_failure='ignore')
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError):
+            if trigger_op == 'replan':
+                workload.replan()
+            else:
+                workload.restart('svc')
+
+
+def test_service_with_no_behaviour_still_runs():
+    """A service with no declared ServiceBehaviour is unaffected (the RUNS default)."""
+    layer = ops.pebble.Layer({
+        'services': {
+            'svc': {'override': 'replace', 'command': '/bin/true', 'startup': 'enabled'},
+        }
+    })
+    container = Container('foo', can_connect=True, layers={'base': layer})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.start('svc')
+        assert workload.get_service('svc').current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def test_service_fails_mixed_batch_leaves_other_service_active():
+    """One FAILS service in a multi-service start doesn't block the others.
+
+    Unverified extrapolation beyond §11 (which only measured a single-service
+    call) -- see WORKLOAD-MOCK-DESIGN.md §12.3.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'good': {'override': 'replace', 'command': '/bin/true', 'startup': 'enabled'},
+            'bad': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('bad', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError):
+            workload.start('good', 'bad')
+        assert workload.get_service('good').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('bad').current == ops.pebble.ServiceStatus.ERROR
+
+
+def test_service_fails_unsupported_on_failure_policy_raises():
+    layer = _crash_layer(on_failure='shutdown')
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(NotImplementedError):
+            workload.start('svc')

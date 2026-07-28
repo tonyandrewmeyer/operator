@@ -1361,3 +1361,124 @@ def test_service_fails_unsupported_on_failure_policy_raises():
         workload = mgr.charm.unit.get_container('foo')
         with pytest.raises(NotImplementedError):
             workload.start('svc')
+
+
+# The following tests pin shapes measured against real Pebble v1.32.1 on
+# 2026-07-28 -- see WORKLOAD-MOCK-DESIGN.md §13. Before that probe these
+# three shapes were extrapolated from the single-service `start` case, and
+# the extrapolation was wrong in each of them.
+
+
+def _mixed_layer() -> ops.pebble.Layer:
+    return ops.pebble.Layer({
+        'services': {
+            'ok1': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+            'ok2': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+            'fail': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+        }
+    })
+
+
+def _mixed_container() -> Container:
+    return Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _mixed_layer()},
+        service_behaviours={ServiceBehaviour('fail', start=ServiceStart.FAILS)},
+    )
+
+
+@pytest.mark.parametrize(
+    'op, expected_kind, expected_summary',
+    [
+        ('start', 'start', 'Start service "fail"'),
+        ('restart', 'restart', 'Restart service "fail"'),
+    ],
+)
+def test_service_fails_change_kind_follows_the_entry_point(
+    op: str, expected_kind: str, expected_summary: str
+):
+    """§13.1: the change kind is the entry point's, not always 'start'."""
+    layer = ops.pebble.Layer({
+        'services': {
+            'fail': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('fail', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        trigger = workload.start if op == 'start' else workload.restart
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            trigger('fail')
+        change = exc_info.value.change
+        assert change.kind == expected_kind
+        assert change.summary == expected_summary
+
+
+def test_service_fails_restart_emits_a_done_stop_task_first():
+    """§13.1 case B: a restart change carries a Done 'stop' task before 'start'."""
+    layer = _crash_layer(on_failure='ignore')
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.restart('svc')
+        tasks = exc_info.value.change.tasks
+        assert [(t.kind, t.status) for t in tasks] == [('stop', 'Done'), ('start', 'Error')]
+        assert tasks[0].summary == 'Stop service "svc"'
+
+
+def test_service_fails_replan_uses_replan_kind():
+    """§13.1 case K: a failing replan raises with kind='replan'."""
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={_mixed_container()})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.replan()
+        change = exc_info.value.change
+        assert change.kind == 'replan'
+        assert change.summary == 'Replan service "fail" and 2 more'
+
+
+def test_service_fails_multi_service_summary_counts_all_requested():
+    """§13.2: the summary counts every requested service and quotes the name.
+
+    Pebble orders alphabetically, so requesting ok1/fail/ok2 names "fail"
+    first even though it was asked for second.
+    """
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={_mixed_container()})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('ok1', 'fail', 'ok2')
+        change = exc_info.value.change
+        assert change.summary == 'Start service "fail" and 2 more'
+        # A Done task per service that did start, interleaved alphabetically
+        # with the failure rather than grouped after it.
+        assert [(t.summary, t.status) for t in change.tasks] == [
+            ('Start service "fail"', 'Error'),
+            ('Start service "ok1"', 'Done'),
+            ('Start service "ok2"', 'Done'),
+        ]

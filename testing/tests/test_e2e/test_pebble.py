@@ -1367,6 +1367,11 @@ def test_service_fails_unsupported_on_failure_policy_raises():
 # 2026-07-28 -- see WORKLOAD-MOCK-DESIGN.md §13. Before that probe these
 # three shapes were extrapolated from the single-service `start` case, and
 # the extrapolation was wrong in each of them.
+#
+# A further probe on 2026-07-29 (§14) found that §13.2's "always
+# alphabetical" summary reading was itself an extrapolation from a case
+# that didn't distinguish it from "client's request order" -- see
+# test_service_fails_summary_leading_name_by_entry_point below, and §14.2.
 
 
 def _mixed_layer() -> ops.pebble.Layer:
@@ -1463,10 +1468,14 @@ def test_service_fails_replan_uses_replan_kind():
 
 
 def test_service_fails_multi_service_summary_counts_all_requested():
-    """§13.2: the summary counts every requested service and quotes the name.
+    """§13.2/§14.2: the summary counts every requested service and quotes the name.
 
-    Pebble orders alphabetically, so requesting ok1/fail/ok2 names "fail"
-    first even though it was asked for second.
+    The task list is alphabetical regardless of request order. The summary's
+    leading name, for start/restart, is the *first-requested* service, not
+    the alphabetically-first one -- see
+    test_service_fails_summary_leading_name_by_entry_point for the case that
+    tells these two apart. Here "ok1" was requested first and is also
+    alphabetically first, so this case alone doesn't disambiguate them.
     """
     ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
     with ctx(ctx.on.start(), State(containers={_mixed_container()})) as mgr:
@@ -1474,7 +1483,7 @@ def test_service_fails_multi_service_summary_counts_all_requested():
         with pytest.raises(ops.pebble.ChangeError) as exc_info:
             workload.start('ok1', 'fail', 'ok2')
         change = exc_info.value.change
-        assert change.summary == 'Start service "fail" and 2 more'
+        assert change.summary == 'Start service "ok1" and 2 more'
         # A Done task per service that did start, interleaved alphabetically
         # with the failure rather than grouped after it.
         assert [(t.summary, t.status) for t in change.tasks] == [
@@ -1482,3 +1491,145 @@ def test_service_fails_multi_service_summary_counts_all_requested():
             ('Start service "ok1"', 'Done'),
             ('Start service "ok2"', 'Done'),
         ]
+
+
+def test_service_fails_summary_leading_name_by_entry_point():
+    """§14.2: start/restart lead with request order; autostart/replan lead alphabetically.
+
+    Real Pebble's start/restart handler uses the client's request order
+    verbatim for the summary's leading name (``payload.Services[0]`` in
+    ``api_services.go``); autostart/replan resolve to an
+    alphabetically-sorted service list server-side before building the
+    summary. Three services, declared and requested in different orders, so
+    each ordering gives a different answer if it were the one in force.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'foxtrot': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+            'delta': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+            'mike': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('delta', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('mike', 'foxtrot', 'delta')
+        assert exc_info.value.change.summary == 'Start service "mike" and 2 more'
+
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.autostart()
+        assert exc_info.value.change.summary == 'Autostart service "delta" and 2 more'
+
+
+def test_service_fails_restart_groups_all_stops_before_all_starts():
+    """§14.1: a multi-service restart's tasks are grouped, not interleaved per service.
+
+    §13.1 case B measured this with a single service, where grouped and
+    interleaved read identically. With three, real Pebble emits every
+    "stop" task (alphabetical) before any "start" task (alphabetical),
+    because it builds the two task sets independently and concatenates
+    them, rather than emitting each service's stop immediately followed by
+    its own start.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'foxtrot': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+            'delta': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+            'mike': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('delta', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.restart('mike', 'foxtrot', 'delta')
+        tasks = exc_info.value.change.tasks
+        assert [(t.kind, t.summary, t.status) for t in tasks] == [
+            ('stop', 'Stop service "delta"', 'Done'),
+            ('stop', 'Stop service "foxtrot"', 'Done'),
+            ('stop', 'Stop service "mike"', 'Done'),
+            ('start', 'Start service "delta"', 'Error'),
+            ('start', 'Start service "foxtrot"', 'Done'),
+            ('start', 'Start service "mike"', 'Done'),
+        ]
+
+
+def test_service_fails_autostart_multiple_failures():
+    """§14.3: autostart with two failing services -- both get a bullet, both get a status."""
+    layer = ops.pebble.Layer({
+        'services': {
+            'alpha': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+            'bravo': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+            'charlie': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+            'delta': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={
+            ServiceBehaviour('bravo', start=ServiceStart.FAILS),
+            ServiceBehaviour('delta', start=ServiceStart.FAILS),
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.autostart()
+        change = exc_info.value.change
+        assert change.summary == 'Autostart service "alpha" and 3 more'
+        assert [(t.summary, t.status) for t in change.tasks] == [
+            ('Start service "alpha"', 'Done'),
+            ('Start service "bravo"', 'Error'),
+            ('Start service "charlie"', 'Done'),
+            ('Start service "delta"', 'Error'),
+        ]
+        assert exc_info.value.err == (
+            'cannot perform the following tasks:\n'
+            '- Start service "bravo" '
+            '(service start attempt: exited quickly with code 1, will ignore)\n'
+            '- Start service "delta" '
+            '(service start attempt: exited quickly with code 1, will ignore)'
+        )
+        assert workload.get_service('alpha').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('bravo').current == ops.pebble.ServiceStatus.ERROR
+        assert workload.get_service('charlie').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('delta').current == ops.pebble.ServiceStatus.ERROR

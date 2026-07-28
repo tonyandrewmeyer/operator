@@ -986,9 +986,9 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
-        change summary's verb follows it. See WORKLOAD-MOCK-DESIGN.md §13 for
-        the real-Pebble measurements this reproduces; every string here was
-        measured against Pebble v1.32.1, not reasoned about.
+        change summary's verb follows it. See WORKLOAD-MOCK-DESIGN.md §13-14
+        for the real-Pebble measurements this reproduces; every string here
+        was measured against Pebble v1.32.1, not reasoned about.
         """
         if not services:
             raise self._api_error(400, 'must specify services for start action')
@@ -997,10 +997,10 @@ class _MockPebbleClient(_TestingPebbleClient):
             if name not in known_services:
                 raise self._api_error(400, f'cannot start services: service {name} does not exist')
 
-        # Pebble orders both the task list and the change summary's leading
-        # service alphabetically, not by the order the caller asked for
-        # (§13.2). Requesting ["ok1", "fail", "ok2"] yields tasks for
-        # fail/ok1/ok2 in that order and a summary naming "fail".
+        # Pebble's task list is always alphabetical, regardless of entry
+        # point -- plan.go's tarjanSort stabilises Go's randomised map
+        # iteration with sort.Strings (§13.2, confirmed for multi-service
+        # autostart/replan in §14.2).
         ordered = sorted(services)
 
         failing: list[tuple[str, ServiceBehaviour]] = []
@@ -1030,13 +1030,20 @@ class _MockPebbleClient(_TestingPebbleClient):
             )
 
         failing_by_name = dict(failing)
-        for name in ordered:
-            # A restart change carries a Done "stop" task before the "start"
-            # task (§13.1, case B). Tasks stay in one alphabetical pass:
-            # Pebble interleaves Done and Error tasks by service name rather
-            # than grouping the failures (§13.2).
-            if kind == 'restart':
+
+        # A restart change carries every "stop" task before any "start" task
+        # -- real Pebble builds the two task sets independently (a StopOrder
+        # pass, then a StartOrder pass) and concatenates them, rather than
+        # interleaving stop/start per service. §13.1 case B measured this
+        # with a single service, where grouped and interleaved are
+        # indistinguishable; §14.1 re-measured with three and found it's
+        # grouped, correcting the interleaved assumption this code used to
+        # make.
+        if kind == 'restart':
+            for name in ordered:
                 tasks.append(_task(name, 'stop', 'Done'))
+
+        for name in ordered:
             behaviour = failing_by_name.get(name)
             if behaviour is None:
                 # Pebble emits a Done task for services that did start, not
@@ -1050,8 +1057,18 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         err = 'cannot perform the following tasks:\n' + '\n'.join(bullets)
         # The summary counts every *requested* service, not only the failing
-        # ones, and quotes the name (§13.2).
-        summary = f'{kind.capitalize()} service "{ordered[0]}"'
+        # ones, and quotes the name (§13.2). Its leading name, though,
+        # depends on the entry point: real Pebble's start/restart handler
+        # uses the client's request order verbatim (payload.Services[0] in
+        # api_services.go), while autostart/replan reassign payload.Services
+        # to an alphabetically-sorted list before building the summary. So
+        # start/restart lead with the caller's first-requested name and
+        # autostart/replan lead with the alphabetically first affected name
+        # -- corrects §13.2's "always alphabetical" reading, which happened
+        # to measure a case where the failing service was also alphabetically
+        # first (§14.2).
+        leading = services[0] if kind in ('start', 'restart') else ordered[0]
+        summary = f'{kind.capitalize()} service "{leading}"'
         if len(ordered) > 1:
             summary += f' and {len(ordered) - 1} more'
         change = pebble.Change(

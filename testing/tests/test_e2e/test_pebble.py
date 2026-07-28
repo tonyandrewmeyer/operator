@@ -18,6 +18,7 @@ from scenario.state import (
     Mount,
     Notice,
     ServiceBehaviour,
+    ServiceExitCode,
     ServiceFailureMode,
     ServiceStart,
     State,
@@ -1608,3 +1609,142 @@ def test_service_fails_autostart_multiple_failures():
         assert workload.get_service('bravo').current == ops.pebble.ServiceStatus.ERROR
         assert workload.get_service('charlie').current == ops.pebble.ServiceStatus.ACTIVE
         assert workload.get_service('delta').current == ops.pebble.ServiceStatus.ERROR
+
+
+# The following tests cover stage 2, ServiceStart.EXITS -- a service that
+# starts successfully and exits later. Shapes measured against real Pebble
+# v1.32.1 on 2026-07-29 -- see WORKLOAD-MOCK-DESIGN.md §15.
+
+
+def _exit_layer(on_success: str | None = None, on_failure: str | None = None) -> ops.pebble.Layer:
+    service: ServiceDict = {
+        'override': 'replace',
+        'command': "sh -c 'sleep 1000'",
+        'startup': 'enabled',
+    }
+    if on_success is not None:
+        service['on-success'] = on_success
+    if on_failure is not None:
+        service['on-failure'] = on_failure
+    return ops.pebble.Layer({'services': {'svc': service}})
+
+
+@pytest.mark.parametrize(
+    'exit_code, on_success, on_failure, expected',
+    [
+        (ServiceExitCode.FAILURE, None, 'ignore', ops.pebble.ServiceStatus.ERROR),
+        (ServiceExitCode.FAILURE, None, None, 'backoff'),
+        (ServiceExitCode.FAILURE, None, 'restart', 'backoff'),
+        (ServiceExitCode.SUCCESS, 'ignore', None, ops.pebble.ServiceStatus.INACTIVE),
+        (ServiceExitCode.SUCCESS, None, None, 'backoff'),
+        (ServiceExitCode.SUCCESS, 'restart', None, 'backoff'),
+    ],
+)
+def test_service_exits_status_by_exit_code_and_policy(
+    exit_code: ServiceExitCode,
+    on_success: str | None,
+    on_failure: str | None,
+    expected: ops.pebble.ServiceStatus | str,
+):
+    """§15.3: the resulting status is a function of exit_code and the relevant policy."""
+    layer = _exit_layer(on_success=on_success, on_failure=on_failure)
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={
+            ServiceBehaviour('svc', start=ServiceStart.EXITS, exit_code=exit_code)
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        # Unlike FAILS, the call succeeds -- no ChangeError.
+        workload.start('svc')
+        assert workload.get_service('svc').current == expected
+
+
+@pytest.mark.parametrize('op', ['start', 'restart', 'replan', 'autostart'])
+def test_service_exits_all_entry_points_succeed(op: str):
+    """§15.1/§15.4: EXITS never raises ChangeError, for any entry point."""
+    layer = _exit_layer(on_failure='ignore')
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.EXITS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        if op == 'start':
+            workload.start('svc')
+        elif op == 'restart':
+            workload.restart('svc')
+        elif op == 'replan':
+            workload.replan()
+        else:
+            workload.autostart()
+        assert workload.get_service('svc').current == ops.pebble.ServiceStatus.ERROR
+
+
+def test_service_exits_unsupported_on_success_policy_raises():
+    """§15.3: on-success values beyond ignore/restart raise NotImplementedError, like FAILS."""
+    layer = _exit_layer(on_success='shutdown')
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={
+            ServiceBehaviour('svc', start=ServiceStart.EXITS, exit_code=ServiceExitCode.SUCCESS)
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(NotImplementedError):
+            workload.start('svc')
+
+
+def test_service_exits_mixed_with_fails_and_runs():
+    """§14.4-style independence, extended to EXITS: each service's outcome is its own.
+
+    A single start() call requesting a RUNS, a FAILS, and an EXITS service:
+    the FAILS one raises ChangeError for the whole call, but the EXITS one
+    still resolves to its own declared status rather than being swept to
+    ACTIVE along with the RUNS one.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'healthy': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+            'crashy': {
+                'override': 'replace',
+                'command': '/bin/false',
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+            'exity': {
+                'override': 'replace',
+                'command': "sh -c 'sleep 1000'",
+                'startup': 'enabled',
+                'on-failure': 'ignore',
+            },
+        }
+    })
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': layer},
+        service_behaviours={
+            ServiceBehaviour('crashy', start=ServiceStart.FAILS),
+            ServiceBehaviour('exity', start=ServiceStart.EXITS),
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError):
+            workload.start('healthy', 'crashy', 'exity')
+        assert workload.get_service('healthy').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('crashy').current == ops.pebble.ServiceStatus.ERROR
+        assert workload.get_service('exity').current == ops.pebble.ServiceStatus.ERROR

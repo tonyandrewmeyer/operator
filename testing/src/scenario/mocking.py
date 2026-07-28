@@ -59,6 +59,7 @@ from .state import (
     Relation,
     RelationBase,
     ServiceBehaviour,
+    ServiceExitCode,
     ServiceFailureMode,
     ServiceStart,
     Storage,
@@ -921,6 +922,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         if self._has_failing_behaviour(enabled):
             return self._start_with_behaviours(enabled, kind='replan')
         super().replan_services(timeout=timeout, delay=delay)
+        self._apply_exit_behaviours(enabled)
         self._update_state_check_infos()
 
     def start_services(
@@ -933,7 +935,9 @@ class _MockPebbleClient(_TestingPebbleClient):
             raise TypeError(f'start_services should take a list of names, not just "{services}"')
         if self._has_failing_behaviour(services):
             return self._start_with_behaviours(services)
-        return super().start_services(services, timeout=timeout, delay=delay)
+        change_id = super().start_services(services, timeout=timeout, delay=delay)
+        self._apply_exit_behaviours(services)
+        return change_id
 
     def restart_services(
         self,
@@ -945,14 +949,18 @@ class _MockPebbleClient(_TestingPebbleClient):
             raise TypeError(f'restart_services should take a list of names, not just "{services}"')
         if self._has_failing_behaviour(services):
             return self._start_with_behaviours(services, kind='restart')
-        return super().restart_services(services, timeout=timeout, delay=delay)
+        change_id = super().restart_services(services, timeout=timeout, delay=delay)
+        self._apply_exit_behaviours(services)
+        return change_id
 
     def autostart_services(self, timeout: float = 30.0, delay: float = 0.1):
         self._check_connection()
         enabled = self._enabled_service_names()
         if self._has_failing_behaviour(enabled):
             return self._start_with_behaviours(enabled, kind='autostart')
-        return super().autostart_services(timeout=timeout, delay=delay)
+        change_id = super().autostart_services(timeout=timeout, delay=delay)
+        self._apply_exit_behaviours(enabled)
+        return change_id
 
     def _enabled_service_names(self) -> list[str]:
         # The services that ``autostart``/``replan`` will try to start.
@@ -975,13 +983,30 @@ class _MockPebbleClient(_TestingPebbleClient):
                 return True
         return False
 
+    def _apply_exit_behaviours(self, services: list[str]) -> None:
+        """Overwrite the status of any requested ``EXITS`` service.
+
+        Only called after a start/restart/replan/autostart call has already
+        succeeded and set every requested service ``ACTIVE`` -- an ``EXITS``
+        service's call still succeeds (unlike ``FAILS``), but its resulting
+        status is the declared post-exit value instead. See
+        WORKLOAD-MOCK-DESIGN.md §15 for what this reproduces.
+        """
+        known_services = self._render_services()
+        for name in services:
+            behaviour = self._find_service_behaviour(name)
+            if behaviour is None or behaviour.start is not ServiceStart.EXITS:
+                continue
+            self._service_status[name] = self._service_exit_detail(known_services[name], behaviour)
+
     def _start_with_behaviours(self, services: list[str], kind: str = 'start') -> NoReturn:
         """Apply declared ``ServiceBehaviour``s for a start/restart/autostart request.
 
         Only called when at least one requested service is declared
         ``ServiceStart.FAILS``, so this always raises ``pebble.ChangeError``,
         matching what real Pebble raises. Services with no declared FAILS
-        behaviour still reach ACTIVE before the error is raised -- Pebble
+        behaviour still reach a status before the error is raised -- ACTIVE
+        by default, or their own declared EXITS status -- since Pebble
         tracks each service's start attempt independently.
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
@@ -1005,6 +1030,15 @@ class _MockPebbleClient(_TestingPebbleClient):
             behaviour = self._find_service_behaviour(name)
             if behaviour is not None and behaviour.start is ServiceStart.FAILS:
                 failing.append((name, behaviour))
+            elif behaviour is not None and behaviour.start is ServiceStart.EXITS:
+                # An EXITS service mixed into the same request as a FAILS
+                # one still resolves to its own declared post-exit status,
+                # not ACTIVE -- Pebble tracks each service's start attempt
+                # independently (§12.3), and that independence applies
+                # just as much between FAILS and EXITS as within FAILS.
+                self._service_status[name] = self._service_exit_detail(
+                    known_services[name], behaviour
+                )
             else:
                 self._service_status[name] = pebble.ServiceStatus.ACTIVE
 
@@ -1106,6 +1140,38 @@ class _MockPebbleClient(_TestingPebbleClient):
         raise NotImplementedError(
             f'ServiceStart.FAILS does not model on-failure: {on_failure!r} yet; only '
             "'' (Pebble's default, equivalent to 'restart') and 'ignore'.'
+        )
+
+    def _service_exit_detail(
+        self,
+        service: pebble.Service,
+        behaviour: ServiceBehaviour,
+    ) -> pebble.ServiceStatus | str:
+        """Return the resulting status for an ``EXITS`` service.
+
+        Unlike ``FAILS``, the call that reaches this point has already
+        succeeded -- real Pebble doesn't fail the start/restart/replan/
+        autostart call for an exit that happens after the service has been
+        up for more than a second (§15.1), so there's no reason/log/
+        ChangeError to build here, only the resulting status. See
+        WORKLOAD-MOCK-DESIGN.md §15 for the shape this reproduces.
+        """
+        if behaviour.exit_code is ServiceExitCode.SUCCESS:
+            verb = self._on_success_verb(service.on_success)
+            return pebble.ServiceStatus.INACTIVE if verb == 'ignore' else 'backoff'
+        verb = self._on_failure_verb(service.on_failure)
+        return pebble.ServiceStatus.ERROR if verb == 'ignore' else 'backoff'
+
+    @staticmethod
+    def _on_success_verb(on_success: str) -> str:
+        if on_success in ('', 'restart'):
+            return 'restart'
+        if on_success == 'ignore':
+            return 'ignore'
+        raise NotImplementedError(
+            f'ServiceStart.EXITS does not model on-success: {on_success!r} yet; only '
+            "'' (Pebble's default, equivalent to 'restart') and 'ignore' have been "
+            'verified against real Pebble -- see WORKLOAD-MOCK-DESIGN.md §15.'
         )
 
     def add_layer(

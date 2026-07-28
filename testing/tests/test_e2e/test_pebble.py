@@ -1126,7 +1126,7 @@ def _crash_layer(on_failure: str | None = None) -> ops.pebble.Layer:
         'startup': 'enabled',
     }
     if on_failure is not None:
-        service['on-failure'] = on_failure  # type: ignore[typeddict-item]
+        service['on-failure'] = on_failure
     return ops.pebble.Layer({'services': {'svc': service}})
 
 

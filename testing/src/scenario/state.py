@@ -945,6 +945,16 @@ class ServiceOp:
     services: tuple[str, ...]
     """The names of services the operation was applied to."""
 
+    caused_by: str | None = None
+    """The name of the check whose failure caused Pebble to perform this
+    operation, or ``None`` when the charm invoked it itself.
+
+    Pebble restarts a service of its own accord when a check the service names
+    in ``on-check-failure`` goes down. The resulting status is the ``ACTIVE``
+    the service already had, so the operation being recorded here is the only
+    evidence in the output that it happened at all.
+    """
+
     def __post_init__(self):
         # Allow any sequence type to be passed in, but normalise to a tuple.
         object.__setattr__(self, 'services', tuple(self.services))

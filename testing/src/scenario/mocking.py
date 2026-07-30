@@ -929,9 +929,40 @@ class _MockPebbleClient(_TestingPebbleClient):
             infos.add(check_info)
         object.__setattr__(self._container, 'check_infos', frozenset(infos))
 
-    def _record_service_op(self, op: _ServiceOpName, services: Sequence[str]) -> None:
-        record = ServiceOp(op=op, services=tuple(services))
+    def _record_service_op(
+        self,
+        op: _ServiceOpName,
+        services: Sequence[str],
+        caused_by: str | None = None,
+    ) -> None:
+        record = ServiceOp(op=op, services=tuple(services), caused_by=caused_by)
         self._context.service_ops_history.setdefault(self._container_name, []).append(record)
+
+    def _apply_check_failure_actions(self, check_name: str) -> None:
+        """Carry out the ``on-check-failure`` actions for a check that went down.
+
+        Pebble restarts a running service that names this check in its
+        ``on-check-failure``. The service ends up back in the ``ACTIVE`` status
+        it already had -- and Pebble records no change for the restart -- so
+        the recorded operation is the only evidence the restart happened.
+
+        Only services that are currently running are restarted; what Pebble
+        does for a service that is stopped when its check fails has not been
+        established, so this leaves them alone.
+        """
+        for name, service in self._render_services().items():
+            action = service.on_check_failure.get(check_name)
+            if action is None or action == 'ignore':
+                continue
+            if action != 'restart':
+                raise NotImplementedError(
+                    f'on-check-failure: {action!r} is not modelled yet; only '
+                    "'restart' and 'ignore' are."
+                )
+            if self._service_status.get(name) is not pebble.ServiceStatus.ACTIVE:
+                continue
+            self._service_status[name] = pebble.ServiceStatus.ACTIVE
+            self._record_service_op('restart', (name,), caused_by=check_name)
 
     def _enabled_service_names(self) -> list[str]:
         # The services that ``replan`` and ``autostart`` will try to start.
@@ -1135,6 +1166,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             info.status = pebble.CheckStatus.DOWN
             info.failures = info.threshold
             self._new_check_change(info, down=True)
+            self._apply_check_failure_actions(name)
         else:
             # Recovery: the recover-check is Done, a new perform-check starts,
             # and the success count restarts from one rather than zero.

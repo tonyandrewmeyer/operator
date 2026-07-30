@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from scenario import Context
-from scenario.errors import InconsistentScenarioError
+from scenario.errors import InconsistentScenarioError, UncaughtCharmError
 from scenario.state import (
     CheckBehaviour,
     CheckInfo,
@@ -19,6 +19,7 @@ from scenario.state import (
     Exec,
     Mount,
     Notice,
+    ServiceOp,
     State,
 )
 
@@ -1539,3 +1540,195 @@ def test_check_behaviour_for_an_unknown_check_is_inconsistent():
 def test_check_behaviour_needs_at_least_one_status():
     with pytest.raises(ValueError, match='needs at least one status'):
         CheckBehaviour('chk1')
+
+
+CHECK_FAILURE_LAYER = ops.pebble.Layer({
+    'services': {
+        'guarded': {
+            'override': 'replace',
+            'command': '/bin/sleep 1000',
+            'startup': 'enabled',
+            'on-check-failure': {'chk1': 'restart'},
+        },
+        'unguarded': {
+            'override': 'replace',
+            'command': '/bin/sleep 1000',
+            'startup': 'enabled',
+        },
+    },
+    'checks': {
+        'chk1': {
+            'override': 'replace',
+            'startup': 'enabled',
+            'threshold': 3,
+            'exec': {'command': 'true'},
+        },
+    },
+})
+
+
+class CheckReadingCharm(ops.CharmBase):
+    """Reads chk1 a fixed number of times, which is what advances its statuses."""
+
+    reads = 1
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.config_changed, self._on_config_changed)
+
+    def _on_config_changed(self, _: ops.EventBase):
+        container = self.unit.get_container('foo')
+        for _read in range(self.reads):
+            container.get_check('chk1')
+
+
+def _check_failure_state(
+    reads: int = 1,
+    statuses: list[ops.pebble.CheckStatus] | None = None,
+    service_statuses: dict[str, ops.pebble.ServiceStatus] | None = None,
+    layer: ops.pebble.Layer = CHECK_FAILURE_LAYER,
+) -> tuple[Context[CheckReadingCharm], State]:
+    CheckReadingCharm.reads = reads
+    ctx = Context(CheckReadingCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    if service_statuses is None:
+        service_statuses = {
+            'guarded': ops.pebble.ServiceStatus.ACTIVE,
+            'unguarded': ops.pebble.ServiceStatus.ACTIVE,
+        }
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'layer1': layer},
+        service_statuses=service_statuses,
+        check_infos=frozenset({CheckInfo('chk1')}),
+        check_behaviours=frozenset({
+            CheckBehaviour('chk1', statuses=statuses or [ops.pebble.CheckStatus.DOWN])
+        }),
+    )
+    return ctx, State(containers={container})
+
+
+def test_check_failure_restarts_the_service_that_names_it():
+    """A check going down restarts the service that declares on-check-failure."""
+    ctx, state = _check_failure_state()
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    # The restart is recorded against the check that caused it. The status is
+    # the ACTIVE the service already had, so the record is the only evidence.
+    assert ctx.service_ops_history['foo'] == [ServiceOp('restart', ('guarded',), caused_by='chk1')]
+    container_out = state_out.get_container('foo')
+    assert container_out.service_statuses['guarded'] == ops.pebble.ServiceStatus.ACTIVE
+    assert container_out.get_check_info('chk1').status == ops.pebble.CheckStatus.DOWN
+
+
+def test_check_failure_leaves_other_services_alone():
+    """Only services naming the check in on-check-failure are restarted."""
+    ctx, state = _check_failure_state()
+    ctx.run(ctx.on.config_changed(), state=state)
+    restarted = [name for op in ctx.service_ops_history['foo'] for name in op.services]
+    assert restarted == ['guarded']
+
+
+def test_check_failure_acts_once_per_transition():
+    """Staying down doesn't restart the service again on every read."""
+    ctx, state = _check_failure_state(
+        reads=4,
+        statuses=[
+            ops.pebble.CheckStatus.DOWN,
+            ops.pebble.CheckStatus.DOWN,
+            ops.pebble.CheckStatus.UP,
+            ops.pebble.CheckStatus.DOWN,
+        ],
+    )
+    ctx.run(ctx.on.config_changed(), state=state)
+    # Two transitions into DOWN, so two restarts -- not one per read.
+    assert ctx.service_ops_history['foo'] == [
+        ServiceOp('restart', ('guarded',), caused_by='chk1'),
+        ServiceOp('restart', ('guarded',), caused_by='chk1'),
+    ]
+
+
+def test_check_failure_skips_a_stopped_service():
+    """A service that isn't running is left alone."""
+    ctx, state = _check_failure_state(
+        service_statuses={
+            'guarded': ops.pebble.ServiceStatus.INACTIVE,
+            'unguarded': ops.pebble.ServiceStatus.ACTIVE,
+        },
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    assert 'foo' not in ctx.service_ops_history
+    assert (
+        state_out.get_container('foo').service_statuses['guarded']
+        == ops.pebble.ServiceStatus.INACTIVE
+    )
+
+
+def test_check_failure_ignore_does_nothing():
+    layer = ops.pebble.Layer({
+        'services': {
+            'guarded': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'enabled',
+                'on-check-failure': {'chk1': 'ignore'},
+            },
+        },
+        'checks': {
+            'chk1': {
+                'override': 'replace',
+                'startup': 'enabled',
+                'threshold': 3,
+                'exec': {'command': 'true'},
+            },
+        },
+    })
+    ctx, state = _check_failure_state(
+        layer=layer,
+        service_statuses={'guarded': ops.pebble.ServiceStatus.ACTIVE},
+    )
+    ctx.run(ctx.on.config_changed(), state=state)
+    assert 'foo' not in ctx.service_ops_history
+
+
+def test_check_failure_unsupported_action_raises():
+    layer = ops.pebble.Layer({
+        'services': {
+            'guarded': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'enabled',
+                'on-check-failure': {'chk1': 'shutdown'},
+            },
+        },
+        'checks': {
+            'chk1': {
+                'override': 'replace',
+                'startup': 'enabled',
+                'threshold': 3,
+                'exec': {'command': 'true'},
+            },
+        },
+    })
+    ctx, state = _check_failure_state(
+        layer=layer,
+        service_statuses={'guarded': ops.pebble.ServiceStatus.ACTIVE},
+    )
+    with pytest.raises(UncaughtCharmError, match='is not modelled yet'):
+        ctx.run(ctx.on.config_changed(), state=state)
+
+
+def test_charm_invoked_ops_have_no_cause():
+    """A charm's own restart is recorded with caused_by unset."""
+
+    class RestartCharm(ops.CharmBase):
+        def __init__(self, framework: ops.Framework):
+            super().__init__(framework)
+            framework.observe(self.on.config_changed, self._on_config_changed)
+
+        def _on_config_changed(self, _: ops.EventBase):
+            self.unit.get_container('foo').restart('unguarded')
+
+    ctx = Context(RestartCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    container = Container('foo', can_connect=True, layers={'layer1': CHECK_FAILURE_LAYER})
+    ctx.run(ctx.on.config_changed(), state=State(containers={container}))
+    assert ctx.service_ops_history['foo'] == [ServiceOp('restart', ('unguarded',))]

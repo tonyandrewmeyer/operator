@@ -34,11 +34,13 @@ from .errors import (
 )
 from .logger import logger as scenario_logger
 from .state import (
+    AddLayer,
     CharmType,
     CheckInfo,
     Container,
     Notice,
     Secret,
+    ServiceOp,
     Storage,
     _Action,
     _CharmSpec,
@@ -474,6 +476,9 @@ class Context(Generic[CharmType]):
     - :attr:`action_logs`
     - :attr:`action_results`
     - :attr:`trace_data`
+    - :attr:`exec_history`
+    - :attr:`service_ops_history`
+    - :attr:`add_layer_history`
 
     This allows you to write assertions not only on the output state, but also, to some
     extent, on the path the charm took to get there.
@@ -565,7 +570,45 @@ class Context(Generic[CharmType]):
     """
 
     exec_history: dict[str, list[ExecArgs]]
-    """A record of the exec calls made by the charm."""
+    """A record of the exec calls made by the charm.
+
+    Keyed by container name. Reset at the start of each :meth:`run` call.
+    """
+
+    service_ops_history: dict[str, list[ServiceOp]]
+    """A record of the Pebble service lifecycle operations the charm has invoked.
+
+    Each entry corresponds to one call to :meth:`ops.Container.start`,
+    :meth:`ops.Container.stop`, :meth:`ops.Container.restart`,
+    :meth:`ops.Container.replan`, or :meth:`ops.Container.autostart`.
+    Operations are recorded in the order they were attempted, regardless of
+    whether they succeeded. Operations that raise
+    :class:`ops.pebble.ConnectionError` (because ``can_connect=False``) are
+    not recorded.
+
+    Keyed by container name. Reset at the start of each :meth:`run` call.
+
+    Assert that the charm has performed the expected service operations like so::
+
+        ctx = Context(MyCharm)
+        ctx.run(ctx.on.start(), State(containers={Container('foo', can_connect=True)}))
+        assert ctx.service_ops_history['foo'] == [
+            ServiceOp('restart', ('myservice',)),
+        ]
+
+    Or use :meth:`get_service_ops` to filter to a specific service.
+    """
+
+    add_layer_history: dict[str, list[AddLayer]]
+    """A record of the Pebble layers the charm has added.
+
+    Each entry corresponds to one call to :meth:`ops.Container.add_layer`,
+    in the order they were added. Calls that raise
+    :class:`ops.pebble.ConnectionError` (because ``can_connect=False``) are
+    not recorded.
+
+    Keyed by container name. Reset at the start of each :meth:`run` call.
+    """
 
     workload_version_history: list[str]
     """A record of the workload versions the charm has set.
@@ -781,6 +824,8 @@ class Context(Generic[CharmType]):
         self.app_status_history: list[_EntityStatus] = []
         self.unit_status_history: list[_EntityStatus] = []
         self.exec_history: dict[str, list[ExecArgs]] = {}
+        self.service_ops_history: dict[str, list[ServiceOp]] = {}
+        self.add_layer_history: dict[str, list[AddLayer]] = {}
         self.workload_version_history: list[str] = []
         self.removed_secret_revisions: list[int] = []
         self.emitted_events: list[ops.EventBase] = []
@@ -813,6 +858,22 @@ class Context(Generic[CharmType]):
     def _set_output_state(self, output_state: State):
         """Hook for Runtime to set the output state."""
         self._output_state = output_state
+
+    def get_service_ops(
+        self,
+        container: str,
+        service: str | None = None,
+    ) -> list[ServiceOp]:
+        """Return the recorded Pebble service operations for a container.
+
+        :arg container: the container name to retrieve operations for.
+        :arg service: if given, only return operations whose
+            :attr:`ServiceOp.services` contains this name.
+        """
+        ops_ = self.service_ops_history.get(container, [])
+        if service is not None:
+            ops_ = [o for o in ops_ if service in o.services]
+        return ops_
 
     def _get_container_root(self, container_name: str):
         """Get the path to a tempdir where this container's simulated root will live."""
@@ -943,6 +1004,12 @@ class Context(Generic[CharmType]):
 
     @contextmanager
     def _run(self, event: _Event, state: State):
+        # Reset per-run history fields so that they reflect only the current
+        # run when a Context is reused across multiple ctx.run() calls.
+        self.exec_history.clear()
+        self.service_ops_history.clear()
+        self.add_layer_history.clear()
+
         runtime = Runtime(
             app_name=self.app_name,
             charm_spec=self._charm_spec,

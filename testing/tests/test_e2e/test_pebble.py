@@ -1742,3 +1742,202 @@ def test_service_exits_mixed_with_fails_and_runs():
         assert workload.get_service('healthy').current == ops.pebble.ServiceStatus.ACTIVE
         assert workload.get_service('crashy').current == ops.pebble.ServiceStatus.ERROR
         assert workload.get_service('exity').current == ops.pebble.ServiceStatus.ERROR
+
+
+class NotifyingStartCharm(ops.CharmBase):
+    """Drives one Pebble entry point, then records what the container reports."""
+
+    entry_point = 'start'
+    services: tuple[str, ...] = ('myapp',)
+    seen: list[ops.pebble.Notice]
+    errors: list[ops.pebble.ChangeError]
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.config_changed, self._on_config_changed)
+
+    def _on_config_changed(self, _: ops.EventBase):
+        container = self.unit.get_container('foo')
+        try:
+            if self.entry_point == 'start':
+                container.start(*self.services)
+            elif self.entry_point == 'restart':
+                container.restart(*self.services)
+            elif self.entry_point == 'replan':
+                container.replan()
+            else:
+                container.autostart()
+        except ops.pebble.ChangeError as e:
+            NotifyingStartCharm.errors.append(e)
+        # Scenario runs a subclass of the charm, so mutate rather than assign.
+        NotifyingStartCharm.seen.extend(container.pebble.get_notices())
+
+
+NOTICE_LAYER = ops.pebble.Layer({
+    'services': {
+        'myapp': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+        'other': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+    }
+})
+
+
+def _notice_state(
+    behaviours: set[ServiceBehaviour],
+    entry_point: str = 'start',
+    services: tuple[str, ...] = ('myapp',),
+) -> tuple[Context[NotifyingStartCharm], State]:
+    NotifyingStartCharm.seen = []
+    NotifyingStartCharm.errors = []
+    NotifyingStartCharm.entry_point = entry_point
+    NotifyingStartCharm.services = services
+    ctx = Context(NotifyingStartCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'layer1': NOTICE_LAYER},
+        service_behaviours=frozenset(behaviours),
+    )
+    return ctx, State(containers={container})
+
+
+@pytest.mark.parametrize('entry_point', ['start', 'restart', 'replan', 'autostart'])
+def test_service_notice_emitted_when_the_service_starts(entry_point: str):
+    """Every entry point that starts the service records its declared notices."""
+    ctx, state = _notice_state(
+        behaviours={ServiceBehaviour('myapp', emits=[Notice('example.com/started')])},
+        entry_point=entry_point,
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    assert [notice.key for notice in NotifyingStartCharm.seen] == ['example.com/started']
+    # And it is in the output state, which is what lets the next run use it.
+    assert [notice.key for notice in state_out.get_container('foo').notices] == [
+        'example.com/started'
+    ]
+
+
+def test_service_notice_carries_its_type_and_data():
+    ctx, state = _notice_state(
+        behaviours={
+            ServiceBehaviour(
+                'myapp',
+                emits=[Notice('example.com/started', last_data={'version': '2'})],
+            )
+        },
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    (notice,) = state_out.get_container('foo').notices
+    assert notice.type == ops.pebble.NoticeType.CUSTOM
+    assert notice.last_data == {'version': '2'}
+    # Pebble assigns the ID and the timestamps, so they are not the declared ones.
+    assert notice.occurrences == 1
+
+
+def test_service_notice_repeats_rather_than_duplicating():
+    """Starting a service twice gives one notice with two occurrences, as Pebble does."""
+    ctx, state = _notice_state(
+        behaviours={ServiceBehaviour('myapp', emits=[Notice('example.com/started')])},
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    state_out = ctx.run(ctx.on.config_changed(), state=state_out)
+    (notice,) = state_out.get_container('foo').notices
+    assert notice.occurrences == 2
+
+
+def test_failing_service_emits_nothing():
+    """A service that never starts can't have notified anything."""
+    ctx, state = _notice_state(
+        behaviours={
+            ServiceBehaviour(
+                'myapp',
+                start=ServiceStart.FAILS,
+                emits=[Notice('example.com/started')],
+            )
+        },
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    assert NotifyingStartCharm.errors
+    assert NotifyingStartCharm.seen == []
+    assert state_out.get_container('foo').notices == []
+
+
+def test_exiting_service_still_emits():
+    """An EXITS service does start, so its notices are recorded."""
+    ctx, state = _notice_state(
+        behaviours={
+            ServiceBehaviour(
+                'myapp',
+                start=ServiceStart.EXITS,
+                exit_code=ServiceExitCode.FAILURE,
+                emits=[Notice('example.com/started')],
+            )
+        },
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    assert [notice.key for notice in state_out.get_container('foo').notices] == [
+        'example.com/started'
+    ]
+
+
+def test_service_notice_emitted_beside_a_failing_service():
+    """One service failing doesn't silence a service that did start."""
+    ctx, state = _notice_state(
+        behaviours={
+            ServiceBehaviour('myapp', start=ServiceStart.FAILS),
+            ServiceBehaviour('other', emits=[Notice('example.com/other-started')]),
+        },
+        services=('myapp', 'other'),
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    assert NotifyingStartCharm.errors
+    assert [notice.key for notice in state_out.get_container('foo').notices] == [
+        'example.com/other-started'
+    ]
+
+
+class NoticeHandlerCharm(ops.CharmBase):
+    handled: list[str]
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.foo_pebble_custom_notice, self._on_notice)
+
+    def _on_notice(self, event: ops.PebbleCustomNoticeEvent):
+        NoticeHandlerCharm.handled.append(event.notice.key)
+
+
+def test_service_notice_can_be_handled_by_the_next_run():
+    """The point of the notice reaching the output state: the next run handles it."""
+    ctx, state = _notice_state(
+        behaviours={ServiceBehaviour('myapp', emits=[Notice('example.com/started')])},
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    container_out = state_out.get_container('foo')
+    (notice,) = container_out.notices
+
+    NoticeHandlerCharm.handled = []
+    handler_ctx = Context(NoticeHandlerCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    handler_ctx.run(
+        handler_ctx.on.pebble_custom_notice(container=container_out, notice=notice),
+        state=state_out,
+    )
+    assert NoticeHandlerCharm.handled == ['example.com/started']
+
+
+class SelfNotifyingCharm(ops.CharmBase):
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.config_changed, self._on_config_changed)
+
+    def _on_config_changed(self, _: ops.EventBase):
+        container = self.unit.get_container('foo')
+        container.pebble.notify(ops.pebble.NoticeType.CUSTOM, 'example.com/charm-said')
+
+
+def test_charm_notify_reaches_the_output_state():
+    """A notice the charm itself records is kept, as Pebble keeps it."""
+    ctx = Context(SelfNotifyingCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    container = Container('foo', can_connect=True)
+    state_out = ctx.run(ctx.on.config_changed(), state=State(containers={container}))
+    assert [notice.key for notice in state_out.get_container('foo').notices] == [
+        'example.com/charm-said'
+    ]

@@ -1083,6 +1083,22 @@ class Notice:
         object.__setattr__(self, 'repeat_after', repeat_after)
         object.__setattr__(self, 'expire_after', expire_after)
 
+    @classmethod
+    def _from_ops(cls, notice: pebble.Notice) -> Notice:
+        return cls(
+            key=notice.key,
+            id=notice.id,
+            user_id=notice.user_id,
+            type=notice.type,
+            first_occurred=notice.first_occurred,
+            last_occurred=notice.last_occurred,
+            last_repeated=notice.last_repeated,
+            occurrences=notice.occurrences,
+            last_data=notice.last_data,
+            repeat_after=notice.repeat_after,
+            expire_after=notice.expire_after,
+        )
+
     def _to_ops(self) -> pebble.Notice:
         return pebble.Notice(
             id=self.id,
@@ -1293,6 +1309,48 @@ class ServiceBehaviour:
     exit_code: ServiceExitCode = ServiceExitCode.FAILURE
     """Whether an ``EXITS`` service's later exit is clean. Ignored unless
     :attr:`start` is :attr:`ServiceStart.EXITS`."""
+
+    emits: Sequence[Notice] = ()
+    """Notices the workload sends when this service starts.
+
+    A workload often notifies Pebble once it is up, and the charm handles the
+    resulting event on a later run. Declaring the notices here means a test
+    can start the service and then use the resulting state as the input to the
+    run that handles the notice, instead of hand-seeding a notice that the
+    first run should have produced.
+
+    The notices are recorded when the service starts -- through
+    :meth:`ops.Container.start`, :meth:`ops.Container.restart`,
+    :meth:`ops.Container.replan` or :meth:`ops.Container.autostart` -- and
+    appear both to the charm during that run and in the output state. A
+    service declared :attr:`ServiceStart.FAILS` never starts, so it emits
+    nothing; a :attr:`ServiceStart.EXITS` service does start, so it does.
+
+    Each notice's ID, timestamps and occurrence count are assigned as Pebble
+    assigns them, so only the type, key and data are taken from what's
+    declared here. Starting the service twice in one run gives one notice with
+    two occurrences, as Pebble would.
+
+    For example::
+
+        Container(
+            "workload",
+            can_connect=True,
+            layers={"base": layer},
+            service_behaviours={
+                ServiceBehaviour("myapp", emits=[Notice("example.com/started")]),
+            },
+        )
+    """
+
+    def __post_init__(self):
+        object.__setattr__(self, 'emits', tuple(self.emits))
+
+    def __hash__(self) -> int:
+        # A Notice carries a mapping, so the generated field-wise hash won't
+        # do. Hashing on the service name matches CheckInfo, and means a
+        # container can't hold two behaviours for the same service.
+        return hash(self.service_name)
 
 
 @dataclasses.dataclass(frozen=True, init=False)

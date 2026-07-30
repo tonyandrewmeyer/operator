@@ -1202,10 +1202,7 @@ def test_service_fails_exec_error_yields_inactive():
 
 
 def test_service_fails_change_error_shape():
-    """The raised ChangeError should match the shape measured against real Pebble.
-
-    See WORKLOAD-MOCK-DESIGN.md §11.2.
-    """
+    """The raised ChangeError should match the shape measured against real Pebble."""
     layer = _crash_layer(on_failure='ignore')
     container = Container(
         'foo',
@@ -1317,11 +1314,7 @@ def test_service_with_no_behaviour_still_runs():
 
 
 def test_service_fails_mixed_batch_leaves_other_service_active():
-    """One FAILS service in a multi-service start doesn't block the others.
-
-    Unverified extrapolation beyond §11 (which only measured a single-service
-    call) -- see WORKLOAD-MOCK-DESIGN.md §12.3.
-    """
+    """One FAILS service in a multi-service start doesn't block the others."""
     layer = ops.pebble.Layer({
         'services': {
             'good': {'override': 'replace', 'command': '/bin/true', 'startup': 'enabled'},
@@ -1363,17 +1356,6 @@ def test_service_fails_unsupported_on_failure_policy_raises():
             workload.start('svc')
 
 
-# The following tests pin shapes measured against real Pebble v1.32.1 on
-# 2026-07-28 -- see WORKLOAD-MOCK-DESIGN.md §13. Before that probe these
-# three shapes were extrapolated from the single-service `start` case, and
-# the extrapolation was wrong in each of them.
-#
-# A further probe on 2026-07-29 (§14) found that §13.2's "always
-# alphabetical" summary reading was itself an extrapolation from a case
-# that didn't distinguish it from "client's request order" -- see
-# test_service_fails_summary_leading_name_by_entry_point below, and §14.2.
-
-
 def _mixed_layer() -> ops.pebble.Layer:
     return ops.pebble.Layer({
         'services': {
@@ -1408,7 +1390,7 @@ def _mixed_container() -> Container:
 def test_service_fails_change_kind_follows_the_entry_point(
     op: str, expected_kind: str, expected_summary: str
 ):
-    """§13.1: the change kind is the entry point's, not always 'start'."""
+    """The change kind is the entry point's, not always 'start'."""
     layer = ops.pebble.Layer({
         'services': {
             'fail': {
@@ -1437,7 +1419,7 @@ def test_service_fails_change_kind_follows_the_entry_point(
 
 
 def test_service_fails_restart_emits_a_done_stop_task_first():
-    """§13.1 case B: a restart change carries a Done 'stop' task before 'start'."""
+    """A restart change carries a Done 'stop' task before 'start'."""
     layer = _crash_layer(on_failure='ignore')
     container = Container(
         'foo',
@@ -1456,7 +1438,7 @@ def test_service_fails_restart_emits_a_done_stop_task_first():
 
 
 def test_service_fails_replan_uses_replan_kind():
-    """§13.1 case K: a failing replan raises with kind='replan'."""
+    """A failing replan raises with kind='replan'."""
     ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
     with ctx(ctx.on.start(), State(containers={_mixed_container()})) as mgr:
         workload = mgr.charm.unit.get_container('foo')
@@ -1468,7 +1450,7 @@ def test_service_fails_replan_uses_replan_kind():
 
 
 def test_service_fails_multi_service_summary_counts_all_requested():
-    """§13.2/§14.2: the summary counts every requested service and quotes the name.
+    """The summary counts every requested service and quotes the name.
 
     The task list is alphabetical regardless of request order. The summary's
     leading name, for start/restart, is the *first-requested* service, not
@@ -1494,7 +1476,7 @@ def test_service_fails_multi_service_summary_counts_all_requested():
 
 
 def test_service_fails_summary_leading_name_by_entry_point():
-    """§14.2: start/restart lead with request order; autostart/replan lead alphabetically.
+    """start/restart lead with request order; autostart/replan lead alphabetically.
 
     Real Pebble's start/restart handler uses the client's request order
     verbatim for the summary's leading name (``payload.Services[0]`` in
@@ -1537,14 +1519,7 @@ def test_service_fails_summary_leading_name_by_entry_point():
 
 
 def test_service_fails_restart_groups_all_stops_before_all_starts():
-    """§14.1: a multi-service restart's tasks are grouped, not interleaved per service.
-
-    §13.1 case B measured this with a single service, where grouped and
-    interleaved read identically. With three, real Pebble emits every
-    "stop" task (alphabetical) before any "start" task (alphabetical),
-    because it builds the two task sets independently and concatenates
-    them, rather than emitting each service's stop immediately followed by
-    its own start.
+    """A multi-service restart's tasks are grouped, not interleaved per service.
     """
     layer = ops.pebble.Layer({
         'services': {
@@ -1581,7 +1556,7 @@ def test_service_fails_restart_groups_all_stops_before_all_starts():
 
 
 def test_service_fails_autostart_multiple_failures():
-    """§14.3: autostart with two failing services -- both get a bullet, both get a status."""
+    """autostart with two failing services -- both get a bullet, both get a status."""
     layer = ops.pebble.Layer({
         'services': {
             'alpha': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},

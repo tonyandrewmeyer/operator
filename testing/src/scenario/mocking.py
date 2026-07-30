@@ -916,7 +916,7 @@ class _MockPebbleClient(_TestingPebbleClient):
 
     def replan_services(self, timeout: float = 30.0, delay: float = 0.1):
         # Real Pebble fails a replan the same way it fails an autostart when
-        # an enabled service won't start, with kind='replan' (§13.1, case K).
+        # an enabled service won't start, with kind='replan'.
         enabled = self._enabled_service_names()
         if self._has_failing_behaviour(enabled):
             return self._start_with_behaviours(enabled, kind='replan')
@@ -986,9 +986,7 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
-        change summary's verb follows it. See WORKLOAD-MOCK-DESIGN.md §13-14
-        for the real-Pebble measurements this reproduces; every string here
-        was measured against Pebble v1.32.1, not reasoned about.
+        change summary's verb follows it.
         """
         if not services:
             raise self._api_error(400, 'must specify services for start action')
@@ -999,8 +997,7 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         # Pebble's task list is always alphabetical, regardless of entry
         # point -- plan.go's tarjanSort stabilises Go's randomised map
-        # iteration with sort.Strings (§13.2, confirmed for multi-service
-        # autostart/replan in §14.2).
+        # iteration with sort.Strings.
         ordered = sorted(services)
 
         failing: list[tuple[str, ServiceBehaviour]] = []
@@ -1034,11 +1031,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         # A restart change carries every "stop" task before any "start" task
         # -- real Pebble builds the two task sets independently (a StopOrder
         # pass, then a StartOrder pass) and concatenates them, rather than
-        # interleaving stop/start per service. §13.1 case B measured this
-        # with a single service, where grouped and interleaved are
-        # indistinguishable; §14.1 re-measured with three and found it's
-        # grouped, correcting the interleaved assumption this code used to
-        # make.
+        # interleaving stop/start per service.
         if kind == 'restart':
             for name in ordered:
                 tasks.append(_task(name, 'stop', 'Done'))
@@ -1047,7 +1040,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             behaviour = failing_by_name.get(name)
             if behaviour is None:
                 # Pebble emits a Done task for services that did start, not
-                # only for the failures (§13.2).
+                # only for the failures.
                 tasks.append(_task(name, 'start', 'Done'))
                 continue
             reason, status, log = self._service_failure_detail(known_services[name], behaviour)
@@ -1057,16 +1050,13 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         err = 'cannot perform the following tasks:\n' + '\n'.join(bullets)
         # The summary counts every *requested* service, not only the failing
-        # ones, and quotes the name (§13.2). Its leading name, though,
+        # ones, and quotes the name. Its leading name, though,
         # depends on the entry point: real Pebble's start/restart handler
         # uses the client's request order verbatim (payload.Services[0] in
         # api_services.go), while autostart/replan reassign payload.Services
         # to an alphabetically-sorted list before building the summary. So
         # start/restart lead with the caller's first-requested name and
-        # autostart/replan lead with the alphabetically first affected name
-        # -- corrects §13.2's "always alphabetical" reading, which happened
-        # to measure a case where the failing service was also alphabetically
-        # first (§14.2).
+        # autostart/replan lead with the alphabetically first affected name.
         leading = services[0] if kind in ('start', 'restart') else ordered[0]
         summary = f'{kind.capitalize()} service "{leading}"'
         if len(ordered) > 1:
@@ -1089,10 +1079,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         service: pebble.Service,
         behaviour: ServiceBehaviour,
     ) -> tuple[str, pebble.ServiceStatus | str, list[str]]:
-        """Return (reason, status, task.log) for a FAILS service.
-
-        See WORKLOAD-MOCK-DESIGN.md §11 for the shape this reproduces.
-        """
+        """Return (reason, status, task.log) for a FAILS service."""
         if behaviour.failure_mode is ServiceFailureMode.EXEC_ERROR:
             command = service.command.split()[0] if service.command else service.name
             reason = f'cannot start service: fork/exec {command}: no such file or directory'
@@ -1118,8 +1105,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             return 'ignore'
         raise NotImplementedError(
             f'ServiceStart.FAILS does not model on-failure: {on_failure!r} yet; only '
-            "'' (Pebble's default, equivalent to 'restart') and 'ignore' have been "
-            'verified against real Pebble -- see WORKLOAD-MOCK-DESIGN.md §11 and §12.'
+            "'' (Pebble's default, equivalent to 'restart') and 'ignore'.'
         )
 
     def add_layer(
@@ -1181,7 +1167,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         # because the parent unconditionally does
         # ``pebble.ServiceStatus(status)``, which raises ValueError for a
         # status like ``'backoff'`` that real Pebble reports but that has no
-        # ServiceStatus member. See WORKLOAD-MOCK-DESIGN.md §11.
+        # ServiceStatus member.
         if isinstance(names, str):
             raise TypeError(f'start_services should take a list of names, not just "{names}"')
         self._check_connection()
@@ -1192,8 +1178,8 @@ class _MockPebbleClient(_TestingPebbleClient):
             try:
                 service = services[name]
             except KeyError:
-                # in pebble, it just returns "nothing matched" if there are 0 matches,
-                # but it ignores services it doesn't recognize
+                # In pebble, it just returns "nothing matched" if there are 0 matches,
+                # but it ignores services it doesn't recognise.
                 continue
             status = self._service_status.get(name, pebble.ServiceStatus.INACTIVE)
             if service.startup == '':

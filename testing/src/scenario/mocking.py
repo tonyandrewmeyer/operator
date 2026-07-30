@@ -989,8 +989,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         Only called after a start/restart/replan/autostart call has already
         succeeded and set every requested service ``ACTIVE`` -- an ``EXITS``
         service's call still succeeds (unlike ``FAILS``), but its resulting
-        status is the declared post-exit value instead. See
-        WORKLOAD-MOCK-DESIGN.md §15 for what this reproduces.
+        status is the declared post-exit value instead.
         """
         known_services = self._render_services()
         for name in services:
@@ -1034,7 +1033,7 @@ class _MockPebbleClient(_TestingPebbleClient):
                 # An EXITS service mixed into the same request as a FAILS
                 # one still resolves to its own declared post-exit status,
                 # not ACTIVE -- Pebble tracks each service's start attempt
-                # independently (§12.3), and that independence applies
+                # independently, and that independence applies
                 # just as much between FAILS and EXITS as within FAILS.
                 self._service_status[name] = self._service_exit_detail(
                     known_services[name], behaviour
@@ -1152,9 +1151,8 @@ class _MockPebbleClient(_TestingPebbleClient):
         Unlike ``FAILS``, the call that reaches this point has already
         succeeded -- real Pebble doesn't fail the start/restart/replan/
         autostart call for an exit that happens after the service has been
-        up for more than a second (§15.1), so there's no reason/log/
-        ChangeError to build here, only the resulting status. See
-        WORKLOAD-MOCK-DESIGN.md §15 for the shape this reproduces.
+        up for more than a second so there's no reason/log/ChangeError
+        to build here, only the resulting status.
         """
         if behaviour.exit_code is ServiceExitCode.SUCCESS:
             verb = self._on_success_verb(service.on_success)
@@ -1170,8 +1168,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             return 'ignore'
         raise NotImplementedError(
             f'ServiceStart.EXITS does not model on-success: {on_success!r} yet; only '
-            "'' (Pebble's default, equivalent to 'restart') and 'ignore' have been "
-            'verified against real Pebble -- see WORKLOAD-MOCK-DESIGN.md §15.'
+            "'' (Pebble's default, equivalent to 'restart') and 'ignore'.'
         )
 
     def add_layer(

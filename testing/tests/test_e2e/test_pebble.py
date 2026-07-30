@@ -1611,11 +1611,6 @@ def test_service_fails_autostart_multiple_failures():
         assert workload.get_service('delta').current == ops.pebble.ServiceStatus.ERROR
 
 
-# The following tests cover stage 2, ServiceStart.EXITS -- a service that
-# starts successfully and exits later. Shapes measured against real Pebble
-# v1.32.1 on 2026-07-29 -- see WORKLOAD-MOCK-DESIGN.md §15.
-
-
 def _exit_layer(on_success: str | None = None, on_failure: str | None = None) -> ops.pebble.Layer:
     service: ServiceDict = {
         'override': 'replace',
@@ -1646,7 +1641,7 @@ def test_service_exits_status_by_exit_code_and_policy(
     on_failure: str | None,
     expected: ops.pebble.ServiceStatus | str,
 ):
-    """§15.3: the resulting status is a function of exit_code and the relevant policy."""
+    """The resulting status is a function of exit_code and the relevant policy."""
     layer = _exit_layer(on_success=on_success, on_failure=on_failure)
     container = Container(
         'foo',
@@ -1666,7 +1661,7 @@ def test_service_exits_status_by_exit_code_and_policy(
 
 @pytest.mark.parametrize('op', ['start', 'restart', 'replan', 'autostart'])
 def test_service_exits_all_entry_points_succeed(op: str):
-    """§15.1/§15.4: EXITS never raises ChangeError, for any entry point."""
+    """EXITS never raises ChangeError, for any entry point."""
     layer = _exit_layer(on_failure='ignore')
     container = Container(
         'foo',
@@ -1689,7 +1684,7 @@ def test_service_exits_all_entry_points_succeed(op: str):
 
 
 def test_service_exits_unsupported_on_success_policy_raises():
-    """§15.3: on-success values beyond ignore/restart raise NotImplementedError, like FAILS."""
+    """on-success values beyond ignore/restart raise NotImplementedError, like FAILS."""
     layer = _exit_layer(on_success='shutdown')
     container = Container(
         'foo',
@@ -1707,7 +1702,7 @@ def test_service_exits_unsupported_on_success_policy_raises():
 
 
 def test_service_exits_mixed_with_fails_and_runs():
-    """§14.4-style independence, extended to EXITS: each service's outcome is its own.
+    """Each service's outcome is its own.
 
     A single start() call requesting a RUNS, a FAILS, and an EXITS service:
     the FAILS one raises ChangeError for the whole call, but the EXITS one

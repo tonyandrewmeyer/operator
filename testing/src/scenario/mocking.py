@@ -1105,7 +1105,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             return 'ignore'
         raise NotImplementedError(
             f'ServiceStart.FAILS does not model on-failure: {on_failure!r} yet; only '
-            "'' (Pebble's default, equivalent to 'restart') and 'ignore'.'
+            "'' (Pebble's default, equivalent to 'restart') and 'ignore'."
         )
 
     def add_layer(

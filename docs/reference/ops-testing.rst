@@ -93,6 +93,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.BindAddress
 .. autoclass:: ops.testing.BlockedStatus
 .. autoclass:: ops.testing.CharmEvents
+.. autoclass:: ops.testing.CheckBehaviour
 .. autoclass:: ops.testing.CheckInfo
 .. autoclass:: ops.testing.CloudCredential
 .. autoclass:: ops.testing.CloudSpec

@@ -14,7 +14,7 @@ import datetime
 import io
 import shutil
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -51,6 +51,7 @@ from .errors import ActionMissingFromContextError
 from .logger import logger as scenario_logger
 from .state import (
     CharmType,
+    CheckBehaviour,
     CheckInfo,
     JujuLogLine,
     Mount,
@@ -839,6 +840,9 @@ class _MockPebbleClient(_TestingPebbleClient):
         self._notices: dict[tuple[str, str], pebble.Notice] = {}
         self._last_notice_id = 0
         self._changes: dict[str, pebble.Change] = {}
+        # How many times each check has been read, which is what advances a
+        # CheckBehaviour's declared statuses.
+        self._check_reads: dict[str, int] = {}
 
         # load any existing notices and check information from the state
         self._notices: dict[tuple[str, str], pebble.Notice] = {}
@@ -943,6 +947,166 @@ class _MockPebbleClient(_TestingPebbleClient):
         stopped = super().stop_checks(names)
         self._update_state_check_infos()
         return stopped
+
+    def _check_behaviours(self) -> dict[str, CheckBehaviour]:
+        return {behaviour.check_name: behaviour for behaviour in self._container.check_behaviours}
+
+    def _settle_check_change(
+        self,
+        info: pebble.CheckInfo,
+        status: str,
+        reason: str | None = None,
+    ) -> None:
+        """Finish off the change a check is running under, and notify."""
+        if not info.change_id:
+            return
+        change = self._changes[info.change_id]
+        now = datetime.datetime.now()
+        change.status = status
+        change.ready = True
+        change.ready_time = now
+        if reason is not None:
+            change.err = f'cannot perform the following tasks:\n- {change.summary} ({reason})'
+        for task in change.tasks:
+            task.status = status
+            task.ready_time = now
+            if reason is not None:
+                task.log.append(f'ERROR {reason}')
+        self._notify_check_change(change, info.name)
+
+    def _new_check_change(self, info: pebble.CheckInfo, down: bool) -> None:
+        """Put a check on a fresh perform-check or recover-check change."""
+        if down:
+            kind = pebble.ChangeKind.RECOVER_CHECK.value
+            summary = self._check_summary(info.name, 'Recover')
+        else:
+            kind = pebble.ChangeKind.PERFORM_CHECK.value
+            summary = self._check_summary(info.name, 'Perform')
+        now = datetime.datetime.now()
+        change = pebble.Change(
+            pebble.ChangeID(str(uuid.uuid4())),
+            kind,
+            summary=summary,
+            status=pebble.ChangeStatus.DOING.value,
+            tasks=[
+                pebble.Task(
+                    id=pebble.TaskID(str(uuid.uuid4())),
+                    kind=kind,
+                    summary=summary,
+                    status=pebble.ChangeStatus.DOING.value,
+                    log=[],
+                    progress=pebble.TaskProgress(label='', done=1, total=1),
+                    spawn_time=now,
+                    ready_time=None,
+                )
+            ],
+            ready=False,
+            err=None,
+            spawn_time=now,
+            ready_time=None,
+        )
+        self._changes[change.id] = change
+        info.change_id = change.id
+        self._notify_check_change(change, info.name)
+
+    def _notify_check_change(self, change: pebble.Change, check_name: str) -> None:
+        """Record the change-update notice Pebble emits for a check change."""
+        self._notify(
+            pebble.NoticeType.CHANGE_UPDATE,
+            change.id,
+            data={'check-name': check_name, 'kind': change.kind},
+        )
+
+    def _advance_check(self, name: str) -> None:
+        """Move a check to the next status its behaviour declares.
+
+        Called once per read of the check. The derived fields follow Pebble:
+        the failure count reaches the threshold when the check goes down and
+        keeps climbing while it stays down (Pebble does not pin it at the
+        threshold), the success count freezes while the check is down and
+        resets to one on recovery, and the change ID moves to a fresh
+        recover-check or perform-check change on each transition.
+        """
+        behaviour = self._check_behaviours().get(name)
+        if behaviour is None:
+            return
+        info = self._check_infos.get(name)
+        if info is None:
+            return
+        index = self._check_reads.get(name, 0)
+        self._check_reads[name] = index + 1
+        statuses = behaviour.statuses
+        # Once the sequence is exhausted its last entry repeats, so a charm
+        # that polls more times than the test declared settles on the final
+        # status rather than running off the end.
+        status = statuses[min(index, len(statuses) - 1)]
+        was = info.status
+        if status == was:
+            if status == pebble.CheckStatus.UP:
+                info.successes = (info.successes or 0) + 1
+            elif status == pebble.CheckStatus.DOWN:
+                info.failures += 1
+            return
+        if status == pebble.CheckStatus.INACTIVE:
+            # Same as stop_checks: the change settles at Done, the check has no
+            # change ID, and the counts are left alone.
+            self._settle_check_change(info, pebble.ChangeStatus.DONE.value)
+            info.status = pebble.CheckStatus.INACTIVE
+            info.change_id = None
+            return
+        if was == pebble.CheckStatus.INACTIVE:
+            # Same as start_checks: the check begins again with both counts at
+            # zero, and then the poll this read stands for lands.
+            info.failures = 0
+            info.successes = 0
+        if status == pebble.CheckStatus.DOWN:
+            # The failing perform-check goes to Error, and Pebble opens a
+            # recover-check to keep trying.
+            self._settle_check_change(
+                info,
+                pebble.ChangeStatus.ERROR.value,
+                behaviour.failure_message,
+            )
+            info.status = pebble.CheckStatus.DOWN
+            info.failures = info.threshold
+            self._new_check_change(info, down=True)
+        else:
+            # Recovery: the recover-check is Done, a new perform-check starts,
+            # and the success count restarts from one rather than zero.
+            self._settle_check_change(info, pebble.ChangeStatus.DONE.value)
+            info.status = pebble.CheckStatus.UP
+            info.failures = 0
+            info.successes = 1
+            self._new_check_change(info, down=False)
+
+    def get_checks(
+        self,
+        level: pebble.CheckLevel | None = None,
+        names: Iterable[str] | None = None,
+    ) -> list[pebble.CheckInfo]:
+        # Reading a check is what advances its declared statuses: in real
+        # Pebble a check's status moves when its own period elapses, and
+        # Scenario has no clock, so a read stands in for the passage of time.
+        # Only the checks this call actually returns advance.
+        for info in super().get_checks(level=level, names=names):
+            self._advance_check(info.name)
+        self._update_state_check_infos()
+        # Each call gets its own CheckInfo objects, as a real client does. The
+        # mock updates its own in place, and a charm that holds on to one from
+        # an earlier read should not see it move.
+        return [
+            pebble.CheckInfo(
+                name=info.name,
+                level=info.level,
+                startup=info.startup,
+                status=info.status,
+                successes=info.successes,
+                failures=info.failures,
+                threshold=info.threshold,
+                change_id=info.change_id,
+            )
+            for info in super().get_checks(level=level, names=names)
+        ]
 
     @property
     def _container(self) -> ContainerSpec:

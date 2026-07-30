@@ -1200,9 +1200,7 @@ class ServiceStart(Enum):
     """The service never comes up. :meth:`ops.Container.start`,
     :meth:`ops.Container.restart`, :meth:`ops.Container.replan`, and
     :meth:`ops.Container.autostart` all raise :class:`ops.pebble.ChangeError`
-    when asked to start this service, matching what real Pebble raises (see
-    the design notes referenced from :class:`ServiceBehaviour` for exactly
-    what's reproduced and what isn't)."""
+    when asked to start this service, matching what real Pebble raises."""
 
 
 class ServiceFailureMode(Enum):

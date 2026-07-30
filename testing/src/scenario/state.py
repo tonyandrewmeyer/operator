@@ -1143,6 +1143,8 @@ class CheckInfo:
 
     Passing ``None`` will automatically assign a new Change ID if the status is
     :attr:`ops.pebble.CheckStatus.UP` or :attr:`ops.pebble.CheckStatus.DOWN`.
+    An :attr:`ops.pebble.CheckStatus.INACTIVE` check has no Change ID, matching
+    what Pebble reports for a check that isn't running.
     """
 
     def __init__(
@@ -1168,7 +1170,8 @@ class CheckInfo:
         object.__setattr__(self, 'threshold', threshold)
         if change_id is None:
             if self.status == pebble.CheckStatus.INACTIVE:
-                change_id = pebble.ChangeID('')
+                # Pebble reports no change ID for a check that isn't running.
+                change_id = None
             else:
                 change_id = pebble.ChangeID(_generate_new_change_id())
         object.__setattr__(self, 'change_id', change_id)

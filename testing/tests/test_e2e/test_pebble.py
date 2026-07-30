@@ -1520,8 +1520,7 @@ def test_service_fails_summary_leading_name_by_entry_point():
 
 
 def test_service_fails_restart_groups_all_stops_before_all_starts():
-    """A multi-service restart's tasks are grouped, not interleaved per service.
-    """
+    """A multi-service restart's tasks are grouped, not interleaved per service."""
     layer = ops.pebble.Layer({
         'services': {
             'foxtrot': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},

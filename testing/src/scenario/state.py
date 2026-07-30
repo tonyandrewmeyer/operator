@@ -1202,6 +1202,36 @@ class ServiceStart(Enum):
     :meth:`ops.Container.autostart` all raise :class:`ops.pebble.ChangeError`
     when asked to start this service, matching what real Pebble raises."""
 
+    EXITS = 'exits'
+    """The service comes up successfully, then exits some time later.
+    :meth:`ops.Container.start`, :meth:`ops.Container.restart`,
+    :meth:`ops.Container.replan`, and :meth:`ops.Container.autostart` all
+    *succeed* for this service -- unlike ``FAILS``, no
+    :class:`ops.pebble.ChangeError` is raised, matching real Pebble (a crash
+    after the service has been up for more than a second doesn't fail the
+    call that started it). The resulting status depends on
+    :attr:`ServiceBehaviour.exit_code` and the service's ``on-success``/
+    ``on-failure`` policy; see :class:`ServiceExitCode`."""
+
+
+class ServiceExitCode(Enum):
+    """Whether an :attr:`ServiceStart.EXITS` service's later exit is clean.
+
+    Only meaningful when :attr:`ServiceBehaviour.start` is
+    :attr:`ServiceStart.EXITS`. Real Pebble applies a *different* plan
+    policy depending on the exit code -- ``on-success`` for a clean exit,
+    ``on-failure`` otherwise -- and restarts by default either way, so which
+    one applies changes which plan key controls the resulting status.
+    """
+
+    SUCCESS = 'success'
+    """The service exits cleanly (exit code 0). Governed by the service's
+    ``on-success`` policy."""
+
+    FAILURE = 'failure'
+    """The service exits with a nonzero code. Governed by the service's
+    ``on-failure`` policy."""
+
 
 class ServiceFailureMode(Enum):
     """How a :attr:`ServiceStart.FAILS` service fails to start.
@@ -1259,6 +1289,10 @@ class ServiceBehaviour:
     failure_mode: ServiceFailureMode = ServiceFailureMode.CRASH
     """Which way a ``FAILS`` service fails to start. Ignored unless
     :attr:`start` is :attr:`ServiceStart.FAILS`."""
+
+    exit_code: ServiceExitCode = ServiceExitCode.FAILURE
+    """Whether an ``EXITS`` service's later exit is clean. Ignored unless
+    :attr:`start` is :attr:`ServiceStart.EXITS`."""
 
 
 @dataclasses.dataclass(frozen=True, init=False)

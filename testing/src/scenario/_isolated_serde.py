@@ -36,24 +36,32 @@ import datetime
 import inspect
 import json
 import pathlib
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeAlias, Union, cast
 
 from ops import pebble
 
 from . import state as _state
 
+#: Any value that survives a ``json.dumps``/``json.loads`` round trip.  The
+#: encoder produces one of these and the decoder consumes one, which keeps the
+#: untyped ``Any`` from ``json.loads`` confined to a single narrowing point.
+_JSON: TypeAlias = Union[bool, int, float, str, 'list[_JSON]', 'dict[str, _JSON]', None]
+
 _TYPE_KEY = '__t__'
 
-_STATUS_TYPES: dict[str, type[_state._EntityStatus]] = {
+# ``UnknownStatus`` is deliberately absent: alone among the statuses its
+# ``__init__`` takes no message, so it is special-cased in the decoder and every
+# entry here shares the one-message-argument signature.
+_STATUS_TYPES: dict[str, Callable[[str], _state._EntityStatus]] = {
     'active': _state.ActiveStatus,
     'blocked': _state.BlockedStatus,
     'waiting': _state.WaitingStatus,
     'maintenance': _state.MaintenanceStatus,
     'error': _state.ErrorStatus,
-    'unknown': _state.UnknownStatus,
 }
 
-_DC_TYPES: dict[str, type] = {}
+_DC_TYPES: dict[str, type[Any]] = {}
 
 
 def _build_dc_registry() -> None:
@@ -74,14 +82,14 @@ def _build_dc_registry() -> None:
             _DC_TYPES[value.__name__] = value
 
 
-def _encode(obj: Any) -> Any:
+def _encode(obj: Any) -> _JSON:
     """Recursively encode ``obj`` into a JSON-compatible structure."""
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
     if isinstance(obj, _state._EntityStatus):
         return {_TYPE_KEY: 'status', 'name': obj.name, 'message': obj.message}
     if isinstance(obj, pebble.Layer):
-        return {_TYPE_KEY: 'layer', 'value': obj.to_dict()}
+        return {_TYPE_KEY: 'layer', 'value': cast('dict[str, _JSON]', obj.to_dict())}
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {
             _TYPE_KEY: 'dc',
@@ -99,23 +107,59 @@ def _encode(obj: Any) -> Any:
         return {_TYPE_KEY: 'timedelta', 'value': obj.total_seconds()}
     if isinstance(obj, pathlib.PurePath):
         return {_TYPE_KEY: 'path', 'value': str(obj)}
+    # The isinstance narrowing below leaves the element types unknown, since
+    # *obj* is Any; the casts pin them to Any so that the encoded results are
+    # fully typed.
     if isinstance(obj, frozenset):
-        return {_TYPE_KEY: 'frozenset', 'value': [_encode(x) for x in obj]}
+        frozen = cast('frozenset[Any]', obj)
+        return {_TYPE_KEY: 'frozenset', 'value': [_encode(x) for x in frozen]}
     if isinstance(obj, set):
-        return {_TYPE_KEY: 'set', 'value': [_encode(x) for x in obj]}
+        members = cast('set[Any]', obj)
+        return {_TYPE_KEY: 'set', 'value': [_encode(x) for x in members]}
     if isinstance(obj, tuple):
-        return {_TYPE_KEY: 'tuple', 'value': [_encode(x) for x in obj]}
+        elements = cast('tuple[Any, ...]', obj)
+        return {_TYPE_KEY: 'tuple', 'value': [_encode(x) for x in elements]}
     if isinstance(obj, list):
-        return [_encode(x) for x in obj]
+        items = cast('list[Any]', obj)
+        return [_encode(x) for x in items]
     if isinstance(obj, dict):
-        return {k: _encode(v) for k, v in obj.items()}
+        mapping = cast('dict[Any, Any]', obj)
+        return {k: _encode(v) for k, v in mapping.items()}
     raise TypeError(
         f'No JSON encoding for type {type(obj).__name__}: {obj!r}. '
         'Extend testing/src/scenario/_isolated_serde.py to handle it.'
     )
 
 
-def _decode(obj: Any) -> Any:
+def _as_str(value: _JSON, field: str) -> str:
+    """Narrow a decoded payload field to ``str``, or say what was wrong with it."""
+    if not isinstance(value, str):
+        raise TypeError(f'Expected a string for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _as_number(value: _JSON, field: str) -> float:
+    """Narrow a decoded payload field to a number, or say what was wrong with it."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f'Expected a number for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _as_list(value: _JSON, field: str) -> list[_JSON]:
+    """Narrow a decoded payload field to ``list``, or say what was wrong with it."""
+    if not isinstance(value, list):
+        raise TypeError(f'Expected a list for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _as_dict(value: _JSON, field: str) -> dict[str, _JSON]:
+    """Narrow a decoded payload field to ``dict``, or say what was wrong with it."""
+    if not isinstance(value, dict):
+        raise TypeError(f'Expected an object for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _decode(obj: _JSON) -> Any:
     """Recursively decode a value produced by :func:`_encode`."""
     if isinstance(obj, list):
         return [_decode(x) for x in obj]
@@ -125,30 +169,30 @@ def _decode(obj: Any) -> Any:
     if kind is None:
         return {k: _decode(v) for k, v in obj.items()}
     if kind == 'status':
-        name = obj['name']
-        cls = _STATUS_TYPES[name]
+        name = _as_str(obj['name'], 'status name')
         if name == 'unknown':
-            return cls()
-        return cls(obj['message'])
+            # Alone among the statuses, UnknownStatus carries no message.
+            return _state.UnknownStatus()
+        return _STATUS_TYPES[name](_as_str(obj['message'], 'status message'))
     if kind == 'layer':
-        return pebble.Layer(obj['value'])
+        return pebble.Layer(cast('pebble.LayerDict', _as_dict(obj['value'], 'layer')))
     if kind == 'dc':
         _build_dc_registry()
-        cls = _DC_TYPES[obj['cls']]
-        fields = {k: _decode(v) for k, v in obj['fields'].items()}
+        cls = _DC_TYPES[_as_str(obj['cls'], 'dataclass name')]
+        fields = {k: _decode(v) for k, v in _as_dict(obj['fields'], 'dataclass fields').items()}
         return cls(**fields)
     if kind == 'datetime':
-        return datetime.datetime.fromisoformat(obj['value'])
+        return datetime.datetime.fromisoformat(_as_str(obj['value'], 'datetime'))
     if kind == 'timedelta':
-        return datetime.timedelta(seconds=obj['value'])
+        return datetime.timedelta(seconds=_as_number(obj['value'], 'timedelta'))
     if kind == 'path':
-        return pathlib.Path(obj['value'])
+        return pathlib.Path(_as_str(obj['value'], 'path'))
     if kind == 'frozenset':
-        return frozenset(_decode(x) for x in obj['value'])
+        return frozenset(_decode(x) for x in _as_list(obj['value'], 'frozenset'))
     if kind == 'set':
-        return {_decode(x) for x in obj['value']}
+        return {_decode(x) for x in _as_list(obj['value'], 'set')}
     if kind == 'tuple':
-        return tuple(_decode(x) for x in obj['value'])
+        return tuple(_decode(x) for x in _as_list(obj['value'], 'tuple'))
     raise TypeError(f'Unknown wire type {kind!r}.')
 
 

@@ -65,11 +65,17 @@ import enum
 import inspect
 import json
 import pathlib
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeAlias, Union, cast
 
 from ops import SecretRotate, pebble
 
 from . import state as _state
+
+#: Any value that survives a ``json.dumps``/``json.loads`` round trip.  The
+#: encoder produces one of these and the decoder consumes one, which keeps the
+#: untyped ``Any`` from ``json.loads`` confined to a single narrowing point.
+_JSON: TypeAlias = Union[bool, int, float, str, 'list[_JSON]', 'dict[str, _JSON]', None]
 
 __all__ = [
     'STATE_SCHEMA_VERSION',
@@ -95,16 +101,18 @@ _PEBBLE_ENUM_TYPES: dict[str, type[enum.Enum]] = {
     'ServiceStatus': pebble.ServiceStatus,
 }
 
-_STATUS_TYPES: dict[str, type[_state._EntityStatus]] = {
+# ``UnknownStatus`` is deliberately absent: alone among the statuses its
+# ``__init__`` takes no message, so it is special-cased in the decoder and every
+# entry here shares the one-message-argument signature.
+_STATUS_TYPES: dict[str, Callable[[str], _state._EntityStatus]] = {
     'active': _state.ActiveStatus,
     'blocked': _state.BlockedStatus,
     'error': _state.ErrorStatus,
     'maintenance': _state.MaintenanceStatus,
-    'unknown': _state.UnknownStatus,
     'waiting': _state.WaitingStatus,
 }
 
-_DC_TYPES: dict[str, type] = {}
+_DC_TYPES: dict[str, type[Any]] = {}
 
 
 def _build_dc_registry() -> None:
@@ -131,7 +139,7 @@ class StateSchemaVersionError(Exception):
 # Encoder
 
 
-def _encode(obj: Any, path: str = 'state') -> Any:
+def _encode(obj: Any, path: str = 'state') -> _JSON:
     """Recursively encode *obj* into a JSON-compatible structure.
 
     Raises:
@@ -150,7 +158,7 @@ def _encode(obj: Any, path: str = 'state') -> Any:
         return {_T: 'status', 'name': obj.name, 'msg': obj.message}
 
     if isinstance(obj, pebble.Layer):
-        return {_T: 'layer', 'v': obj.to_dict()}
+        return {_T: 'layer', 'v': cast('dict[str, _JSON]', obj.to_dict())}
 
     # Enum check before dataclass: pebble enums are not dataclasses.
     if isinstance(obj, enum.Enum):
@@ -160,7 +168,7 @@ def _encode(obj: Any, path: str = 'state') -> Any:
         return {_T: 'enum', 'cls': cls_name, 'name': obj.name}
 
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        encoded_fields = {}
+        encoded_fields: dict[str, _JSON] = {}
         for f in dataclasses.fields(obj):
             # init=False fields (e.g. _Event._juju_name) are derived in
             # __post_init__ from other fields and can't be passed to
@@ -189,26 +197,34 @@ def _encode(obj: Any, path: str = 'state') -> Any:
         # Catch-all for PureWindowsPath and any other PurePath subclasses.
         return {_T: 'PurePosixPath', 'v': str(obj)}
 
+    # The isinstance narrowing below leaves the element types unknown, since
+    # *obj* is Any; the casts pin them to Any so that the encoded results are
+    # fully typed.
     if isinstance(obj, frozenset):
-        return {_T: 'frozenset', 'v': [_encode(x, f'{path}[]') for x in obj]}
+        frozen = cast('frozenset[Any]', obj)
+        return {_T: 'frozenset', 'v': [_encode(x, f'{path}[]') for x in frozen]}
 
     if isinstance(obj, set):
-        return {_T: 'set', 'v': [_encode(x, f'{path}[]') for x in obj]}
+        members = cast('set[Any]', obj)
+        return {_T: 'set', 'v': [_encode(x, f'{path}[]') for x in members]}
 
     if isinstance(obj, tuple):
-        return [_TUPLE_SENTINEL] + [_encode(x, f'{path}[]') for x in obj]
+        elements = cast('tuple[Any, ...]', obj)
+        return [_TUPLE_SENTINEL, *(_encode(x, f'{path}[]') for x in elements)]
 
     if isinstance(obj, list):
-        return [_encode(x, f'{path}[{i}]') for i, x in enumerate(obj)]
+        items = cast('list[Any]', obj)
+        return [_encode(x, f'{path}[{i}]') for i, x in enumerate(items)]
 
     if isinstance(obj, dict):
-        if obj and all(isinstance(k, int) for k in obj):
+        mapping = cast('dict[Any, Any]', obj)
+        if mapping and all(isinstance(k, int) for k in mapping):
             # JSON requires string keys; preserve int-keyed dicts with a tag.
             return {
                 _T: 'idict',
-                'v': {str(k): _encode(v, f'{path}[{k}]') for k, v in obj.items()},
+                'v': {str(k): _encode(v, f'{path}[{k}]') for k, v in mapping.items()},
             }
-        return {str(k): _encode(v, f'{path}.{k}') for k, v in obj.items()}
+        return {str(k): _encode(v, f'{path}.{k}') for k, v in mapping.items()}
 
     raise TypeError(f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}.')
 
@@ -233,7 +249,35 @@ def encode_state(state: _state.State) -> str:
 # Decoder
 
 
-def _decode_v1(obj: Any) -> Any:
+def _as_str(value: _JSON, field: str) -> str:
+    """Narrow a decoded payload field to ``str``, or say what was wrong with it."""
+    if not isinstance(value, str):
+        raise TypeError(f'Expected a string for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _as_number(value: _JSON, field: str) -> float:
+    """Narrow a decoded payload field to a number, or say what was wrong with it."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f'Expected a number for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _as_list(value: _JSON, field: str) -> list[_JSON]:
+    """Narrow a decoded payload field to ``list``, or say what was wrong with it."""
+    if not isinstance(value, list):
+        raise TypeError(f'Expected a list for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _as_dict(value: _JSON, field: str) -> dict[str, _JSON]:
+    """Narrow a decoded payload field to ``dict``, or say what was wrong with it."""
+    if not isinstance(value, dict):
+        raise TypeError(f'Expected an object for {field} in wire payload, got {value!r}.')
+    return value
+
+
+def _decode_v1(obj: _JSON) -> Any:
     """Decode a value produced by :func:`_encode` (schema version 1)."""
     if isinstance(obj, list):
         if obj and obj[0] == _TUPLE_SENTINEL:
@@ -249,60 +293,63 @@ def _decode_v1(obj: Any) -> Any:
         return {k: _decode_v1(v) for k, v in obj.items()}
 
     if kind == 'status':
-        name = obj['name']
+        name = _as_str(obj['name'], 'status name')
+        if name == 'unknown':
+            # Alone among the statuses, UnknownStatus carries no message.
+            return _state.UnknownStatus()
         cls = _STATUS_TYPES.get(name)
         if cls is None:
             raise TypeError(f'Unknown status name {name!r} in wire payload.')
-        return cls() if name == 'unknown' else cls(obj['msg'])
+        return cls(_as_str(obj['msg'], 'status message'))
 
     if kind == 'layer':
-        return pebble.Layer(obj['v'])
+        return pebble.Layer(cast('pebble.LayerDict', _as_dict(obj['v'], 'layer')))
 
     if kind == 'enum':
-        cls_name = obj['cls']
-        cls = _PEBBLE_ENUM_TYPES.get(cls_name)
-        if cls is None:
+        cls_name = _as_str(obj['cls'], 'enum class')
+        enum_cls = _PEBBLE_ENUM_TYPES.get(cls_name)
+        if enum_cls is None:
             raise TypeError(f'Unknown enum class {cls_name!r} in wire payload.')
-        return cls[obj['name']]
+        return enum_cls[_as_str(obj['name'], 'enum member')]
 
     if kind == 'dc':
         _build_dc_registry()
-        cls_name = obj['cls']
-        cls = _DC_TYPES.get(cls_name)
-        if cls is None:
+        cls_name = _as_str(obj['cls'], 'dataclass name')
+        dc_cls = _DC_TYPES.get(cls_name)
+        if dc_cls is None:
             raise TypeError(f'Unknown dataclass {cls_name!r} in wire payload.')
-        fields = {k: _decode_v1(v) for k, v in obj['f'].items()}
-        return cls(**fields)
+        fields = {k: _decode_v1(v) for k, v in _as_dict(obj['f'], 'dataclass fields').items()}
+        return dc_cls(**fields)
 
     if kind == 'datetime':
-        return datetime.datetime.fromisoformat(obj['v'])
+        return datetime.datetime.fromisoformat(_as_str(obj['v'], 'datetime'))
 
     if kind == 'timedelta':
-        return datetime.timedelta(seconds=obj['v'])
+        return datetime.timedelta(seconds=_as_number(obj['v'], 'timedelta'))
 
     if kind == 'Path':
-        return pathlib.Path(obj['v'])
+        return pathlib.Path(_as_str(obj['v'], 'Path'))
 
     if kind == 'PurePosixPath':
-        return pathlib.PurePosixPath(obj['v'])
+        return pathlib.PurePosixPath(_as_str(obj['v'], 'PurePosixPath'))
 
     if kind == 'frozenset':
-        return frozenset(_decode_v1(x) for x in obj['v'])
+        return frozenset(_decode_v1(x) for x in _as_list(obj['v'], 'frozenset'))
 
     if kind == 'set':
-        return {_decode_v1(x) for x in obj['v']}
+        return {_decode_v1(x) for x in _as_list(obj['v'], 'set')}
 
     if kind == 'bytes':
-        return base64.b64decode(obj['v'])
+        return base64.b64decode(_as_str(obj['v'], 'bytes'))
 
     if kind == 'idict':
-        return {int(k): _decode_v1(v) for k, v in obj['v'].items()}
+        return {int(k): _decode_v1(v) for k, v in _as_dict(obj['v'], 'idict').items()}
 
     raise TypeError(f'Unknown wire type tag {kind!r} in payload.')
 
 
 # Dispatch table keyed by schema version; new versions add an entry here.
-_VERSION_DECODERS: dict[int, Any] = {
+_VERSION_DECODERS: dict[int, Callable[[_JSON], Any]] = {
     1: _decode_v1,
 }
 
@@ -315,9 +362,11 @@ def decode_state(payload: str) -> _state.State:
             not supported by this version of ops.
         TypeError: if the payload contains an unknown type tag.
     """
-    data = json.loads(payload)
+    data = _as_dict(json.loads(payload), 'payload')
     version = data.get('state_schema_version')
-    decode_fn = _VERSION_DECODERS.get(version)  # type: ignore[arg-type]
+    # A non-integer version is treated the same as an unsupported one: the
+    # payload was produced by something this ops version does not understand.
+    decode_fn = _VERSION_DECODERS.get(version) if isinstance(version, int) else None
     if decode_fn is None:
         raise StateSchemaVersionError(
             f'Unsupported state_schema_version={version!r}. '

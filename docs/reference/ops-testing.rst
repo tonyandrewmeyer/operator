@@ -90,6 +90,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.ActionFailed
 .. autoclass:: ops.testing.ActiveStatus
 .. autoclass:: ops.testing.Address
+.. autoclass:: ops.testing.App
 .. autoclass:: ops.testing.BindAddress
 .. autoclass:: ops.testing.BlockedStatus
 .. autoclass:: ops.testing.CharmEvents
@@ -100,6 +101,9 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.Context
    :special-members: __call__
 .. autoclass:: ops.testing.DeferredEvent
+.. autoclass:: ops.testing.Deployment
+.. autoclass:: ops.testing.DeploymentError
+.. autoclass:: ops.testing.Dispatch
 .. autoclass:: ops.testing.ErrorStatus
 .. autoclass:: ops.testing.Exec
 .. autoclass:: ops.testing.ICMPPort
@@ -126,6 +130,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.SubordinateRelation
 .. autoclass:: ops.testing.TCPPort
 .. autoclass:: ops.testing.UDPPort
+.. autoclass:: ops.testing.Unit
 .. autoclass:: ops.testing.UnknownStatus
 .. autoclass:: ops.testing.WaitingStatus
 .. autoclass:: ops.testing.errors.ContextSetupError

@@ -614,7 +614,12 @@ class IsolatedContext:
         """The :class:`IsolatedEnv` that describes this context's execution environment."""
         return self._env
 
-    def _build_request(self, event: _Event, state: State) -> dict[str, Any]:
+    def _build_request(
+        self,
+        event: _Event,
+        state: State,
+        unit_id: int | None = None,
+    ) -> dict[str, Any]:
         return {
             'charm_source': str(self._env.charm_source),
             'extra_sys_path': list(self._env.extra_sys_path),
@@ -622,10 +627,27 @@ class IsolatedContext:
             'config': self._config,
             'actions': self._actions,
             'app_name': self._app_name,
-            'unit_id': self._unit_id,
+            'unit_id': self._unit_id if unit_id is None else unit_id,
             'event': _isolated_serde.encode_event(event),
             'state_in': _isolated_serde.encode_state(state),
         }
+
+    def _run_as(self, unit_id: int, event: _Event, state: State) -> State:
+        """Dispatch ``event`` as unit ``unit_id`` rather than this context's own unit.
+
+        The unit ID travels in the request rather than being baked into the
+        worker, so a single persistent worker serves every unit of an
+        application — which is what the model-level layer relies on to keep one
+        process per application rather than one per unit.
+
+        :private:
+        """
+        request = self._build_request(event, state, unit_id=unit_id)
+        if self._spawn_per_event:
+            return _dispatch_spawn(self._env, self._child_env, request)
+        if self._worker is None:
+            self._worker = _PersistentWorker(self._env, self._child_env, self._idle_timeout)
+        return self._worker.dispatch(request)
 
     def run(self, event: _Event, state: State) -> State:
         """Trigger a charm execution with an event and a State.
@@ -659,14 +681,7 @@ class IsolatedContext:
             state_out = ctx.run(ctx.on.install(), State())
             assert state_out.unit_status == ActiveStatus('ready')
         """
-        request = self._build_request(event, state)
-
-        if self._spawn_per_event:
-            return _dispatch_spawn(self._env, self._child_env, request)
-
-        if self._worker is None:
-            self._worker = _PersistentWorker(self._env, self._child_env, self._idle_timeout)
-        return self._worker.dispatch(request)
+        return self._run_as(self._unit_id, event, state)
 
     def close(self) -> None:
         """Tear down the persistent worker, if one is running.

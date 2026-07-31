@@ -59,7 +59,7 @@ import json
 import pathlib
 import sys
 import traceback
-from typing import Any
+from typing import Any, cast
 
 
 def _load_charm_type(charm_source: pathlib.Path):
@@ -104,7 +104,7 @@ def _load_charm_type(charm_source: pathlib.Path):
     return charm_types[0]
 
 
-def _run(request: dict, charm_cache: dict[str, Any] | None = None) -> dict:
+def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> dict[str, str]:
     """Execute a single charm event and return the serialised output state.
 
     Args:
@@ -123,7 +123,7 @@ def _run(request: dict, charm_cache: dict[str, Any] | None = None) -> dict:
     # Make the per-charm dependency set importable BEFORE anything else.
     # extra_sys_path entries are prepended so they take priority over any
     # site-packages already on sys.path (i.e. the worker venv's packages).
-    for entry in reversed(request.get('extra_sys_path', [])):
+    for entry in reversed(cast('list[str]', request.get('extra_sys_path', []))):
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
@@ -203,8 +203,9 @@ def main(argv: list[str]) -> int:
     request_file, response_file = argv[1], argv[2]
 
     with open(request_file, encoding='utf8') as fh:
-        request = json.load(fh)
+        request = cast('dict[str, Any]', json.load(fh))
 
+    response: dict[str, str]
     try:
         response = _run(request)
     except Exception:

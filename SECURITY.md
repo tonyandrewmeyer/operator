@@ -10,6 +10,8 @@ Long Term Support (LTS) releases receive 5 years of support and up to 10 additio
 - Ops 2.23 is the current LTS release.
 - Ops 3.x is the current release line and is under active development.
 
+ops-scenario and ops-tracing ship from this repository in the same releases and follow the same maintenance schedule as ops.
+
 ## Reporting a vulnerability
 
 Please provide a description of the issue, the steps you took to
@@ -39,3 +41,7 @@ The [Ubuntu Security disclosure and embargo
 policy](https://ubuntu.com/security/disclosure-policy) contains more
 information about what you can expect when you contact us, and what we
 expect from you.
+
+## Security announcements
+
+Security advisories for this project are published through [GitHub Security Advisories](https://github.com/canonical/operator/security/advisories) once a fix is available.

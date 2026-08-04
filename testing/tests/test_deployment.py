@@ -564,3 +564,22 @@ def test_isolated_units_share_one_worker():
         runner = app._runner
         assert isinstance(runner, testing.IsolatedContext) or hasattr(runner, '_ctx')
         assert runner._ctx._worker is not None  # type: ignore[attr-defined]
+
+
+def test_isolated_app_runs_update_config_and_run_action():
+    # update_config and run_action dispatch through the same runner as the
+    # startup sequence, but exercise a different event shape (config-changed
+    # outside of startup; an _Action payload) — worth its own isolated check
+    # rather than trusting that startup coverage implies it.
+    with testing.Deployment(name='iso') as d:
+        app = d.deploy(
+            _ISOLATION / 'charms' / 'alpha',
+            extra_sys_path=(str(_ISOLATION / 'deps' / 'confdep_v1'),),
+            config_schema=CONFIG,
+            actions=ACTIONS,
+        )
+        d.update_config(app, {'log_level': 'debug'})
+        d.run_action(app, 'greet', params={'name': 'isolated'})
+        # Alpha doesn't observe config-changed differently or the action, but
+        # both events must round-trip the isolation boundary without raising.
+        assert app.leader.state.unit_status.message.startswith('confdep=1.0')

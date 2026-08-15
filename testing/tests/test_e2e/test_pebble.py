@@ -1744,6 +1744,149 @@ def test_service_exits_mixed_with_fails_and_runs():
         assert workload.get_service('exity').current == ops.pebble.ServiceStatus.ERROR
 
 
+def _dependency_layer() -> ops.pebble.Layer:
+    """The exact layer from Real-Pebble probe #3, WORKLOAD-MOCK-DESIGN.md §22.1/§22.2.
+
+    delta must start before bravo; charlie must start after bravo; alpha has
+    no declared dependency. All four are startup: disabled, so only an
+    explicit start/stop/restart call touches them.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'alpha': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'bravo': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'charlie': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'after': ['bravo'],
+            },
+            'delta': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'before': ['bravo'],
+            },
+        }
+    })
+
+
+def test_service_dependency_start_order_matches_probe():
+    """StartOrder places dependencies ahead of dependants, independents alphabetically.
+
+    Real-Pebble probe #3 (WORKLOAD-MOCK-DESIGN.md §22.1): requesting
+    charlie, delta, alpha, bravo -- deliberately neither alphabetical nor
+    dependency order -- real Pebble's tasks came back alpha, delta, bravo,
+    charlie: the delta -> bravo -> charlie chain honoured exactly, alpha
+    placed first by the alphabetical tie-break among services with no
+    outstanding dependency.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _dependency_layer()},
+        # A FAILS declaration is what makes Scenario build a per-service
+        # task list at all -- with no failing service, start_services()
+        # takes the no-task-list fast path. bravo is mid-chain: delta must
+        # start before it, charlie must start after it.
+        service_behaviours={ServiceBehaviour('bravo', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('charlie', 'delta', 'alpha', 'bravo')
+        tasks = exc_info.value.change.tasks
+        assert [t.summary for t in tasks] == [
+            'Start service "alpha"',
+            'Start service "delta"',
+            'Start service "bravo"',
+            'Start service "charlie"',
+        ]
+        assert [t.status for t in tasks] == ['Done', 'Done', 'Error', 'Done']
+        # alpha sorts ahead of the failing service and is unaffected by it.
+        assert workload.get_service('alpha').current == ops.pebble.ServiceStatus.ACTIVE
+        # What this does NOT show: whether real Pebble holds a task whose
+        # dependency errored, rather than running it -- charlie depends on
+        # bravo here, and probe #3 didn't combine FAILS with a dependency
+        # (§22.1 used startup: disabled services with no failing behaviour).
+        # Scenario follows "declare, don't derive" throughout this design
+        # and resolves each service's status from its own ServiceBehaviour
+        # only, so charlie -- which has none -- still reaches ACTIVE despite
+        # its failed dependency. A test wanting charlie held down needs its
+        # own declared FAILS/EXITS on charlie; this mock does not infer it
+        # from bravo's failure.
+        assert workload.get_service('charlie').current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def test_service_dependency_restart_uses_independent_stop_and_start_orders():
+    """restart's stop pass is StopOrder; its start pass is StartOrder.
+
+    Neither is derived from the other. Confirms the §14.1 "independent
+    StopOrder pass, then independent StartOrder pass" mechanism still holds
+    once dependencies are involved: the two passes disagree about more than
+    direction here (see test_service_dependency_stop_order_matches_probe).
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _dependency_layer()},
+        service_behaviours={ServiceBehaviour('bravo', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.restart('charlie', 'delta', 'alpha', 'bravo')
+        tasks = exc_info.value.change.tasks
+        assert [t.summary for t in tasks if t.kind == 'stop'] == [
+            'Stop service "alpha"',
+            'Stop service "charlie"',
+            'Stop service "bravo"',
+            'Stop service "delta"',
+        ]
+        assert [t.summary for t in tasks if t.kind == 'start'] == [
+            'Start service "alpha"',
+            'Start service "delta"',
+            'Start service "bravo"',
+            'Start service "charlie"',
+        ]
+
+
+def test_service_dependency_stop_order_matches_probe():
+    """StopOrder is not StartOrder's list reversed -- each dependency edge points the other way.
+
+    Real-Pebble probe #3, WORKLOAD-MOCK-DESIGN.md §22.2: the same layer and
+    request as the start case (charlie, delta, alpha, bravo) stopped instead
+    of started came back alpha, charlie, bravo, delta. Reversing the start
+    order (alpha, delta, bravo, charlie) would give charlie, bravo, delta,
+    alpha, which is a different sequence -- stopping recomputes the
+    topological sort over the inverted dependency graph, it does not just
+    reverse the start list.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _dependency_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        change_id = workload.pebble.stop_services(['charlie', 'delta', 'alpha', 'bravo'])
+        change = workload.pebble.get_change(change_id)
+        assert change.kind == 'stop'
+        assert [t.kind for t in change.tasks] == ['stop'] * 4
+        assert [t.summary for t in change.tasks] == [
+            'Stop service "alpha"',
+            'Stop service "charlie"',
+            'Stop service "bravo"',
+            'Stop service "delta"',
+        ]
+        # Matches start/restart's rule, not autostart/replan's: the summary
+        # leads with the caller's first-requested name (§22.3) -- stop has
+        # no autostart/replan-style entry point to lead alphabetically
+        # instead.
+        assert change.summary == 'Stop service "charlie" and 3 more'
+        for name in ('alpha', 'bravo', 'charlie', 'delta'):
+            assert workload.get_service(name).current == ops.pebble.ServiceStatus.INACTIVE
+
+
 class NotifyingStartCharm(ops.CharmBase):
     """Drives one Pebble entry point, then records what the container reports."""
 

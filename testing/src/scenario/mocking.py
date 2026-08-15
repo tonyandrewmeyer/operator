@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import heapq
 import io
 import shutil
 import uuid
@@ -82,6 +83,27 @@ def _rfc3339_now() -> str:
     """An RFC3339 timestamp for the current time, for synthesised Pebble task logs."""
     return (
         datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    )
+
+
+def _pebble_task(
+    name: str,
+    kind: str,
+    status: str,
+    spawn_time: datetime.datetime,
+    ready_time: datetime.datetime,
+    log: list[str] | None = None,
+) -> pebble.Task:
+    """A single-service task for a synthesised start/stop/restart change."""
+    return pebble.Task(
+        id=pebble.TaskID(str(uuid.uuid4())),
+        kind=kind,
+        summary=f'{kind.capitalize()} service "{name}"',
+        status=status,
+        log=log or [],
+        progress=pebble.TaskProgress(label='', done=1, total=1),
+        spawn_time=spawn_time,
+        ready_time=ready_time,
     )
 
 
@@ -986,6 +1008,61 @@ class _MockPebbleClient(_TestingPebbleClient):
         self._emit_service_notices(services)
         return change_id
 
+    def stop_services(
+        self,
+        services: list[str],
+        timeout: float = 30.0,
+        delay: float = 0.1,
+    ) -> pebble.ChangeID:
+        """Stop the named services, in Pebble's ``StopOrder``.
+
+        Unlike ``start``/``restart``/``autostart``/``replan``, a stop cannot
+        fail via a declared :class:`ServiceBehaviour` -- there is no
+        ``ServiceStop`` outcome to declare, so this always succeeds for
+        every known service, matching real Pebble (Real-Pebble probe #3,
+        WORKLOAD-MOCK-DESIGN.md §22.2).
+        """
+        if isinstance(services, str):
+            raise TypeError(f'stop_services should take a list of names, not just "{services}"')
+        if not services:
+            raise self._api_error(400, 'must specify services for start action')
+        self._check_connection()
+
+        known_services = self._render_services()
+        for name in services:
+            if name not in known_services:
+                raise self._api_error(400, f'cannot stop services: service {name} does not exist')
+
+        ordered = self._service_dependency_order(services, known_services, reverse=True)
+
+        spawn_time = datetime.datetime.now(tz=datetime.timezone.utc)
+        ready_time = spawn_time + datetime.timedelta(milliseconds=10)
+        tasks: list[pebble.Task] = []
+        for name in ordered:
+            self._service_status[name] = pebble.ServiceStatus.INACTIVE
+            tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
+
+        # Matches start/restart, not autostart/replan: the summary leads
+        # with the caller's first-requested name, not the topologically
+        # first task (§22.3) -- stop has no autostart/replan-style entry
+        # point to lead alphabetically instead.
+        summary = f'Stop service "{services[0]}"'
+        if len(ordered) > 1:
+            summary += f' and {len(ordered) - 1} more'
+        change = pebble.Change(
+            id=pebble.ChangeID(str(uuid.uuid4())),
+            kind='stop',
+            summary=summary,
+            status='Done',
+            tasks=tasks,
+            ready=True,
+            err=None,
+            spawn_time=spawn_time,
+            ready_time=ready_time,
+        )
+        self._changes[change.id] = change
+        return change.id
+
     def restart_services(
         self,
         services: list[str],
@@ -1047,6 +1124,73 @@ class _MockPebbleClient(_TestingPebbleClient):
                 continue
             self._service_status[name] = self._service_exit_detail(known_services[name], behaviour)
 
+    def _service_dependency_order(
+        self,
+        names: Iterable[str],
+        known_services: dict[str, pebble.Service],
+        *,
+        reverse: bool = False,
+    ) -> list[str]:
+        """Order ``names`` the way Pebble's ``StartOrder``/``StopOrder`` would.
+
+        A Kahn's-algorithm topological sort of the declared ``before``/
+        ``after`` dependencies among ``names``, with services that have no
+        outstanding dependency picked alphabetically -- the same tie-break
+        ``tarjanSort`` gets from ``sort.Strings`` on Pebble's side. Measured
+        against a real daemon in Real-Pebble probe #3
+        (WORKLOAD-MOCK-DESIGN.md §22.1); this is not a plain alphabetical
+        sort, which is what this mock did before.
+
+        ``reverse=True`` computes ``StopOrder`` (§22.2): every ``before``/
+        ``after`` edge points the other way, so a service that must *start*
+        after another *stops* before it. This is not the same as reversing
+        the start-ordered list -- see §22.2's worked example.
+
+        A dependency on a service outside ``names`` is ignored: Scenario
+        does not derive which other services a start/stop request implicitly
+        pulls in, only orders the ones the caller named.
+        """
+        pending = set(names)
+        successors: dict[str, set[str]] = {name: set() for name in pending}
+        in_degree: dict[str, int] = dict.fromkeys(pending, 0)
+
+        def add_edge(first: str, second: str) -> None:
+            # `first` must be ordered ahead of `second`.
+            if second not in successors[first]:
+                successors[first].add(second)
+                in_degree[second] += 1
+
+        for name in pending:
+            service = known_services[name]
+            for other in service.before:
+                if other not in pending:
+                    continue
+                add_edge(other, name) if reverse else add_edge(name, other)
+            for other in service.after:
+                if other not in pending:
+                    continue
+                add_edge(name, other) if reverse else add_edge(other, name)
+
+        ready = [name for name, degree in in_degree.items() if degree == 0]
+        heapq.heapify(ready)
+        ordered: list[str] = []
+        while ready:
+            name = heapq.heappop(ready)
+            ordered.append(name)
+            for successor in sorted(successors[name]):
+                in_degree[successor] -= 1
+                if in_degree[successor] == 0:
+                    heapq.heappush(ready, successor)
+
+        if len(ordered) < len(pending):
+            # A dependency cycle among the requested services. Real Pebble
+            # rejects a plan whose layers combine into one of these, so
+            # nothing in this mock should be able to construct this shape
+            # today -- fall back to alphabetical for whatever's left rather
+            # than hang, in case that changes.
+            ordered.extend(sorted(pending.difference(ordered)))
+        return ordered
+
     def _start_with_behaviours(self, services: list[str], kind: str = 'start') -> NoReturn:
         """Apply declared ``ServiceBehaviour``s for a start/restart/autostart request.
 
@@ -1068,10 +1212,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             if name not in known_services:
                 raise self._api_error(400, f'cannot start services: service {name} does not exist')
 
-        # Pebble's task list is always alphabetical, regardless of entry
-        # point -- plan.go's tarjanSort stabilises Go's randomised map
-        # iteration with sort.Strings.
-        ordered = sorted(services)
+        ordered = self._service_dependency_order(services, known_services)
 
         failing: list[tuple[str, ServiceBehaviour]] = []
         for name in ordered:
@@ -1099,40 +1240,29 @@ class _MockPebbleClient(_TestingPebbleClient):
         spawn_time = datetime.datetime.now(tz=datetime.timezone.utc)
         ready_time = spawn_time + datetime.timedelta(milliseconds=10)
 
-        def _task(name: str, task_kind: str, status: str, log: list[str] | None = None):
-            verb = task_kind.capitalize()
-            return pebble.Task(
-                id=pebble.TaskID(str(uuid.uuid4())),
-                kind=task_kind,
-                summary=f'{verb} service "{name}"',
-                status=status,
-                log=log or [],
-                progress=pebble.TaskProgress(label='', done=1, total=1),
-                spawn_time=spawn_time,
-                ready_time=ready_time,
-            )
-
         failing_by_name = dict(failing)
 
         # A restart change carries every "stop" task before any "start" task
         # -- real Pebble builds the two task sets independently (a StopOrder
         # pass, then a StartOrder pass) and concatenates them, rather than
-        # interleaving stop/start per service.
+        # interleaving stop/start per service. The stop pass uses StopOrder,
+        # not StartOrder reversed -- see _service_dependency_order.
         if kind == 'restart':
-            for name in ordered:
-                tasks.append(_task(name, 'stop', 'Done'))
+            stop_ordered = self._service_dependency_order(services, known_services, reverse=True)
+            for name in stop_ordered:
+                tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
 
         for name in ordered:
             behaviour = failing_by_name.get(name)
             if behaviour is None:
                 # Pebble emits a Done task for services that did start, not
                 # only for the failures.
-                tasks.append(_task(name, 'start', 'Done'))
+                tasks.append(_pebble_task(name, 'start', 'Done', spawn_time, ready_time))
                 continue
             reason, status, log = self._service_failure_detail(known_services[name], behaviour)
             self._service_status[name] = status
             bullets.append(f'- Start service "{name}" ({reason})')
-            tasks.append(_task(name, 'start', 'Error', log))
+            tasks.append(_pebble_task(name, 'start', 'Error', spawn_time, ready_time, log))
 
         err = 'cannot perform the following tasks:\n' + '\n'.join(bullets)
         # The summary counts every *requested* service, not only the failing

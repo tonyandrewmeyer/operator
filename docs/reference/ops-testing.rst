@@ -101,8 +101,6 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.Context
    :special-members: __call__
 .. autoclass:: ops.testing.DeferredEvent
-.. autoclass:: ops.testing.Deployment
-.. autoclass:: ops.testing.DeploymentError
 .. autoclass:: ops.testing.Dispatch
 .. autoclass:: ops.testing.ErrorStatus
 .. autoclass:: ops.testing.Exec
@@ -110,6 +108,8 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.IsolatedContext
 .. autoclass:: ops.testing.IsolatedEnv
 .. autoclass:: ops.testing.IsolationError
+.. autoclass:: ops.testing.Juju
+.. autoclass:: ops.testing.JujuError
 .. autoclass:: ops.testing.JujuLogLine
 .. autoclass:: ops.testing.MaintenanceStatus
 .. autoclass:: ops.testing.Manager

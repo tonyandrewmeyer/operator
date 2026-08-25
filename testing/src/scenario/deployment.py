@@ -4,29 +4,31 @@
 """Model-level testing: drive several charms with Juju-shaped operations.
 
 :class:`~ops.testing.Context` runs *one* event against *one* charm.  This
-module adds a layer above it: a :class:`Deployment` owns a set of applications
+module adds a layer above it: a :class:`Juju` owns a set of applications
 (:class:`App`), each with its own units and its own :class:`State` per unit,
 and exposes Juju-shaped operations (``deploy``, ``add_unit``, ``remove_unit``,
-``update_config``, ``run_action``) that describe **intents rather than
-events**.  The deployment works out the Juju-faithful event sequence each
-intent produces and drains it in a convergence loop.
+``config``, ``run``) that describe **intents rather than events**.  The
+``Juju`` works out the Juju-faithful event sequence each intent produces and
+drains it in a convergence loop.
 
 A test therefore reads as a sequence of operations followed by assertions on
 the resulting state, rather than as a hand-written event sequence::
 
     from ops import testing
 
-    deployment = testing.Deployment()
-    web = deployment.deploy('./charms/myapp', num_units=2)
-    deployment.update_config(web, {'log_level': 'debug'})
+    juju = testing.Juju()
+    web = juju.deploy('./charms/myapp', num_units=2)
+    juju.config(web, {'log_level': 'debug'})
     assert web.leader.state.unit_status == testing.ActiveStatus('ready')
 
-:class:`Deployment` is a subclass of :class:`~ops.testing.Model`, so it *is* a
-model description as well as a handle to drive one: the identity it carries
-(``name``, ``uuid``, ``type``, ``cloud_spec``) is stamped into every unit's
-:class:`State`, which is what stops two applications in one deployment from
-disagreeing about which model they are in.  The plain :class:`Model` stays a
-passive value object with no operations on it.
+:class:`Juju` is its own class, not a subclass of :class:`~ops.testing.Model`:
+``Model`` is a frozen dataclass held as ``State.model`` in every unit's
+:class:`State` — per-unit metadata, not a handle — so ``Juju`` *produces* the
+``Model`` values that go into each unit's state rather than *being* one.  The
+identity it carries (``name``, ``uuid``, ``type``, ``cloud_spec``) is stamped
+into every unit's :class:`State`, which is what stops two applications under
+the same ``Juju`` from disagreeing about which model they are in.  The plain
+:class:`Model` stays a passive value object with no operations on it.
 
 .. note::
     Cross-application operations — ``integrate`` and the event propagation
@@ -40,13 +42,15 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 from collections import deque
-from collections.abc import Generator, Mapping
+from collections.abc import Collection, Generator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeAlias, cast
+from uuid import uuid4
 
 from .context import _DEFAULT_JUJU_VERSION, Context
 from .isolation import IsolatedContext, _read_charm_metadata, _read_yaml
 from .state import (
+    CloudSpec,
     Container,
     Model,
     PeerRelation,
@@ -55,6 +59,7 @@ from .state import (
     _Action,
     _Event,
     _next_relation_id,
+    _random_model_name,
 )
 
 if TYPE_CHECKING:
@@ -62,9 +67,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     'App',
-    'Deployment',
-    'DeploymentError',
     'Dispatch',
+    'Juju',
+    'JujuError',
     'Unit',
 ]
 
@@ -74,12 +79,13 @@ __all__ = [
 CharmSource: TypeAlias = 'str | pathlib.Path | type[CharmBase]'
 
 
-class DeploymentError(RuntimeError):
-    """Raised when an operation cannot be performed on a :class:`Deployment`.
+class JujuError(RuntimeError):
+    """Raised when an operation cannot be performed on a :class:`Juju`.
 
     For example: removing the last unit of an application, referring to an
-    application that was never deployed, or a convergence loop that does not
-    terminate.
+    application that was never deployed, removing units in a form that
+    doesn't match the application's substrate, or a convergence loop that
+    does not terminate.
     """
 
 
@@ -219,8 +225,8 @@ class _IsolatedRunner(_Runner):
 class Unit:
     """One unit of an :class:`App`.
 
-    Units are created by :meth:`Deployment.deploy` and
-    :meth:`Deployment.add_unit`; there is no reason to construct one directly.
+    Units are created by :meth:`Juju.deploy` and :meth:`Juju.add_unit`; there
+    is no reason to construct one directly.
     """
 
     def __init__(self, app: App, unit_id: int, state: State):
@@ -252,13 +258,13 @@ class Unit:
     def state(self) -> State:
         """This unit's :class:`State`.
 
-        Reading this settles the deployment first if there are events pending,
-        so assertions see converged state without an explicit
-        :meth:`Deployment.settle` call.  Inside a
-        :meth:`Deployment.stepping` block the implicit settle is suspended, so
-        mid-convergence assertions do not drain the queue.
+        Reading this settles the owning :class:`Juju` first if there are
+        events pending, so assertions see converged state without an
+        explicit :meth:`Juju.settle` call.  Inside a :meth:`Juju.stepping`
+        block the implicit settle is suspended, so mid-convergence
+        assertions do not drain the queue.
         """
-        self._app._deployment._settle_if_pending()
+        self._app._juju._settle_if_pending()
         return self._state
 
     def __repr__(self) -> str:
@@ -266,16 +272,16 @@ class Unit:
 
 
 class App:
-    """An application in a :class:`Deployment`.
+    """An application under a :class:`Juju`.
 
     Owns the charm reference, the metadata resolved from it, the environment
     it runs in, and the :class:`State` of each of its units.  Returned by
-    :meth:`Deployment.deploy`.
+    :meth:`Juju.deploy`.
     """
 
     def __init__(
         self,
-        deployment: Deployment,
+        juju: Juju,
         name: str,
         runner: _Runner,
         *,
@@ -284,7 +290,7 @@ class App:
         actions: dict[str, Any] | None,
         config: dict[str, Any],
     ):
-        self._deployment = deployment
+        self._juju = juju
         self._name = name
         self._runner = runner
         self._meta = meta
@@ -327,7 +333,16 @@ class App:
         try:
             return self._units[self._leader_id]
         except KeyError:
-            raise DeploymentError(f'{self._name} has no units.') from None
+            raise JujuError(f'{self._name} has no units.') from None
+
+    @property
+    def _substrate(self) -> Literal['kubernetes', 'lxd']:
+        """The substrate this application is deployed on.
+
+        Every application under one :class:`Juju` shares its model's
+        substrate; there is no per-application override.
+        """
+        return self._juju.type
 
     @property
     def _peer_endpoints(self) -> tuple[str, ...]:
@@ -349,7 +364,7 @@ class _RemoveUnit:
     Bookkeeping rather than a Juju event.  It sits in the queue *after* the
     unit's teardown events so that those events still find the unit in place,
     and so the drop happens in queue order rather than eagerly at
-    :meth:`Deployment.remove_unit` time.
+    :meth:`Juju.remove_unit` time.
     """
 
 
@@ -378,26 +393,32 @@ class _Queued(NamedTuple):
 
 
 class _Stepper:
-    """Dispatches queued events one at a time. See :meth:`Deployment.stepping`."""
+    """Dispatches queued events one at a time. See :meth:`Juju.stepping`."""
 
-    def __init__(self, deployment: Deployment):
-        self._deployment = deployment
+    def __init__(self, juju: Juju):
+        self._juju = juju
 
-    def step(self) -> tuple[_Event, Unit] | None:
-        """Dispatch exactly one queued event.
+    def step(self) -> Dispatch | None:
+        """Dispatch the next queued event that produces a charm invocation.
 
         Returns:
-            The ``(event, unit)`` that was dispatched, or ``None`` if the queue
-            was already empty.
+            The :class:`Dispatch` that was appended to the trace, or ``None``
+            if the queue is exhausted.  A queue entry that carries no charm
+            invocation of its own — a unit-removal marker, or an event whose
+            rebind target vanished before dispatch — is consumed internally
+            rather than surfaced, so ``None`` means only that the queue is
+            empty: ``while stepper.step():`` always drains it.
         """
-        return self._deployment._step()
+        return self._juju._step()
 
 
-class _DeploymentState:
-    """The mutable half of a :class:`Deployment`.
+class _JujuState:
+    """The mutable half of a :class:`Juju`.
 
-    Held in one object so that a single ``object.__setattr__`` gets past the
-    frozen dataclass this class inherits from, rather than one per field.
+    Held in one object rather than as plain attributes so that the identity
+    fields (``name``, ``uuid``, ``type``, ``cloud_spec``) stay the only things
+    set directly on ``Juju`` — everything mutable during a test run lives
+    here instead.
     """
 
     def __init__(self) -> None:
@@ -408,61 +429,77 @@ class _DeploymentState:
         self.closed = False
 
 
-class Deployment(Model):
+class Juju:
     """A set of applications, driven with Juju-shaped operations.
 
-    A :class:`Deployment` is a :class:`Model` — it carries the same model
-    identity, and that identity is stamped into every unit's :class:`State` —
-    with operations added.  Construct it exactly as you would a ``Model``::
+    Construct it much as you would a :class:`~ops.testing.Model`::
 
-        deployment = testing.Deployment(name='my-model', type='lxd')
+        juju = testing.Juju(name='my-model', type='lxd')
 
     Applications are added with :meth:`deploy`, which returns an :class:`App`
     handle::
 
-        web = deployment.deploy('./charms/myapp', num_units=2)
-        db = deployment.deploy(MyDatabaseCharm, app='db', meta=DB_META)
+        web = juju.deploy('./charms/myapp', num_units=2)
+        db = juju.deploy(MyDatabaseCharm, app='db', meta=DB_META)
 
     Each operation enqueues the events Juju would emit for it.  The queue is
     drained by :meth:`settle`, which is also called implicitly the first time
     you read a unit's :attr:`Unit.state`, so most tests are a sequence of
     operations followed by assertions::
 
-        deployment.update_config(web, {'log_level': 'debug'})
+        juju.config(web, {'log_level': 'debug'})
         assert web.leader.state.unit_status == testing.ActiveStatus('ready')
 
     Applications deployed from a path run in a subprocess with their own
     interpreter (see :class:`IsolatedContext`); applications deployed from a
     charm class run in the test process, with no isolation.  Call
-    :meth:`close` — or use the deployment as a context manager — to tear down
-    any worker processes.
+    :meth:`close` — or use ``Juju`` as a context manager — to tear down any
+    worker processes.
 
     inline: ok
     isolated: ok
     """
 
+    def __init__(
+        self,
+        name: str | None = None,
+        *,
+        uuid: str | None = None,
+        type: Literal['kubernetes', 'lxd'] = 'kubernetes',
+        cloud_spec: CloudSpec | None = None,
+    ) -> None:
+        """Create a simulated Juju model, as ``juju add-model`` would.
+
+        Args:
+            name: The model name.  Defaults to a random name, matching
+                :class:`~ops.testing.Model`.
+            uuid: A unique identifier for the model.  Defaults to a randomly
+                generated UUID.
+            type: The type of Juju model: ``'kubernetes'`` or ``'lxd'``
+                (machine).  Every application deployed under this ``Juju``
+                shares this substrate, which decides which form of
+                :meth:`remove_unit` it accepts.
+            cloud_spec: Cloud specification information, as in
+                :class:`~ops.testing.Model`.
+        """
+        self.name = name if name is not None else _random_model_name()
+        self.uuid = uuid if uuid is not None else str(uuid4())
+        self.type: Literal['kubernetes', 'lxd'] = type
+        self.cloud_spec = cloud_spec
+        self._state = _JujuState()
+
     # -- internals ---------------------------------------------------------
-    #
-    # Model is a frozen dataclass, so there is no __init__ to hook: the
-    # mutable state is created on first use instead.  That keeps Model's
-    # generated constructor (and its defaults) as the single definition of how
-    # a model identity is built.
 
     @property
-    def _d(self) -> _DeploymentState:
-        try:
-            return self.__dict__['_deployment_state']
-        except KeyError:
-            state = _DeploymentState()
-            object.__setattr__(self, '_deployment_state', state)
-            return state
+    def _d(self) -> _JujuState:
+        return self._state
 
     def _as_model(self) -> Model:
-        """This deployment's identity as a plain :class:`Model`.
+        """This ``Juju``'s identity as a plain :class:`Model`.
 
         Unit states get this rather than ``self``: a ``State`` is data that
         may be serialised out to a worker process, and it should not carry a
-        handle to the deployment that is driving it.
+        handle to the ``Juju`` instance that is driving it.
         """
         return Model(
             name=self.name,
@@ -473,7 +510,7 @@ class Deployment(Model):
 
     def _check_open(self) -> None:
         if self._d.closed:
-            raise DeploymentError('This deployment has been closed.')
+            raise JujuError('This Juju has been closed.')
 
     # -- operations --------------------------------------------------------
 
@@ -523,7 +560,7 @@ class Deployment(Model):
             The :class:`App` handle for the new application.
 
         Raises:
-            DeploymentError: if an application of this name already exists, or
+            JujuError: if an application of this name already exists, or
                 ``num_units`` is not positive.
 
         inline: ok
@@ -531,7 +568,7 @@ class Deployment(Model):
         """
         self._check_open()
         if num_units < 1:
-            raise DeploymentError(f'num_units must be at least 1, not {num_units}.')
+            raise JujuError(f'num_units must be at least 1, not {num_units}.')
 
         if isinstance(charm, (str, pathlib.Path)):
             charm_root = pathlib.Path(charm)
@@ -546,9 +583,9 @@ class Deployment(Model):
 
         app_name = app or meta.get('name')
         if not app_name:
-            raise DeploymentError('Could not determine the application name; pass app=.')
+            raise JujuError('Could not determine the application name; pass app=.')
         if app_name in self._d.apps:
-            raise DeploymentError(f'An application named {app_name!r} is already deployed.')
+            raise JujuError(f'An application named {app_name!r} is already deployed.')
 
         runner: _Runner
         if isinstance(charm, (str, pathlib.Path)):
@@ -605,39 +642,123 @@ class Deployment(Model):
         self._check_open()
         return self._add_unit(app, startup=True)
 
-    def remove_unit(self, app: App, unit: int | Unit | None = None) -> None:
-        """Remove a unit from an application, as ``juju remove-unit`` would.
+    def remove_unit(self, *app_or_unit: App | Unit, num_units: int = 0) -> None:
+        """Remove units from an application, as ``juju remove-unit`` would.
+
+        Removal differs by substrate, and Saddle matches Juju in exposing one
+        method for both rather than splitting it into two:
+
+        - **Kubernetes** — units are fungible; scale down by count.  Pass one
+          or more :class:`App` objects and a positive ``num_units``; the
+          highest-numbered units are removed from each::
+
+              juju.remove_unit(web, num_units=2)
+
+        - **Machine** — units are individually addressable; name them.  Pass
+          one or more :class:`Unit` objects, and no ``num_units``::
+
+              juju.remove_unit(web.units[1])
+              juju.remove_unit(u2, u3)
+
+        Which form applies is decided by the application's substrate
+        (:attr:`Juju.type`), not by which arguments happen to be passed: the
+        wrong form for the substrate is rejected with a message naming the
+        right one, rather than silently doing something surprising.
 
         Args:
-            app: The application to remove a unit from.
-            unit: Which unit, as a :class:`Unit` or a unit number.  Defaults to
-                the highest-numbered unit, which is the one Juju removes.
+            *app_or_unit: For the Kubernetes form, one or more :class:`App`
+                objects.  For the machine form, one or more :class:`Unit`
+                objects — they need not all belong to the same application.
+            num_units: How many units to remove from each application.
+                Kubernetes form only; leave unset for the machine form.
 
         Raises:
-            DeploymentError: when removing the last unit of an application, or
-                when the unit does not belong to ``app``.
+            JujuError: if the arguments don't match the substrate's form for
+                the application(s) involved, or if removing them would leave
+                an application with no units.
 
         inline: ok
         isolated: ok
         """
         self._check_open()
-        if unit is None:
-            unit_id = max(app._units)
-        elif isinstance(unit, Unit):
-            if unit.app is not app:
-                raise DeploymentError(f'{unit.name} is not a unit of {app.name}.')
-            unit_id = unit.id
-        else:
-            unit_id = unit
-        if unit_id not in app._units:
-            raise DeploymentError(f'{app.name} has no unit {unit_id}.')
-        if len(app._units) == 1:
-            raise DeploymentError(
-                f'Cannot remove the last unit of {app.name}; remove the application instead.'
+        if not app_or_unit:
+            raise JujuError('remove_unit() requires at least one App or Unit.')
+        is_apps = [isinstance(item, App) for item in app_or_unit]
+        if any(is_apps) and not all(is_apps):
+            raise JujuError(
+                'remove_unit() takes either App objects (with num_units=, for '
+                'Kubernetes) or Unit objects (for machine), not a mix.'
             )
 
+        if is_apps[0]:
+            apps = cast('tuple[App, ...]', app_or_unit)
+            if num_units < 1:
+                raise JujuError(
+                    'remove_unit() with App objects scales down by count; pass a '
+                    'positive num_units=.'
+                )
+            for app in apps:
+                if app._substrate != 'kubernetes':
+                    raise JujuError(
+                        f'{app.name} is on a {app._substrate} substrate, which '
+                        f'addresses units by name, not count. Use '
+                        f'remove_unit(unit) or remove_unit(u1, u2, ...) instead.'
+                    )
+                if num_units >= len(app._units):
+                    raise JujuError(
+                        f'Cannot remove {num_units} units from {app.name}; it has '
+                        f'only {len(app._units)}. Remove the application instead '
+                        'to take it down entirely.'
+                    )
+            for app in apps:
+                doomed_ids = set(sorted(app._units, reverse=True)[:num_units])
+                for unit_id in sorted(doomed_ids, reverse=True):
+                    self._remove_one_unit(app, unit_id, doomed_ids)
+            return
+
+        if num_units:
+            raise JujuError(
+                'num_units= is only valid with App objects (the Kubernetes '
+                'scale-down form); pass Unit objects to remove named units.'
+            )
+        units = cast('tuple[Unit, ...]', app_or_unit)
+        by_app: dict[App, list[Unit]] = {}
+        for unit in units:
+            by_app.setdefault(unit.app, []).append(unit)
+        for app, doomed in by_app.items():
+            if app._substrate == 'kubernetes':
+                raise JujuError(
+                    f'{app.name} is on a kubernetes substrate, which is scaled '
+                    f'down by count, not by naming units. Use '
+                    f'remove_unit({app.name}, num_units=...) instead.'
+                )
+            for unit in doomed:
+                if unit.id not in app._units:
+                    raise JujuError(f'{unit.name} is not part of {app.name} (already removed?).')
+            if len(app._units) - len(doomed) < 1:
+                raise JujuError(
+                    f'Cannot remove the last unit of {app.name}; remove the application instead.'
+                )
+        for app, doomed in by_app.items():
+            doomed_ids = {u.id for u in doomed}
+            for unit in doomed:
+                self._remove_one_unit(app, unit.id, doomed_ids)
+
+    def _remove_one_unit(self, app: App, unit_id: int, doomed_ids: Collection[int] = ()) -> None:
+        """Enqueue the departure and teardown sequence for one unit.
+
+        Args:
+            app: The application the unit belongs to.
+            unit_id: The unit being removed.
+            doomed_ids: Other unit IDs being removed in the same batch (see
+                :meth:`remove_unit`).  A peer in this set doesn't get a
+                ``relation_departed`` enqueued for *this* departure -- it is
+                leaving too, and gets its own teardown instead -- which also
+                avoids queueing an event for a unit that may already be gone
+                by the time this one dispatches.
+        """
         departing = app._units[unit_id]
-        remaining = [u for u in app.units if u is not departing]
+        remaining = [u for u in app.units if u is not departing and u.id not in doomed_ids]
 
         # The peers see the unit leave before it is torn down.
         for endpoint in app._peer_endpoints:
@@ -660,7 +781,7 @@ class Deployment(Model):
 
         self._d.queue.append(_Queued(app, unit_id, _RemoveUnit()))
 
-    def update_config(self, app: App, config: Mapping[str, Any]) -> None:
+    def config(self, app: App, config: Mapping[str, Any]) -> None:
         """Change an application's configuration, as ``juju config`` would.
 
         The new values are merged over the existing ones, and every unit sees
@@ -675,7 +796,7 @@ class Deployment(Model):
             unit._state = dataclasses.replace(unit._state, config=dict(app._config))
             self._enqueue(app, unit.id, _Event('config_changed'))
 
-    def run_action(
+    def run(
         self,
         target: App | Unit,
         action: str,
@@ -713,10 +834,10 @@ class Deployment(Model):
         those dispatches produced.
 
         Args:
-            max_events: Safety valve.  Raises :class:`DeploymentError` rather
-                than looping forever if the queue does not drain — most likely
-                a charm and its peers writing to each other's databags on
-                every event.
+            max_events: Safety valve.  Raises :class:`JujuError` rather than
+                looping forever if the queue does not drain — most likely a
+                charm and its peers writing to each other's databags on every
+                event.
 
         Returns:
             The events dispatched, in order, each with the unit it went to and
@@ -732,11 +853,10 @@ class Deployment(Model):
         while self._d.queue:
             dispatched += 1
             if dispatched > max_events:
-                raise DeploymentError(
-                    f'Deployment did not converge after {max_events} events; '
-                    'the queue is still not empty. Raise max_events if this is '
-                    'expected, or check for charms that write to a databag on '
-                    'every event.'
+                raise JujuError(
+                    f'Did not converge after {max_events} events; the queue is '
+                    'still not empty. Raise max_events if this is expected, or '
+                    'check for charms that write to a databag on every event.'
                 )
             self._step()
         return list(self._d.trace)
@@ -749,7 +869,7 @@ class Deployment(Model):
         implicitly settle, so an assertion between steps sees exactly the state
         the last step produced::
 
-            with deployment.stepping() as stepper:
+            with juju.stepping() as stepper:
                 stepper.step()
                 assert web.leader.state.unit_status == testing.MaintenanceStatus('setting up')
                 stepper.step()
@@ -772,30 +892,41 @@ class Deployment(Model):
         if self._d.queue and not self._d.stepping and not self._d.closed:
             self.settle()
 
-    def _step(self) -> tuple[_Event, Unit] | None:
-        """Dispatch the single event at the head of the queue."""
-        if not self._d.queue:
-            return None
-        app, unit_id, event, rebind = self._d.queue.popleft()
+    def _step(self) -> Dispatch | None:
+        """Dispatch the next event in the queue that produces a charm invocation.
 
-        if isinstance(event, _RemoveUnit):
-            del app._units[unit_id]
-            self._drop_peer(app, unit_id)
-            return None
+        A ``_RemoveUnit`` marker, and an event whose rebind target vanished
+        before dispatch, carry no charm invocation of their own; both are
+        consumed here rather than returned, so ``None`` from this method
+        means only "the queue is exhausted" — never "that entry evaporated,
+        but there is more queued." ``while stepper.step():`` (see
+        :meth:`_Stepper.step`) relies on that to drain the queue rather than
+        stopping early.
+        """
+        while self._d.queue:
+            app, unit_id, event, rebind = self._d.queue.popleft()
 
-        unit = app._units[unit_id]
-        if rebind is not None:
-            rebound = _rebind(unit._state, rebind)
-            if rebound is None:
-                # Whatever the event was about went away between queueing and
-                # dispatch; there is nothing left for the charm to observe.
-                return None
-            event = dataclasses.replace(event, **{rebind.kind: rebound})
-        state_out = app._runner.run(unit_id, event, unit._state)
-        unit._state = state_out
-        self._d.trace.append(Dispatch(event, unit, state_out))
-        self._propagate_peers(app, unit)
-        return event, unit
+            if isinstance(event, _RemoveUnit):
+                del app._units[unit_id]
+                self._drop_peer(app, unit_id)
+                continue
+
+            unit = app._units[unit_id]
+            if rebind is not None:
+                rebound = _rebind(unit._state, rebind)
+                if rebound is None:
+                    # Whatever the event was about went away between queueing
+                    # and dispatch; there is nothing left for the charm to
+                    # observe, so move on to the next queued entry.
+                    continue
+                event = dataclasses.replace(event, **{rebind.kind: rebound})
+            state_out = app._runner.run(unit_id, event, unit._state)
+            unit._state = state_out
+            dispatch = Dispatch(event, unit, state_out)
+            self._d.trace.append(dispatch)
+            self._propagate_peers(app, unit)
+            return dispatch
+        return None
 
     # -- units and peer relations -----------------------------------------
 
@@ -970,7 +1101,7 @@ class Deployment(Model):
         self._d.queue.clear()
         self._d.closed = True
 
-    def __enter__(self) -> Deployment:
+    def __enter__(self) -> Juju:
         return self
 
     def __exit__(self, *exc: object) -> None:

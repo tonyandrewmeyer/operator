@@ -7,17 +7,20 @@ Public surface (re-exported via ops.testing):
 
     encode_state(state: State) -> str
     decode_state(payload: str) -> State
-    StateSchemaVersionError
+    StateVersionMismatchError
 
 Wire format
 ~~~~~~~~~~~
-Every payload is a JSON object with a top-level ``state_schema_version``
-integer and the encoded state tree::
+Every payload is a JSON object with a top-level ``ops_testing_version``
+string and the encoded state tree::
 
-    {"state_schema_version": 1, "state": <encoded>}
+    {"ops_testing_version": "3.8.1", "state": <encoded>}
 
-``decode_state`` reads the version and dispatches to a version-specific
-decoder.  Unsupported versions raise :class:`StateSchemaVersionError`.
+Every per-charm venv is required to carry the same ``ops.testing`` version as
+the parent process (no cross-version negotiation).  ``decode_state`` asserts
+that ``ops_testing_version`` equals the version of the running process, and
+raises :class:`StateVersionMismatchError`, naming both versions, if it does
+not.
 
 Type envelopes
 ~~~~~~~~~~~~~~
@@ -68,6 +71,7 @@ import pathlib
 from collections.abc import Callable
 from typing import Any, TypeAlias, Union, cast
 
+import ops.version
 from ops import SecretRotate, pebble
 
 from . import state as _state
@@ -78,13 +82,10 @@ from . import state as _state
 _JSON: TypeAlias = Union[bool, int, float, str, 'list[_JSON]', 'dict[str, _JSON]', None]
 
 __all__ = [
-    'STATE_SCHEMA_VERSION',
-    'StateSchemaVersionError',
+    'StateVersionMismatchError',
     'decode_state',
     'encode_state',
 ]
-
-STATE_SCHEMA_VERSION = 1
 
 _T = '__t__'
 _TUPLE_SENTINEL = '__tuple__'
@@ -132,8 +133,14 @@ def _build_dc_registry() -> None:
 # Errors
 
 
-class StateSchemaVersionError(Exception):
-    """Raised when a payload's ``state_schema_version`` is not supported by this ops version."""
+class StateVersionMismatchError(RuntimeError):
+    """Raised when a payload's producing ``ops.testing`` version doesn't match this process's.
+
+    Every per-charm venv is required to carry the same ``ops.testing``
+    version as the parent test process; there is no cross-version
+    negotiation. Install a matching ``ops.testing`` (part of the ``ops[testing]``
+    extra) in the charm's venv.
+    """
 
 
 # Encoder
@@ -232,15 +239,15 @@ def _encode(obj: Any, path: str = 'state') -> _JSON:
 def encode_state(state: _state.State) -> str:
     """Serialise a :class:`~ops.testing.State` to a JSON string.
 
-    The payload includes a ``state_schema_version`` integer field for forward
-    compatibility.  Use :func:`decode_state` to round-trip the result back to
-    a ``State``.
+    The payload embeds the producing ``ops.testing`` version. Use
+    :func:`decode_state` to round-trip the result back to a ``State`` in a
+    process running the same version.
 
     Raises:
         TypeError: if any field value in *state* has no registered encoding.
     """
     payload = {
-        'state_schema_version': STATE_SCHEMA_VERSION,
+        'ops_testing_version': ops.version.version,
         'state': _encode(state),
     }
     return json.dumps(payload)
@@ -277,12 +284,12 @@ def _as_dict(value: _JSON, field: str) -> dict[str, _JSON]:
     return value
 
 
-def _decode_v1(obj: _JSON) -> Any:
-    """Decode a value produced by :func:`_encode` (schema version 1)."""
+def _decode(obj: _JSON) -> Any:
+    """Decode a value produced by :func:`_encode`."""
     if isinstance(obj, list):
         if obj and obj[0] == _TUPLE_SENTINEL:
-            return tuple(_decode_v1(x) for x in obj[1:])
-        return [_decode_v1(x) for x in obj]
+            return tuple(_decode(x) for x in obj[1:])
+        return [_decode(x) for x in obj]
 
     if not isinstance(obj, dict):
         return obj
@@ -290,7 +297,7 @@ def _decode_v1(obj: _JSON) -> Any:
     kind = obj.get(_T)
 
     if kind is None:
-        return {k: _decode_v1(v) for k, v in obj.items()}
+        return {k: _decode(v) for k, v in obj.items()}
 
     if kind == 'status':
         name = _as_str(obj['name'], 'status name')
@@ -318,7 +325,7 @@ def _decode_v1(obj: _JSON) -> Any:
         dc_cls = _DC_TYPES.get(cls_name)
         if dc_cls is None:
             raise TypeError(f'Unknown dataclass {cls_name!r} in wire payload.')
-        fields = {k: _decode_v1(v) for k, v in _as_dict(obj['f'], 'dataclass fields').items()}
+        fields = {k: _decode(v) for k, v in _as_dict(obj['f'], 'dataclass fields').items()}
         return dc_cls(**fields)
 
     if kind == 'datetime':
@@ -334,46 +341,37 @@ def _decode_v1(obj: _JSON) -> Any:
         return pathlib.PurePosixPath(_as_str(obj['v'], 'PurePosixPath'))
 
     if kind == 'frozenset':
-        return frozenset(_decode_v1(x) for x in _as_list(obj['v'], 'frozenset'))
+        return frozenset(_decode(x) for x in _as_list(obj['v'], 'frozenset'))
 
     if kind == 'set':
-        return {_decode_v1(x) for x in _as_list(obj['v'], 'set')}
+        return {_decode(x) for x in _as_list(obj['v'], 'set')}
 
     if kind == 'bytes':
         return base64.b64decode(_as_str(obj['v'], 'bytes'))
 
     if kind == 'idict':
-        return {int(k): _decode_v1(v) for k, v in _as_dict(obj['v'], 'idict').items()}
+        return {int(k): _decode(v) for k, v in _as_dict(obj['v'], 'idict').items()}
 
     raise TypeError(f'Unknown wire type tag {kind!r} in payload.')
-
-
-# Dispatch table keyed by schema version; new versions add an entry here.
-_VERSION_DECODERS: dict[int, Callable[[_JSON], Any]] = {
-    1: _decode_v1,
-}
 
 
 def decode_state(payload: str) -> _state.State:
     """Decode a JSON string produced by :func:`encode_state` back to a :class:`~ops.testing.State`.
 
     Raises:
-        StateSchemaVersionError: if the payload's ``state_schema_version`` is
-            not supported by this version of ops.
+        StateVersionMismatchError: if the payload's producing ``ops.testing``
+            version does not match this process's.
         TypeError: if the payload contains an unknown type tag.
     """
     data = _as_dict(json.loads(payload), 'payload')
-    version = data.get('state_schema_version')
-    # A non-integer version is treated the same as an unsupported one: the
-    # payload was produced by something this ops version does not understand.
-    decode_fn = _VERSION_DECODERS.get(version) if isinstance(version, int) else None
-    if decode_fn is None:
-        raise StateSchemaVersionError(
-            f'Unsupported state_schema_version={version!r}. '
-            f'Supported versions: {sorted(_VERSION_DECODERS)}. '
-            'Upgrade ops to a version that supports this payload.'
+    producing_version = data.get('ops_testing_version')
+    if producing_version != ops.version.version:
+        raise StateVersionMismatchError(
+            f'State was encoded by ops.testing {producing_version!r}, but this '
+            f'process is running ops.testing {ops.version.version!r}. '
+            "Install a matching ops.testing (the 'ops[testing]' extra) in the charm's venv."
         )
-    result = decode_fn(data['state'])
+    result = _decode(data['state'])
     if not isinstance(result, _state.State):
         raise TypeError(f'Decoded payload root is not a State: got {type(result).__name__!r}.')
     return result

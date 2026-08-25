@@ -8,12 +8,12 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import re
 
 import pytest
 from scenario._state_serde import (
-    STATE_SCHEMA_VERSION,
-    StateSchemaVersionError,
-    _decode_v1,
+    StateVersionMismatchError,
+    _decode,
     decode_state,
     encode_state,
 )
@@ -38,6 +38,7 @@ from scenario.state import (
     _EntityStatus,
 )
 
+import ops.version
 from ops import SecretRotate, pebble
 
 # Helpers
@@ -355,33 +356,45 @@ class TestEncoderTypeError:
 class TestDecoderTypeError:
     def test_unknown_type_tag_raises(self):
         with pytest.raises(TypeError, match='Unknown wire type tag'):
-            _decode_v1({'__t__': '__no_such_type__', 'v': None})
+            _decode({'__t__': '__no_such_type__', 'v': None})
 
     def test_unknown_dataclass_raises(self):
         with pytest.raises(TypeError, match='Unknown dataclass'):
-            _decode_v1({'__t__': 'dc', 'cls': 'NoSuchClass', 'f': {}})
+            _decode({'__t__': 'dc', 'cls': 'NoSuchClass', 'f': {}})
 
     def test_unknown_enum_class_raises(self):
         with pytest.raises(TypeError, match='Unknown enum class'):
-            _decode_v1({'__t__': 'enum', 'cls': 'NoSuchEnum', 'name': 'FOO'})
+            _decode({'__t__': 'enum', 'cls': 'NoSuchEnum', 'name': 'FOO'})
 
 
-class TestSchemaVersionMismatch:
-    def test_unknown_version_raises(self):
-        payload = json.dumps({'state_schema_version': 9999, 'state': {}})
-        with pytest.raises(StateSchemaVersionError, match='9999'):
+class TestOpsTestingVersion:
+    def test_current_version_matches(self):
+        state = State()
+        encoded = encode_state(state)
+        data = json.loads(encoded)
+        assert data['ops_testing_version'] == ops.version.version
+
+    def test_matching_version_round_trips(self):
+        # encode_state always stamps the running version, so a plain
+        # round-trip exercises the match path.
+        state = State()
+        out = _roundtrip(state)
+        assert out == state
+
+    def test_mismatched_version_raises(self):
+        payload = json.dumps({'ops_testing_version': '0.0.0-does-not-exist', 'state': {}})
+        with pytest.raises(StateVersionMismatchError, match=re.escape('0.0.0-does-not-exist')):
+            decode_state(payload)
+
+    def test_mismatched_version_names_both_versions(self):
+        payload = json.dumps({'ops_testing_version': '0.0.0-does-not-exist', 'state': {}})
+        with pytest.raises(StateVersionMismatchError, match=re.escape(ops.version.version)):
             decode_state(payload)
 
     def test_missing_version_raises(self):
         payload = json.dumps({'state': {}})
-        with pytest.raises(StateSchemaVersionError):
+        with pytest.raises(StateVersionMismatchError):
             decode_state(payload)
-
-    def test_current_version_accepted(self):
-        state = State()
-        encoded = encode_state(state)
-        data = json.loads(encoded)
-        assert data['state_schema_version'] == STATE_SCHEMA_VERSION
 
 
 # Status round-trips

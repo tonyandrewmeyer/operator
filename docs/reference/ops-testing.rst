@@ -117,7 +117,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.Resource
 .. autoclass:: ops.testing.Secret
 .. autoclass:: ops.testing.State
-.. autoclass:: ops.testing.StateSchemaVersionError
+.. autoclass:: ops.testing.StateVersionMismatchError
 .. autoclass:: ops.testing.Storage
 .. autoclass:: ops.testing.StoredState
 .. autoclass:: ops.testing.SubordinateRelation

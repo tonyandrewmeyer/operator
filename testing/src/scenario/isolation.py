@@ -44,21 +44,20 @@ mid-test — create a new :class:`IsolatedContext` to continue.
 Serialisation
 ~~~~~~~~~~~~~
 The event and state cross the process boundary as **JSON**.  The wire format is
-the typed, schema-versioned codec in :mod:`scenario._isolated_serde` (which
-delegates State to the canonical :mod:`scenario._state_serde`); it round-trips
-frozen dataclasses, ``set``/``frozenset``/``tuple``, ``datetime``,
-``pathlib.Path``, the ``_EntityStatus`` family, pebble enums, ``bytes``, and
-``pebble.Layer``.
+the typed codec in :mod:`scenario._isolated_serde` (which delegates State to
+the canonical :mod:`scenario._state_serde`); it round-trips frozen dataclasses,
+``set``/``frozenset``/``tuple``, ``datetime``, ``pathlib.Path``, the
+``_EntityStatus`` family, pebble enums, ``bytes``, and ``pebble.Layer``.
 
-The per-charm worker's ``ops`` / ``ops.testing`` need not exactly match the
-parent's: the parent is authoritative and decodes any worker on a wire-format
-schema version up to its own (``1..N``, where ``N`` is the parent's current
-schema version) — in practice, the orchestrating test suite's ``ops`` must be
-**>=** every charm's ``ops``.  A worker on a *newer* schema than the parent
-(``>N``) is rejected with :class:`~ops.testing.StateSchemaVersionError`, since
-the parent has no decoder for a schema it doesn't know about yet.  Only the
-charm's own runtime dependencies (``cryptography``, ``pydantic``, charm libs,
-...) are otherwise expected to differ between the worker venv and the parent.
+The per-charm worker's ``ops.testing`` must exactly match the parent's: there
+is no cross-version negotiation.  Each payload embeds the producing
+``ops.testing`` version, and the receiving side asserts it matches its own,
+rejecting a mismatch with :class:`~ops.testing.StateVersionMismatchError`
+naming both versions.  Charms under test are deployed from local source paths,
+so their venvs are built by test infrastructure that already owns installing
+a matching ``ops.testing``.  Only the charm's own runtime dependencies
+(``cryptography``, ``pydantic``, charm libs, ...) are expected to differ
+between the worker venv and the parent.
 
 Typical usage
 ~~~~~~~~~~~~~
@@ -141,14 +140,12 @@ class IsolatedEnv:
             the dependency directory is already available on disk.
 
     Invariant:
-        The per-charm venv selected via ``python_executable`` need not have
-        the exact same ``ops`` version as the parent test process: the parent
-        is authoritative and decodes any worker on a wire-format schema
-        version up to its own.  Only a worker on a *newer* schema than the
-        parent (which the parent has no decoder for) is rejected.  Only the
-        charm's own runtime dependencies are otherwise expected to differ
-        between the two environments.  A rejected version raises
-        :class:`~ops.testing.StateSchemaVersionError`, which may arrive
+        The per-charm venv selected via ``python_executable`` must carry the
+        exact same ``ops.testing`` version as the parent test process: there
+        is no cross-version negotiation.  Only the charm's own runtime
+        dependencies are otherwise expected to differ between the two
+        environments.  A mismatched version raises
+        :class:`~ops.testing.StateVersionMismatchError`, which may arrive
         wrapped in an :class:`IsolationError` if the worker is the side that
         hits it.
 
@@ -540,10 +537,9 @@ class IsolatedContext:
             worker.  Ignored in ``spawn_per_event`` mode.
 
     Invariant:
-        The parent process is authoritative on wire-format schema version: it
-        decodes any worker on a version up to its own, and rejects a worker on
-        a newer one.  Mismatches raise
-        :class:`~ops.testing.StateSchemaVersionError` (possibly wrapped in
+        The worker's ``ops.testing`` version must exactly match the parent
+        process's; there is no cross-version negotiation.  Mismatches raise
+        :class:`~ops.testing.StateVersionMismatchError` (possibly wrapped in
         :class:`IsolationError`).
 
     Example — point at a pre-built venv::

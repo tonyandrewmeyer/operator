@@ -61,9 +61,9 @@ requires:
     scope: container
 ```
 
-Other than this, implement a subordinate relation in the same way as any other relation. Note however that subordinate units cannot see each other's peer data.
+Other than this, implement a container-scoped subordinate relation in the same way as any other relation.
 
-See also: {external+juju:ref}`Juju | Charm taxonomy <charm-taxonomy>`
+See also: {ref}`subordinate-charms`, {external+juju:ref}`Juju | Charm taxonomy <charm-taxonomy>`
 
 ### Add code to use a relation
 

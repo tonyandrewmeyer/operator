@@ -31,15 +31,10 @@ This is a mature, production framework used by thousands of charms. Changes requ
 - **Document** all breaking changes in commit messages
 - **Always** preserve existing behavior unless fixing a bug
 
-### Test Organisation
-- Tests for `ops/main.py` go in `test/test_main.py`
-- Large test suites may get their own file: `test/test_main_foo.py`
-- Scenario tests have a different structure - follow existing patterns
-
 ## When Making Changes
 
 ### Code Modifications
-1. **Read existing code** before proposing changes - use Read tool to understand patterns
+1. **Read existing code** before proposing changes to understand established patterns
 2. **Check tests** - examine `test/` for similar test patterns
 3. **Verify changes** - execute `tox` after changes to ensure linting and unit tests pass
 
@@ -71,12 +66,6 @@ from ops import CharmBase, PebbleReadyEvent  # Avoid this
 
 ## Documentation Guidelines
 
-Follow the Diátaxis framework for documentation structure:
-- **Tutorials** (`docs/tutorial/`) - Learning-oriented
-- **How-to guides** (`docs/howto/`) - Task-oriented
-- **Reference** - Generated from docstrings
-- **Explanation** (`docs/explanation/`) - Understanding-oriented
-
 Comments are always full sentences that end with punctuation. Avoid using comments to explain *what* the code is *doing*, use them (sparingly, as required) to explain *why* the code is doing what it is doing.
 
 ### Docstring Style
@@ -106,17 +95,6 @@ def my_function(param: str, count: int = 1) -> list[str]:
     """
 ```
 
-**Documentation writing tips:**
-- Use **active voice**: "Create a check" not "A check is created"
-- Be **objective**: Avoid "simply", "easily", "just"
-- Be **concise**: No long introductions, get to the point
-- Use short sentences and simple phrasing
-- Be consistent with choice of words
-- Avoid words or phrases specific to US or UK English where possible, and use British English otherwise
-- State conditions **positively**: What should happen, not what shouldn't
-- Spell out abbreviations and avoid Latin: "for example" not "e.g."
-- Use **sentence case** for headings
-
 ### Version Dependencies
 
 Only document Juju version dependencies in docstrings:
@@ -141,9 +119,11 @@ Follow conventional commit style in PR titles:
 - `fix:` - Bug fix
 - `docs:` - Documentation changes
 - `refactor:` - Code refactoring
+- `perf:` - Performance improvement
 - `test:` - Test additions or updates
 - `chore:` - Maintenance tasks
 - `ci:` - CI/CD changes
+- `revert:` - Reverts a previous commit
 
 Examples:
 - `feat: add support for Pebble notices`
@@ -155,10 +135,9 @@ The project does not use conventional commit "scopes".
 ### Before Submitting
 1. Add tests for any new functionality
 2. Update docstrings for any API changes
-3. Ensure backward compatibility
-4. Run `tox -e format` to format code
-5. Run `tox -e lint` to check linting and types
-6. Run `tox -e unit` to verify unit tests pass - avoid drops in coverage (`tox -e coverage`)
-7. Run `make html` in the `docs` folder to ensure that the documentation can be generated
-8. Search the explanation, how-to, and tutorial documentation in the `docs` folder for topics related to the changes, then suggest places that might need expanding/altering
-9. If a virtual environment or sandbox is available, run `tox -e pebble` and `tox -e integration`
+3. Run `tox -e format` to format code
+4. Run `tox -e lint` to check linting and types
+5. Run `tox -e unit` to verify unit tests pass - avoid drops in coverage (`tox -e coverage`)
+6. Run `make html` in the `docs` folder to ensure that the documentation can be generated
+7. Search the explanation, how-to, and tutorial documentation in the `docs` folder for topics related to the changes, then suggest places that might need expanding/altering
+8. If a virtual environment or sandbox is available, run `tox -e pebble` and `tox -e integration`

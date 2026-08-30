@@ -699,6 +699,20 @@ def check_containers_consistency(
             f'Missing from metadata: {diff}.',
         )
 
+    # A check behaviour needs a check to drive.
+    for container in state.containers:
+        check_names = {check.name for check in container.check_infos}
+        for behaviour in container.check_behaviours:
+            if behaviour.check_name not in check_names:
+                if check_names:
+                    has = f'container has only checks: {", ".join(sorted(check_names))}'
+                else:
+                    has = 'container has no checks'
+                errors.append(
+                    f'container {container.name!r} has a check behaviour for '
+                    f'{behaviour.check_name!r} but no check with that name: {has}.',
+                )
+
     # If you have check-infos, then they must match the computed plan.
     for container in state.containers:
         plan = container.plan

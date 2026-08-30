@@ -1192,6 +1192,88 @@ class CheckInfo:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class CheckBehaviour:
+    """Mock data for how a Pebble check's status moves during a run.
+
+    Mirrors :class:`Exec`: the test declares what the check does, and Scenario
+    does not derive it from the plan. A check with no declared
+    ``CheckBehaviour`` keeps the status its :class:`CheckInfo` was seeded with,
+    so this does not affect any existing test.
+
+    The status advances one entry each time the charm reads *this* check --
+    :meth:`ops.Container.get_check`, :meth:`ops.Container.get_checks`, or
+    :meth:`ops.pebble.Client.get_checks`. Reads of other checks don't advance
+    it. Once the sequence runs out its last entry repeats, so a charm that
+    polls until a check comes up settles on the final status rather than
+    running off the end.
+
+    Advancing on reads rather than on service operations is deliberate: in
+    real Pebble a check's status moves when its own period elapses, and
+    starting, stopping or replanning a service does not move it. Scenario has
+    no clock, so a read is the closest thing to the passage of time it can
+    observe. Note the consequence: a handler that reads a check twice --
+    logging the status and then branching on it, say -- consumes two entries.
+
+    For example, to simulate a check that is down for the first two reads and
+    up afterwards::
+
+        Container(
+            "workload",
+            can_connect=True,
+            layers={"base": layer},
+            check_infos={CheckInfo("up-check", status=pebble.CheckStatus.DOWN)},
+            check_behaviours={
+                CheckBehaviour(
+                    "up-check",
+                    statuses=[
+                        pebble.CheckStatus.DOWN,
+                        pebble.CheckStatus.DOWN,
+                        pebble.CheckStatus.UP,
+                    ],
+                ),
+            },
+        )
+    """
+
+    check_name: str
+    """The name of the check this behaviour applies to."""
+
+    statuses: Sequence[pebble.CheckStatus] = ()
+    """The status the check reports on each successive read, last entry
+    repeating once the sequence is exhausted.
+
+    The failure count, success count, and change ID follow from these
+    statuses, the way Pebble derives them: the failure count reaches the
+    check's threshold when it goes down and keeps climbing while it stays
+    down, the success count freezes while the check is down and resets to one
+    when it recovers, and the change ID moves to a new ``recover-check``
+    change when the check goes down and to a new ``perform-check`` change when
+    it recovers.
+    """
+
+    failure_message: str | None = None
+    """The reason Pebble gives for a failing check, for example
+    ``'exit status 1'`` for an exec check or
+    ``'received non-20x status code 500'`` for an HTTP one.
+
+    When set, it appears in the failed change's ``err`` and in its task's log,
+    as it would with real Pebble. When ``None`` the change carries no error
+    text: Scenario has no way to know why a declared check failed, and won't
+    invent one.
+    """
+
+    def __post_init__(self):
+        if not self.statuses:
+            raise ValueError(
+                f'CheckBehaviour({self.check_name!r}) needs at least one status: '
+                'a behaviour with no statuses would never do anything.'
+            )
+
+    def __hash__(self) -> int:
+        return hash(self.check_name)
+
+
 @dataclasses.dataclass(frozen=True, init=False)
 class Container:
     """A Kubernetes container where a charm's workload runs."""
@@ -1272,6 +1354,27 @@ class Container:
     check_infos: frozenset[CheckInfo]
     """All Pebble health checks that have been added to the container."""
 
+    check_behaviours: frozenset[CheckBehaviour]
+    """Simulate a check's status moving during the run.
+
+    Specify a :class:`CheckBehaviour` for each check whose status the test
+    needs to control. A check with no declared behaviour keeps reporting the
+    status its :class:`CheckInfo` was seeded with, as it always has.
+
+    For example::
+
+        container = Container(
+            name='foo',
+            check_infos={CheckInfo('up-check', status=pebble.CheckStatus.DOWN)},
+            check_behaviours={
+                CheckBehaviour(
+                    'up-check',
+                    statuses=[pebble.CheckStatus.DOWN, pebble.CheckStatus.UP],
+                ),
+            },
+        )
+    """
+
     def __init__(
         self,
         name: str,
@@ -1288,6 +1391,7 @@ class Container:
         execs: Iterable[Exec] = (),
         notices: Iterable[Notice] = (),
         check_infos: Iterable[CheckInfo] = (),
+        check_behaviours: Iterable[CheckBehaviour] = (),
     ):
         # Juju passes the charm container name verbatim through to Kubernetes,
         # so the Kubernetes naming rules (RFC 1123 DNS label) apply.
@@ -1311,6 +1415,7 @@ class Container:
         # Stored as list for backwards compatibility.
         object.__setattr__(self, 'notices', list(notices))
         object.__setattr__(self, 'check_infos', frozenset(check_infos))
+        object.__setattr__(self, 'check_behaviours', frozenset(check_behaviours))
 
     def __hash__(self) -> int:
         return hash(self.name)

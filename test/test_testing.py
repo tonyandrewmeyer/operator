@@ -7223,6 +7223,88 @@ class TestChecks:
             assert info.status == pebble.CheckStatus.UP
             assert info.change_id, 'Change ID should not be None or the empty string'
 
+    def test_check_change_shape(self, request: pytest.FixtureRequest):
+        container = self._container_with_layer(request)
+        info = container.get_checks('chk1')['chk1']
+        assert info.change_id is not None
+        change = container.pebble.get_change(info.change_id)
+        assert change.id == info.change_id
+        assert change.kind == pebble.ChangeKind.PERFORM_CHECK.value
+        assert change.summary == 'Perform exec check "chk1"'
+        assert change.status == pebble.ChangeStatus.DOING.value
+        assert not change.ready
+        assert change.ready_time is None
+        # Pebble gives a check change exactly one task, sharing the change's
+        # kind and summary.
+        assert len(change.tasks) == 1
+        task = change.tasks[0]
+        assert task.kind == change.kind
+        assert task.summary == change.summary
+        assert task.status == pebble.ChangeStatus.DOING.value
+        assert task.log == []
+        assert (task.progress.label, task.progress.done, task.progress.total) == ('', 1, 1)
+
+    @pytest.mark.parametrize(
+        'check_dict,expected',
+        [
+            (
+                pebble.CheckDict(override='replace', exec=pebble.ExecDict(command='foo')),
+                'Perform exec check "chk"',
+            ),
+            (
+                pebble.CheckDict(
+                    override='replace', http=pebble.HttpDict(url='http://localhost:8080/')
+                ),
+                'Perform http check "chk"',
+            ),
+            (
+                pebble.CheckDict(override='replace', tcp=pebble.TcpDict(port=8080)),
+                'Perform tcp check "chk"',
+            ),
+        ],
+    )
+    def test_check_change_summary_has_the_check_type(
+        self,
+        request: pytest.FixtureRequest,
+        check_dict: pebble.CheckDict,
+        expected: str,
+    ):
+        harness = ops.testing.Harness(
+            ops.CharmBase,
+            meta='name: mycharm\ncontainers:\n  mycontainer:',
+        )
+        request.addfinalizer(harness.cleanup)
+        harness.set_can_connect('mycontainer', True)
+        harness.begin()
+        container = harness.charm.unit.get_container('mycontainer')
+        container.add_layer(
+            'mylayer',
+            pebble.Layer({'checks': {'chk': check_dict}}),
+        )
+        info = container.get_checks('chk')['chk']
+        assert info.change_id is not None
+        assert container.pebble.get_change(info.change_id).summary == expected
+
+    def test_stop_checks_settles_the_change(
+        self, request: pytest.FixtureRequest, reset_security_logging: None
+    ):
+        container = self._container_with_layer(request)
+        change_id = container.get_checks('chk1')['chk1'].change_id
+        assert change_id is not None
+        # See test_stop_checks: stopping a check logs a security event, but
+        # logging is not set up for Harness in these tests.
+        with pytest.warns(RuntimeWarning):
+            container.stop_checks('chk1')
+        info = container.get_checks('chk1')['chk1']
+        assert info.status == pebble.CheckStatus.INACTIVE
+        assert info.change_id is None
+        # Pebble settles the change a stopped check leaves behind at Done.
+        change = container.pebble.get_change(change_id)
+        assert change.status == pebble.ChangeStatus.DONE.value
+        assert change.ready
+        assert change.ready_time is not None
+        assert [task.status for task in change.tasks] == [pebble.ChangeStatus.DONE.value]
+
     @pytest.mark.parametrize(
         'combine,new_layer_name',
         [

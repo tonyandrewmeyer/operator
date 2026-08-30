@@ -986,7 +986,8 @@ class _MockPebbleClient(_TestingPebbleClient):
         # Real Pebble fails a replan the same way it fails an autostart when
         # an enabled service won't start, with kind='replan'.
         enabled = self._enabled_service_names()
-        if self._has_failing_behaviour(enabled):
+        known_services = self._render_services()
+        if self._needs_behaviour_path(enabled, known_services):
             return self._start_with_behaviours(enabled, kind='replan')
         super().replan_services(timeout=timeout, delay=delay)
         self._apply_exit_behaviours(enabled)
@@ -1001,7 +1002,8 @@ class _MockPebbleClient(_TestingPebbleClient):
     ) -> pebble.ChangeID:
         if isinstance(services, str):
             raise TypeError(f'start_services should take a list of names, not just "{services}"')
-        if self._has_failing_behaviour(services):
+        known_services = self._render_services()
+        if self._needs_behaviour_path(services, known_services):
             return self._start_with_behaviours(services)
         change_id = super().start_services(services, timeout=timeout, delay=delay)
         self._apply_exit_behaviours(services)
@@ -1071,7 +1073,8 @@ class _MockPebbleClient(_TestingPebbleClient):
     ) -> pebble.ChangeID:
         if isinstance(services, str):
             raise TypeError(f'restart_services should take a list of names, not just "{services}"')
-        if self._has_failing_behaviour(services):
+        known_services = self._render_services()
+        if self._needs_behaviour_path(services, known_services):
             return self._start_with_behaviours(services, kind='restart')
         change_id = super().restart_services(services, timeout=timeout, delay=delay)
         self._apply_exit_behaviours(services)
@@ -1081,7 +1084,8 @@ class _MockPebbleClient(_TestingPebbleClient):
     def autostart_services(self, timeout: float = 30.0, delay: float = 0.1):
         self._check_connection()
         enabled = self._enabled_service_names()
-        if self._has_failing_behaviour(enabled):
+        known_services = self._render_services()
+        if self._needs_behaviour_path(enabled, known_services):
             return self._start_with_behaviours(enabled, kind='autostart')
         change_id = super().autostart_services(timeout=timeout, delay=delay)
         self._apply_exit_behaviours(enabled)
@@ -1102,12 +1106,30 @@ class _MockPebbleClient(_TestingPebbleClient):
                 return behaviour
         return None
 
-    def _has_failing_behaviour(self, services: list[str]) -> bool:
+    def _has_failing_behaviour(self, services: Iterable[str]) -> bool:
         for name in services:
             behaviour = self._find_service_behaviour(name)
             if behaviour is not None and behaviour.start is ServiceStart.FAILS:
                 return True
         return False
+
+    def _needs_behaviour_path(
+        self,
+        services: list[str],
+        known_services: dict[str, pebble.Service],
+    ) -> bool:
+        """Whether this request needs the per-service task-building path.
+
+        True when a requested service is declared ``ServiceStart.FAILS``
+        (the pre-existing trigger), or when the ``requires`` closure pulls in
+        a service beyond what was requested (Real-Pebble probe #4 §24.3):
+        either way, the change needs a real task list rather than the
+        no-task-list fast path ``super()`` gives, since a pulled-in member is
+        a full member of the change (§25.1) even though nothing in
+        ``services`` names it directly.
+        """
+        members = self._service_requires_closure(services, known_services)
+        return members != set(services) or self._has_failing_behaviour(services)
 
     def _apply_exit_behaviours(self, services: list[str]) -> None:
         """Overwrite the status of any requested ``EXITS`` service.
@@ -1123,6 +1145,50 @@ class _MockPebbleClient(_TestingPebbleClient):
             if behaviour is None or behaviour.start is not ServiceStart.EXITS:
                 continue
             self._service_status[name] = self._service_exit_detail(known_services[name], behaviour)
+
+    def _service_requires_closure(
+        self,
+        names: Iterable[str],
+        known_services: dict[str, pebble.Service],
+    ) -> set[str]:
+        """Expand ``names`` to the full ``requires`` transitive closure.
+
+        ``requires`` is membership, not ordering (Real-Pebble probe #4,
+        WORKLOAD-MOCK-DESIGN.md §24.3): a service named only in another
+        service's ``requires`` list becomes a full member of the resulting
+        change even though nothing in ``names`` names it directly. That
+        pull-in is transitive the full length of the chain (Real-Pebble
+        probe #5, §25.1) -- a service three ``requires`` hops away is pulled
+        in exactly as much as an immediate one, even when nothing in between
+        names it either. ``before``/``after`` play no part here; see
+        ``_service_dependency_order`` for the ordering half.
+
+        This computes membership only. It does not hold a task down because
+        a `requires`-related dependency failed -- that is cascade, which is
+        not implemented by this function or by anything that calls it (see
+        WORKLOAD-MOCK-DESIGN.md §26).
+
+        Traversal is iterative over a visited set (``closure`` itself),
+        never recursive, so a ``requires`` cycle terminates instead of
+        looping forever. Real Pebble's own behaviour on a ``requires`` cycle
+        has not been measured by any probe -- this is the defensive choice,
+        not a claimed match to real Pebble; see the probe #6 question list
+        in WORKLOAD-MOCK-DESIGN.md §26.
+        """
+        closure = set(names)
+        frontier = list(closure)
+        while frontier:
+            name = frontier.pop()
+            service = known_services.get(name)
+            if service is None:
+                # A `requires` target outside the known plan -- nothing to
+                # expand from; leave it as an (unorderable) member and move on.
+                continue
+            for other in service.requires:
+                if other not in closure:
+                    closure.add(other)
+                    frontier.append(other)
+        return closure
 
     def _service_dependency_order(
         self,
@@ -1146,9 +1212,14 @@ class _MockPebbleClient(_TestingPebbleClient):
         after another *stops* before it. This is not the same as reversing
         the start-ordered list -- see §22.2's worked example.
 
-        A dependency on a service outside ``names`` is ignored: Scenario
-        does not derive which other services a start/stop request implicitly
-        pulls in, only orders the ones the caller named.
+        This function only orders ``names`` -- it does not decide which
+        services belong in ``names`` to begin with. A ``before``/``after``
+        edge naming a service outside ``names`` is ignored here; membership
+        (which services a start/stop/restart/autostart/replan request pulls
+        in via ``requires``) is a separate, prior computation, done by
+        ``_service_requires_closure`` (Real-Pebble probe #4 §24.3: ``requires``
+        is membership, ``before``/``after`` is ordering -- the two are kept
+        apart deliberately, because Pebble does).
         """
         pending = set(names)
         successors: dict[str, set[str]] = {name: set() for name in pending}
@@ -1191,15 +1262,32 @@ class _MockPebbleClient(_TestingPebbleClient):
             ordered.extend(sorted(pending.difference(ordered)))
         return ordered
 
-    def _start_with_behaviours(self, services: list[str], kind: str = 'start') -> NoReturn:
+    def _start_with_behaviours(self, services: list[str], kind: str = 'start') -> pebble.ChangeID:
         """Apply declared ``ServiceBehaviour``s for a start/restart/autostart request.
 
-        Only called when at least one requested service is declared
-        ``ServiceStart.FAILS``, so this always raises ``pebble.ChangeError``,
-        matching what real Pebble raises. Services with no declared FAILS
-        behaviour still reach a status before the error is raised -- ACTIVE
-        by default, or their own declared EXITS status -- since Pebble
-        tracks each service's start attempt independently.
+        Called whenever ``services`` needs a real per-service task list
+        rather than the no-task-list fast path ``super()`` gives -- either
+        because a requested service is declared ``ServiceStart.FAILS``, or
+        because ``requires`` pulls in a service beyond what was requested
+        (Real-Pebble probe #4 §24.3, probe #5 §25.1; see
+        ``_needs_behaviour_path``). Only the first case raises
+        ``pebble.ChangeError``, matching what real Pebble raises when a
+        start fails; the second, on its own, still succeeds -- Pebble ran
+        the pulled-in service too, it just didn't fail (§24.3's `yankee`/
+        `zulu`, both `Done`). Services with no declared FAILS behaviour
+        still reach a status before any error is raised -- ACTIVE by
+        default, or their own declared EXITS status -- since Pebble tracks
+        each service's start attempt independently.
+
+        This resolves each service's status from its own declared
+        ``ServiceBehaviour`` only (§3's "declare, don't derive"). A
+        pulled-in member whose *own* dependency (not itself) is declared
+        FAILS is not held down here -- that is cascade, and it is not
+        implemented by this method (WORKLOAD-MOCK-DESIGN.md §26): a service
+        three ``requires`` hops from a failure reaches ACTIVE the same as
+        one with no failing relative at all, exactly the gap
+        ``test_service_dependency_start_order_matches_probe`` already
+        recorded for ``before``/``after`` chains before this stage existed.
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
@@ -1212,7 +1300,8 @@ class _MockPebbleClient(_TestingPebbleClient):
             if name not in known_services:
                 raise self._api_error(400, f'cannot start services: service {name} does not exist')
 
-        ordered = self._service_dependency_order(services, known_services)
+        members = self._service_requires_closure(services, known_services)
+        ordered = self._service_dependency_order(members, known_services)
 
         failing: list[tuple[str, ServiceBehaviour]] = []
         for name in ordered:
@@ -1248,7 +1337,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         # interleaving stop/start per service. The stop pass uses StopOrder,
         # not StartOrder reversed -- see _service_dependency_order.
         if kind == 'restart':
-            stop_ordered = self._service_dependency_order(services, known_services, reverse=True)
+            stop_ordered = self._service_dependency_order(members, known_services, reverse=True)
             for name in stop_ordered:
                 tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
 
@@ -1264,19 +1353,44 @@ class _MockPebbleClient(_TestingPebbleClient):
             bullets.append(f'- Start service "{name}" ({reason})')
             tasks.append(_pebble_task(name, 'start', 'Error', spawn_time, ready_time, log))
 
-        err = 'cannot perform the following tasks:\n' + '\n'.join(bullets)
-        # The summary counts every *requested* service, not only the failing
-        # ones, and quotes the name. Its leading name, though,
-        # depends on the entry point: real Pebble's start/restart handler
-        # uses the client's request order verbatim (payload.Services[0] in
-        # api_services.go), while autostart/replan reassign payload.Services
-        # to an alphabetically-sorted list before building the summary. So
-        # start/restart lead with the caller's first-requested name and
-        # autostart/replan lead with the alphabetically first affected name.
+        # The summary counts every service in the change -- every requested
+        # one, plus any pulled in only via `requires` (§24.3) -- not only the
+        # failing ones, and quotes the leading name. Which name leads,
+        # though, depends on the entry point: real Pebble's start/restart
+        # handler uses the client's request order verbatim
+        # (payload.Services[0] in api_services.go), while autostart/replan
+        # reassign payload.Services to an alphabetically-sorted list before
+        # building the summary. So start/restart lead with the caller's
+        # first-requested name and autostart/replan lead with the
+        # topologically first task (§24.1) -- unverified for
+        # autostart/replan once `requires` pulls in a member that doesn't
+        # sort first (§25.3; WORKLOAD-MOCK-DESIGN.md §26 records this as
+        # still open).
         leading = services[0] if kind in ('start', 'restart') else ordered[0]
         summary = f'{kind.capitalize()} service "{leading}"'
         if len(ordered) > 1:
             summary += f' and {len(ordered) - 1} more'
+
+        if not bullets:
+            # No FAILS behaviour anywhere in the closure: every pulled-in
+            # member started successfully too (§24.3's `yankee`/`zulu`, both
+            # `Done`) -- membership without cascade, this stage's whole
+            # scope.
+            change = pebble.Change(
+                id=pebble.ChangeID(str(uuid.uuid4())),
+                kind=kind,
+                summary=summary,
+                status='Done',
+                tasks=tasks,
+                ready=True,
+                err=None,
+                spawn_time=spawn_time,
+                ready_time=ready_time,
+            )
+            self._changes[change.id] = change
+            return change.id
+
+        err = 'cannot perform the following tasks:\n' + '\n'.join(bullets)
         change = pebble.Change(
             id=pebble.ChangeID(str(uuid.uuid4())),
             kind=kind,

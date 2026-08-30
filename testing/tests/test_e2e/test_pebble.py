@@ -1887,6 +1887,166 @@ def test_service_dependency_stop_order_matches_probe():
             assert workload.get_service(name).current == ops.pebble.ServiceStatus.INACTIVE
 
 
+def _requires_only_layer() -> ops.pebble.Layer:
+    """The exact shape from Real-Pebble probe #4, WORKLOAD-MOCK-DESIGN.md §24.3
+    (probe6-layers/004-requires-only.yaml): yankee requires zulu, with no
+    `after` at all. Both startup: disabled.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'zulu': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'yankee': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['zulu'],
+            },
+        }
+    })
+
+
+def test_service_requires_pulls_in_undeclared_member_without_ordering():
+    """`requires` is membership, `after` is ordering -- and they are separate.
+
+    Real-Pebble probe #4 (WORKLOAD-MOCK-DESIGN.md §24.3): `pebble start
+    yankee`, where yankee requires zulu with no `after`, produced a change
+    containing both services, with yankee running *first* -- alphabetically,
+    despite being the one with the requirement. zulu was never requested.
+    Confirms the mock pulls zulu into the change anyway, and that a bare
+    `requires` edge is not treated as an ordering edge -- the tie-break
+    stays alphabetical, not requirement-first.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _requires_only_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        change_id = workload.pebble.start_services(['yankee'])
+        change = workload.pebble.get_change(change_id)
+        assert change.kind == 'start'
+        assert [t.summary for t in change.tasks] == [
+            'Start service "yankee"',
+            'Start service "zulu"',
+        ]
+        assert [t.status for t in change.tasks] == ['Done', 'Done']
+        assert change.summary == 'Start service "yankee" and 1 more'
+        assert workload.get_service('yankee').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('zulu').current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def _transitive_requires_layer() -> ops.pebble.Layer:
+    """ctop requires bmid requires afail (Real-Pebble probe #5,
+    WORKLOAD-MOCK-DESIGN.md §25.1; probe7-layers/001-transitive-hold.yaml).
+    ctop names only bmid -- afail is two `requires` hops away and is never
+    named directly by the service that pulls it in.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'afail': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'bmid': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['afail'],
+                'after': ['afail'],
+            },
+            'ctop': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['bmid'],
+                'after': ['bmid'],
+            },
+        }
+    })
+
+
+def test_service_requires_transitive_closure_pulls_in_full_chain():
+    """A `requires` chain is pulled in for its full length, not just one hop.
+
+    Real-Pebble probe #5 (WORKLOAD-MOCK-DESIGN.md §25.1): ctop requires
+    bmid requires afail, and ctop never names afail. Starting ctop still
+    pulls afail into the change. Real Pebble additionally holds bmid's and
+    ctop's tasks (`Hold`) because afail fails -- that cascade is not
+    implemented by this stage (WORKLOAD-MOCK-DESIGN.md §26), so this only
+    asserts the membership half: afail is a member of the change and its
+    own failure is visible, while bmid/ctop -- which have no FAILS of their
+    own -- still reach ACTIVE. This is the same "declare, don't derive" gap
+    test_service_dependency_start_order_matches_probe already documents for
+    before/after chains, now also true of a requires chain until cascade
+    lands.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _transitive_requires_layer()},
+        service_behaviours={ServiceBehaviour('afail', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('ctop')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "afail"',
+            'Start service "bmid"',
+            'Start service "ctop"',
+        ]
+        assert [t.status for t in change.tasks] == ['Error', 'Done', 'Done']
+        assert change.summary == 'Start service "ctop" and 2 more'
+        assert workload.get_service('bmid').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('ctop').current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def _requires_cycle_layer() -> ops.pebble.Layer:
+    """A `requires` cycle: loop_a requires loop_b requires loop_a.
+
+    Real Pebble's own behaviour on a `requires` cycle is unmeasured by any
+    probe (WORKLOAD-MOCK-DESIGN.md §26's probe #6 question list) -- this
+    fixture only exercises the mock's defensive choice of terminating the
+    closure rather than recursing forever, not a claimed match to Pebble.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'loop_a': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['loop_b'],
+            },
+            'loop_b': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['loop_a'],
+            },
+        }
+    })
+
+
+def test_service_requires_cycle_terminates_instead_of_hanging():
+    """A `requires` cycle does not hang the membership closure.
+
+    Not a claim about what real Pebble does with a `requires` cycle -- see
+    WORKLOAD-MOCK-DESIGN.md §26's probe #6 question list -- only that this
+    mock's closure walks a visited set iteratively, so a cycle terminates
+    it rather than looping forever or raising.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _requires_cycle_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        change_id = workload.pebble.start_services(['loop_a'])
+        change = workload.pebble.get_change(change_id)
+        assert {t.summary for t in change.tasks} == {
+            'Start service "loop_a"',
+            'Start service "loop_b"',
+        }
+        assert change.status == 'Done'
+        assert workload.get_service('loop_a').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('loop_b').current == ops.pebble.ServiceStatus.ACTIVE
+
+
 class NotifyingStartCharm(ops.CharmBase):
     """Drives one Pebble entry point, then records what the container reports."""
 

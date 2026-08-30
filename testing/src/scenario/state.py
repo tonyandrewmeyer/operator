@@ -923,6 +923,57 @@ def _generate_new_change_id():
     return _CHANGE_IDS
 
 
+_ServiceOpName = Literal['start', 'stop', 'restart', 'replan', 'autostart']
+
+
+@dataclasses.dataclass(frozen=True)
+class ServiceOp:
+    """A record of a single Pebble service lifecycle call.
+
+    Recorded for each call to :meth:`ops.Container.start`,
+    :meth:`ops.Container.stop`, :meth:`ops.Container.restart`,
+    :meth:`ops.Container.replan`, and :meth:`ops.Container.autostart`.
+    For ``replan`` and ``autostart``, :attr:`services` is the list of
+    services with ``startup: enabled`` in the plan at the time of the
+    call (capturing the charm's intent, before the base class filters
+    services that are already running).
+    """
+
+    op: _ServiceOpName
+    """The Pebble service lifecycle operation that was invoked."""
+
+    services: tuple[str, ...]
+    """The names of services the operation was applied to."""
+
+    caused_by: str | None = None
+    """The name of the check whose failure caused Pebble to perform this
+    operation, or ``None`` when the charm invoked it itself.
+
+    Pebble restarts a service of its own accord when a check the service names
+    in ``on-check-failure`` goes down. The resulting status is the ``ACTIVE``
+    the service already had, so the operation being recorded here is the only
+    evidence in the output that it happened at all.
+    """
+
+    def __post_init__(self):
+        # Allow any sequence type to be passed in, but normalise to a tuple.
+        object.__setattr__(self, 'services', tuple(self.services))
+
+
+@dataclasses.dataclass(frozen=True)
+class AddLayer:
+    """A record of a single :meth:`ops.Container.add_layer` call."""
+
+    label: str
+    """The label the layer was added with."""
+
+    layer: pebble.Layer
+    """The layer that was added."""
+
+    combine: bool = False
+    """Whether the layer was added with ``combine=True``."""
+
+
 @dataclasses.dataclass(frozen=True, init=False)
 class Exec:
     """Mock data for simulated :meth:`ops.Container.exec` calls."""

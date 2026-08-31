@@ -2134,6 +2134,46 @@ def test_service_requires_autostart_replan_share_cascade_logic(op: str):
         assert workload.get_service('rdep').current == ops.pebble.ServiceStatus.INACTIVE
 
 
+def test_service_requires_autostart_replan_leading_name_diverges():
+    """autostart and replan diverge once `requires` pulls in an out-of-order member.
+
+    Real-Pebble probe #5 §25.3: rdep requires/after rfail -- alphabetically
+    `rdep` < `rfail`, but the dependency edge forces `rfail` first in start
+    order. autostart's summary leads with the first *task* (`"rfail"`,
+    topological); replan's leads with the alphabetically-first member of the
+    affected union (`"rdep"`). The task order itself is identical between
+    the two changes -- only the summary's leading name differs, which is
+    exactly what makes this a change to the summary logic, not to cascade
+    (test_service_requires_autostart_replan_share_cascade_logic covers
+    cascade itself and deliberately doesn't assert on the summary).
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _required_autostart_layer()},
+        service_behaviours={ServiceBehaviour('rfail', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.autostart()
+        assert exc_info.value.change.summary == 'Autostart service "rfail" and 1 more'
+
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.replan()
+        change = exc_info.value.change
+        assert change.summary == 'Replan service "rdep" and 1 more'
+        # Same task order both times -- only the summary's leading name moved.
+        assert [t.summary for t in change.tasks] == [
+            'Start service "rfail"',
+            'Start service "rdep"',
+        ]
+
+
 class NotifyingStartCharm(ops.CharmBase):
     """Drives one Pebble entry point, then records what the container reports."""
 

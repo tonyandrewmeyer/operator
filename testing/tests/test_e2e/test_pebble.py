@@ -1933,6 +1933,39 @@ def test_service_requires_pulls_in_undeclared_member_without_ordering():
         assert workload.get_service('zulu').current == ops.pebble.ServiceStatus.ACTIVE
 
 
+def test_service_requires_one_hop_holds_dependent_on_failure():
+    """A service is held, not started, when the service it `requires` fails.
+
+    Real-Pebble probe #4 (WORKLOAD-MOCK-DESIGN.md §24.2): with `requires`
+    declared, a dependency's failed task (`Error`) holds its dependent's
+    task (`Hold`) rather than letting it run -- unlike a bare `after`
+    relationship, which does not cascade (see
+    test_service_dependency_start_order_matches_probe). Reuses
+    _requires_only_layer's yankee/zulu shape -- no `after` at all -- to
+    show the cascade follows `requires` alone, not the `before`/`after`
+    ordering.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _requires_only_layer()},
+        service_behaviours={ServiceBehaviour('zulu', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('yankee')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "yankee"',
+            'Start service "zulu"',
+        ]
+        assert [t.status for t in change.tasks] == ['Hold', 'Error']
+        assert workload.get_service('yankee').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('zulu').current != ops.pebble.ServiceStatus.ACTIVE
+
+
 def _transitive_requires_layer() -> ops.pebble.Layer:
     """ctop requires bmid requires afail (Real-Pebble probe #5,
     WORKLOAD-MOCK-DESIGN.md §25.1; probe7-layers/001-transitive-hold.yaml).
@@ -1961,19 +1994,16 @@ def _transitive_requires_layer() -> ops.pebble.Layer:
 
 
 def test_service_requires_transitive_closure_pulls_in_full_chain():
-    """A `requires` chain is pulled in for its full length, not just one hop.
+    """A `requires` chain is held for its full length, not just one hop.
 
     Real-Pebble probe #5 (WORKLOAD-MOCK-DESIGN.md §25.1): ctop requires
-    bmid requires afail, and ctop never names afail. Starting ctop still
-    pulls afail into the change. Real Pebble additionally holds bmid's and
-    ctop's tasks (`Hold`) because afail fails -- that cascade is not
-    implemented by this stage (WORKLOAD-MOCK-DESIGN.md §26), so this only
-    asserts the membership half: afail is a member of the change and its
-    own failure is visible, while bmid/ctop -- which have no FAILS of their
-    own -- still reach ACTIVE. This is the same "declare, don't derive" gap
-    test_service_dependency_start_order_matches_probe already documents for
-    before/after chains, now also true of a requires chain until cascade
-    lands.
+    bmid requires afail, and ctop never names afail -- only bmid. afail
+    fails; real Pebble holds bmid's task (the immediate dependent) *and*
+    ctop's (two `requires` hops away, with no direct relationship to afail
+    at all). An implementation that only checked a service's immediate
+    `requires` list against its own status would get bmid right and ctop
+    wrong -- this asserts the deep dependent specifically, not just the
+    near one.
     """
     container = Container(
         'foo',
@@ -1992,10 +2022,15 @@ def test_service_requires_transitive_closure_pulls_in_full_chain():
             'Start service "bmid"',
             'Start service "ctop"',
         ]
-        assert [t.status for t in change.tasks] == ['Error', 'Done', 'Done']
+        assert [t.status for t in change.tasks] == ['Error', 'Hold', 'Hold']
         assert change.summary == 'Start service "ctop" and 2 more'
-        assert workload.get_service('bmid').current == ops.pebble.ServiceStatus.ACTIVE
-        assert workload.get_service('ctop').current == ops.pebble.ServiceStatus.ACTIVE
+        # Real Pebble's error message names only afail, the task that
+        # actually failed -- not the two it held because of it.
+        assert 'afail' in str(exc_info.value)
+        assert 'bmid' not in str(exc_info.value)
+        assert 'ctop' not in str(exc_info.value)
+        assert workload.get_service('bmid').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('ctop').current == ops.pebble.ServiceStatus.INACTIVE
 
 
 def _requires_cycle_layer() -> ops.pebble.Layer:
@@ -2045,6 +2080,58 @@ def test_service_requires_cycle_terminates_instead_of_hanging():
         assert change.status == 'Done'
         assert workload.get_service('loop_a').current == ops.pebble.ServiceStatus.ACTIVE
         assert workload.get_service('loop_b').current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def _required_autostart_layer() -> ops.pebble.Layer:
+    """rdep requires/after rfail, both startup: enabled (Real-Pebble probe #5,
+
+    WORKLOAD-MOCK-DESIGN.md §25.2/§25.3; probe7-layers/002-required-autostart.yaml).
+    rfail is not itself requested by anything outside this layer -- autostart
+    and replan pick it up because it's enabled, the same as rdep.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'rdep': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'enabled',
+                'requires': ['rfail'],
+                'after': ['rfail'],
+            },
+            'rfail': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'enabled'},
+        }
+    })
+
+
+@pytest.mark.parametrize('op', ['autostart', 'replan'])
+def test_service_requires_autostart_replan_share_cascade_logic(op: str):
+    """autostart and replan hold a required-but-not-requested failure exactly like start.
+
+    Real-Pebble probe #5 §25.2: rdep requires/after rfail; rfail fails.
+    Under both autostart and replan the dependency's task is `Error`, the
+    dependent's is `Hold`, and the dependent service never starts -- no
+    special-casing needed for the cascade mechanism between entry points
+    (unlike the summary's leading name, which does diverge -- see §25.3 and
+    test_service_requires_autostart_replan_leading_name_diverges).
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _required_autostart_layer()},
+        service_behaviours={ServiceBehaviour('rfail', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            getattr(workload, op)()
+        change = exc_info.value.change
+        assert change.kind == op
+        assert [(t.summary, t.status) for t in change.tasks] == [
+            ('Start service "rfail"', 'Error'),
+            ('Start service "rdep"', 'Hold'),
+        ]
+        assert workload.get_service('rdep').current == ops.pebble.ServiceStatus.INACTIVE
 
 
 class NotifyingStartCharm(ops.CharmBase):

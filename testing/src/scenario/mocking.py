@@ -1163,10 +1163,11 @@ class _MockPebbleClient(_TestingPebbleClient):
         names it either. ``before``/``after`` play no part here; see
         ``_service_dependency_order`` for the ordering half.
 
-        This computes membership only. It does not hold a task down because
-        a `requires`-related dependency failed -- that is cascade, which is
-        not implemented by this function or by anything that calls it (see
-        WORKLOAD-MOCK-DESIGN.md §26).
+        This computes the closure only; it does not itself decide anything
+        about failure. ``_start_with_behaviours`` reuses it a second way, per
+        service, to decide cascade -- whether a service's own closure
+        contains a failing one (WORKLOAD-MOCK-DESIGN.md §25.4/§27) -- rather
+        than walking a second, separate graph for that purpose.
 
         Traversal is iterative over a visited set (``closure`` itself),
         never recursive, so a ``requires`` cycle terminates instead of
@@ -1279,15 +1280,17 @@ class _MockPebbleClient(_TestingPebbleClient):
         default, or their own declared EXITS status -- since Pebble tracks
         each service's start attempt independently.
 
-        This resolves each service's status from its own declared
-        ``ServiceBehaviour`` only (§3's "declare, don't derive"). A
-        pulled-in member whose *own* dependency (not itself) is declared
-        FAILS is not held down here -- that is cascade, and it is not
-        implemented by this method (WORKLOAD-MOCK-DESIGN.md §26): a service
-        three ``requires`` hops from a failure reaches ACTIVE the same as
-        one with no failing relative at all, exactly the gap
-        ``test_service_dependency_start_order_matches_probe`` already
-        recorded for ``before``/``after`` chains before this stage existed.
+        A service with no declared ``ServiceBehaviour`` of its own still
+        resolves from its own status by default (§3's "declare, don't
+        derive") -- *unless* its ``requires`` closure contains a failing
+        service, direct or transitive, in which case it is ``Hold``, not
+        ``Done``, and never reaches ACTIVE (Real-Pebble probe #5,
+        WORKLOAD-MOCK-DESIGN.md §25.1/§27). This is cascade, and it is
+        scoped to ``requires``: a dependent declared only via ``before``/
+        ``after`` is unaffected by an ancestor's failure, exactly the gap
+        ``test_service_dependency_start_order_matches_probe`` records for
+        that case -- real Pebble draws that line (§24.2) and this mock
+        follows it.
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
@@ -1303,12 +1306,36 @@ class _MockPebbleClient(_TestingPebbleClient):
         members = self._service_requires_closure(services, known_services)
         ordered = self._service_dependency_order(members, known_services)
 
-        failing: list[tuple[str, ServiceBehaviour]] = []
+        failing_by_name: dict[str, ServiceBehaviour] = {}
         for name in ordered:
             behaviour = self._find_service_behaviour(name)
             if behaviour is not None and behaviour.start is ServiceStart.FAILS:
-                failing.append((name, behaviour))
-            elif behaviour is not None and behaviour.start is ServiceStart.EXITS:
+                failing_by_name[name] = behaviour
+
+        # Cascade (Real-Pebble probe #5, WORKLOAD-MOCK-DESIGN.md §25.1): a
+        # service is held, not started, when its own `requires` closure --
+        # direct or transitive -- contains a service that is failing. This
+        # reuses `_service_requires_closure` per service rather than a
+        # second traversal (§25.4/§27): the same closure computation that
+        # decides membership also decides how far a Hold propagates, so a
+        # dependent two or more `requires` hops from the failure is caught
+        # exactly like a one-hop dependent, not just the immediate one.
+        held: set[str] = {
+            name
+            for name in ordered
+            if name not in failing_by_name
+            and self._service_requires_closure({name}, known_services) & failing_by_name.keys()
+        }
+
+        for name in ordered:
+            if name in failing_by_name or name in held:
+                # A failing service's status is resolved below, alongside its
+                # task, from its own ServiceFailureMode. A held service never
+                # ran at all, so it keeps whatever status it already had
+                # (INACTIVE by default) rather than reaching ACTIVE.
+                continue
+            behaviour = self._find_service_behaviour(name)
+            if behaviour is not None and behaviour.start is ServiceStart.EXITS:
                 # An EXITS service mixed into the same request as a FAILS
                 # one still resolves to its own declared post-exit status,
                 # not ACTIVE -- Pebble tracks each service's start attempt
@@ -1322,14 +1349,15 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         # The services that did start have notified, even though the call as a
         # whole is about to fail: Pebble tracks each service independently.
-        self._emit_service_notices(name for name in ordered if name not in dict(failing))
+        # A held service never started, so it notifies nothing either.
+        self._emit_service_notices(
+            name for name in ordered if name not in failing_by_name and name not in held
+        )
 
         tasks: list[pebble.Task] = []
         bullets: list[str] = []
         spawn_time = datetime.datetime.now(tz=datetime.timezone.utc)
         ready_time = spawn_time + datetime.timedelta(milliseconds=10)
-
-        failing_by_name = dict(failing)
 
         # A restart change carries every "stop" task before any "start" task
         # -- real Pebble builds the two task sets independently (a StopOrder
@@ -1343,15 +1371,20 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         for name in ordered:
             behaviour = failing_by_name.get(name)
-            if behaviour is None:
+            if behaviour is not None:
+                reason, status, log = self._service_failure_detail(known_services[name], behaviour)
+                self._service_status[name] = status
+                bullets.append(f'- Start service "{name}" ({reason})')
+                tasks.append(_pebble_task(name, 'start', 'Error', spawn_time, ready_time, log))
+            elif name in held:
+                # Real Pebble's error message names only the task that
+                # actually failed, not the ones held because of it (§25.1) --
+                # so a held service adds a task but no bullet.
+                tasks.append(_pebble_task(name, 'start', 'Hold', spawn_time, ready_time))
+            else:
                 # Pebble emits a Done task for services that did start, not
                 # only for the failures.
                 tasks.append(_pebble_task(name, 'start', 'Done', spawn_time, ready_time))
-                continue
-            reason, status, log = self._service_failure_detail(known_services[name], behaviour)
-            self._service_status[name] = status
-            bullets.append(f'- Start service "{name}" ({reason})')
-            tasks.append(_pebble_task(name, 'start', 'Error', spawn_time, ready_time, log))
 
         # The summary counts every service in the change -- every requested
         # one, plus any pulled in only via `requires` (§24.3) -- not only the

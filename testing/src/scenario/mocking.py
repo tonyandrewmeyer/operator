@@ -1388,18 +1388,26 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         # The summary counts every service in the change -- every requested
         # one, plus any pulled in only via `requires` (§24.3) -- not only the
-        # failing ones, and quotes the leading name. Which name leads,
-        # though, depends on the entry point: real Pebble's start/restart
-        # handler uses the client's request order verbatim
-        # (payload.Services[0] in api_services.go), while autostart/replan
-        # reassign payload.Services to an alphabetically-sorted list before
-        # building the summary. So start/restart lead with the caller's
-        # first-requested name and autostart/replan lead with the
-        # topologically first task (§24.1) -- unverified for
-        # autostart/replan once `requires` pulls in a member that doesn't
-        # sort first (§25.3; WORKLOAD-MOCK-DESIGN.md §26 records this as
-        # still open).
-        leading = services[0] if kind in ('start', 'restart') else ordered[0]
+        # failing ones, and quotes the leading name. Which name leads depends
+        # on the entry point, and the three differ (Real-Pebble probe #4
+        # §24.1, probe #5 §25.3): start/restart use the client's request
+        # order verbatim (payload.Services[0] in api_services.go), so the
+        # caller's first-requested name leads regardless of ordering or
+        # membership. autostart names the first *task* -- Plan.StartOrder,
+        # topological -- so `ordered[0]`. replan reassigns payload.Services
+        # to a flat `sort.Strings` over the affected-service union before
+        # building the summary, independent of StartOrder -- so the
+        # alphabetically-first member, not the first task. The three read
+        # alike whenever a set's topological and alphabetical firsts
+        # coincide (§24.1's four-service case), which is why this was
+        # unverified until §25.3 found a case (`rdep`/`rfail`) where they
+        # don't.
+        if kind in ('start', 'restart'):
+            leading = services[0]
+        elif kind == 'autostart':
+            leading = ordered[0]
+        else:  # replan
+            leading = min(members)
         summary = f'{kind.capitalize()} service "{leading}"'
         if len(ordered) > 1:
             summary += f' and {len(ordered) - 1} more'

@@ -1189,6 +1189,78 @@ class CheckInfo:
         )
 
 
+class ServiceStart(Enum):
+    """What happens when the charm asks Pebble to start a service."""
+
+    RUNS = 'runs'
+    """The service comes up and stays up. The default: nothing changes for
+    existing tests that don't declare a :class:`ServiceBehaviour`."""
+
+    FAILS = 'fails'
+    """The service never comes up. :meth:`ops.Container.start`,
+    :meth:`ops.Container.restart`, :meth:`ops.Container.replan`, and
+    :meth:`ops.Container.autostart` all raise :class:`ops.pebble.ChangeError`
+    when asked to start this service, matching what real Pebble raises."""
+
+
+class ServiceFailureMode(Enum):
+    """How a :attr:`ServiceStart.FAILS` service fails to start.
+
+    Only meaningful when :attr:`ServiceBehaviour.start` is
+    :attr:`ServiceStart.FAILS`.
+    """
+
+    CRASH = 'crash'
+    """The command execs, then exits immediately with a nonzero code. The
+    resulting status depends on the service's ``on-failure`` policy in the
+    plan: :attr:`ops.pebble.ServiceStatus.ERROR` for ``on-failure: ignore``,
+    or the raw string ``'backoff'`` for ``on-failure: restart`` (Pebble's
+    default). ``'backoff'`` has no :class:`ops.pebble.ServiceStatus` member,
+    so :attr:`ops.pebble.ServiceInfo.current` is a plain :class:`str` in that
+    case, exactly as with real Pebble. Only the ``ignore`` and ``restart``
+    (including unset, which defaults to ``restart``) policies are supported;
+    a service configured with any other ``on-failure`` value raises
+    ``NotImplementedError``."""
+
+    EXEC_ERROR = 'exec-error'
+    """The configured command can't be exec'd at all (for example, the
+    binary doesn't exist). The resulting status is always
+    :attr:`ops.pebble.ServiceStatus.INACTIVE`: the process never started, so
+    Pebble's restart policy never engages."""
+
+
+@dataclasses.dataclass(frozen=True)
+class ServiceBehaviour:
+    """Mock data for how a Pebble service behaves when the charm starts it.
+
+    Mirrors :class:`Exec`: the test declares the outcome, and Scenario does
+    not derive it from the plan. A service with no declared
+    ``ServiceBehaviour`` defaults to :attr:`ServiceStart.RUNS`, today's
+    behaviour, so this does not affect any existing test.
+
+    For example, to simulate a service that fails to start::
+
+        Container(
+            "workload",
+            can_connect=True,
+            layers={"base": layer},
+            service_behaviours={
+                ServiceBehaviour("myapp", start=ServiceStart.FAILS),
+            },
+        )
+    """
+
+    service_name: str
+    """The name of the service this behaviour applies to."""
+
+    start: ServiceStart = ServiceStart.RUNS
+    """What happens when the charm asks Pebble to start this service."""
+
+    failure_mode: ServiceFailureMode = ServiceFailureMode.CRASH
+    """Which way a ``FAILS`` service fails to start. Ignored unless
+    :attr:`start` is :attr:`ServiceStart.FAILS`."""
+
+
 @dataclasses.dataclass(frozen=True, init=False)
 class Container:
     """A Kubernetes container where a charm's workload runs."""
@@ -1216,8 +1288,14 @@ class Container:
     this means adding them in the order of the API calls.
     """
 
-    service_statuses: Mapping[str, pebble.ServiceStatus]
-    """The current status of each Pebble service running in the container."""
+    service_statuses: Mapping[str, pebble.ServiceStatus | str]
+    """The current status of each Pebble service running in the container.
+
+    Usually one of the :class:`ops.pebble.ServiceStatus` members. Real Pebble
+    can also report statuses that aren't in that enum -- for example,
+    ``'backoff'`` for a service in restart-backoff -- in which case this is
+    the raw string, matching :attr:`ops.pebble.ServiceInfo.current`.
+    """
 
     mounts: Mapping[str, Mount]
     """Provides access to the contents of the simulated container filesystem.
@@ -1269,6 +1347,24 @@ class Container:
     check_infos: frozenset[CheckInfo]
     """All Pebble health checks that have been added to the container."""
 
+    service_behaviours: frozenset[ServiceBehaviour]
+    """Simulate what happens when the charm asks Pebble to start a service.
+
+    Specify a :class:`ServiceBehaviour` for each service whose start outcome
+    the test needs to control. A service with no declared behaviour, or with
+    :attr:`ServiceBehaviour.start` left at the default
+    :attr:`ServiceStart.RUNS`, behaves as it always has: it comes up.
+
+    For example::
+
+        container = Container(
+            name='foo',
+            service_behaviours={
+                ServiceBehaviour('myapp', start=ServiceStart.FAILS),
+            },
+        )
+    """
+
     def __init__(
         self,
         name: str,
@@ -1280,11 +1376,12 @@ class Container:
         # charm.
         _base_plan: Mapping[str, Any] = {},
         layers: Mapping[str, pebble.Layer] = {},
-        service_statuses: Mapping[str, pebble.ServiceStatus] = {},
+        service_statuses: Mapping[str, pebble.ServiceStatus | str] = {},
         mounts: Mapping[str, Mount] = {},
         execs: Iterable[Exec] = (),
         notices: Iterable[Notice] = (),
         check_infos: Iterable[CheckInfo] = (),
+        service_behaviours: Iterable[ServiceBehaviour] = (),
     ):
         # Juju passes the charm container name verbatim through to Kubernetes,
         # so the Kubernetes naming rules (RFC 1123 DNS label) apply.
@@ -1308,6 +1405,7 @@ class Container:
         # Stored as list for backwards compatibility.
         object.__setattr__(self, 'notices', list(notices))
         object.__setattr__(self, 'check_infos', frozenset(check_infos))
+        object.__setattr__(self, 'service_behaviours', frozenset(service_behaviours))
 
     def __hash__(self) -> int:
         return hash(self.name)
@@ -1384,10 +1482,20 @@ class Container:
                 startup = pebble.ServiceStartup.DISABLED
             else:
                 startup = pebble.ServiceStartup(service.startup)
+            if isinstance(status, pebble.ServiceStatus):
+                current: pebble.ServiceStatus | str = status
+            else:
+                # Real Pebble can report a status with no ServiceStatus member
+                # (for example 'backoff'); ServiceInfo.from_dict falls back to
+                # the raw string in that case, and so do we.
+                try:
+                    current = pebble.ServiceStatus(status)
+                except ValueError:
+                    current = status
             info = pebble.ServiceInfo(
                 name,
                 startup=startup,
-                current=pebble.ServiceStatus(status),
+                current=current,
             )
             infos[name] = info
         return infos

@@ -2896,6 +2896,14 @@ class TestModelBackend:
         monkeypatch.setenv('JUJU_VERSION', '2.8.0')
         backend = _ModelBackend('myapp/0')
         err_msg = 'ERROR invalid value "$2" for option -r: relation not found'
+        # Juju's uniter facade reports this instead of "relation not found" when
+        # the relation has already gone away entirely (cross-model relation
+        # mid-teardown, remove-saas, or an app/relation removed with --force).
+        permission_denied_msg = 'ERROR permission denied'
+        # "permission denied" is also a security-event trigger, which looks up
+        # leadership; stub it so those test cases don't need real Juju tools.
+        fake_script.write('is-leader', 'echo false')
+        is_leader_call = ['is-leader', '--format=json']
 
         test_cases = [
             (
@@ -2911,7 +2919,28 @@ class TestModelBackend:
                 [['relation-list', '--format=json', '-r', '3']],
             ),
             (
+                lambda: fake_script.write(
+                    'relation-list', f'echo {permission_denied_msg} >&2 ; exit 2'
+                ),
+                lambda: backend.relation_list(3),
+                ops.RelationNotFoundError,
+                # "permission denied" also triggers the security-event leadership
+                # check; the result is cached, so later cases below don't repeat it.
+                [['relation-list', '--format=json', '-r', '3'], is_leader_call],
+            ),
+            (
                 lambda: fake_script.write('relation-set', 'echo fooerror >&2 ; exit 1'),
+                lambda: backend.relation_set(3, {'foo': 'bar'}, is_app=False),
+                ops.ModelError,
+                [['relation-set', '-r', '3', '--file', '-']],
+            ),
+            (
+                # Unlike relation-get/relation-list, relation-set is a write, so
+                # "permission denied" is left as a plain ModelError: it may be a
+                # genuine authorisation failure rather than a gone relation.
+                lambda: fake_script.write(
+                    'relation-set', f'echo {permission_denied_msg} >&2 ; exit 2'
+                ),
                 lambda: backend.relation_set(3, {'foo': 'bar'}, is_app=False),
                 ops.ModelError,
                 [['relation-set', '-r', '3', '--file', '-']],
@@ -2936,6 +2965,14 @@ class TestModelBackend:
             ),
             (
                 lambda: fake_script.write('relation-get', f'echo {err_msg} >&2 ; exit 2'),
+                lambda: backend.relation_get(3, 'remote/0', is_app=False),
+                ops.RelationNotFoundError,
+                [['relation-get', '--format=json', '-r', '3', '-', 'remote/0']],
+            ),
+            (
+                lambda: fake_script.write(
+                    'relation-get', f'echo {permission_denied_msg} >&2 ; exit 2'
+                ),
                 lambda: backend.relation_get(3, 'remote/0', is_app=False),
                 ops.RelationNotFoundError,
                 [['relation-get', '--format=json', '-r', '3', '-', 'remote/0']],

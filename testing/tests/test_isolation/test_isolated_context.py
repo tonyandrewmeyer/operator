@@ -1,7 +1,7 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Tests for ops.testing.IsolatedContext and ops.testing.IsolatedEnv.
+"""Tests for ops.testing.IsolatedContext.
 
 Test structure
 --------------
@@ -29,7 +29,7 @@ Test structure
     Error-propagation tests: charm exceptions reach the parent as IsolationError.
 
 ``test_isolated_env_*``
-    Unit tests for IsolatedEnv itself.
+    Unit tests for _IsolatedEnv itself.
 
 ``test_isolated_context_metadata_*``
     Tests for the metadata-reading path (charm_source with no
@@ -46,8 +46,8 @@ import sys
 import venv
 
 import pytest
-from scenario import IsolatedContext, IsolatedEnv, IsolationError, State
-from scenario.isolation import _read_charm_metadata
+from scenario import IsolatedContext, IsolationError, State
+from scenario.isolation import _IsolatedEnv, _read_charm_metadata
 
 HERE = pathlib.Path(__file__).parent
 CHARMS = HERE / 'charms'
@@ -276,35 +276,35 @@ class TestIsolationError:
             IsolatedContext(charm_source='/totally/does/not/exist')
 
 
-# IsolatedEnv unit tests
+# _IsolatedEnv unit tests
 
 
 class TestIsolatedEnv:
-    """Unit tests for the IsolatedEnv dataclass."""
+    """Unit tests for the _IsolatedEnv dataclass."""
 
     def test_defaults(self):
-        """IsolatedEnv defaults to the current interpreter and empty sys.path."""
-        env = IsolatedEnv(charm_source=CHARMS / 'alpha')
+        """_IsolatedEnv defaults to the current interpreter and empty sys.path."""
+        env = _IsolatedEnv(charm_source=CHARMS / 'alpha')
         assert env.python_executable == sys.executable
         assert env.extra_sys_path == ()
 
     def test_frozen(self):
-        """IsolatedEnv is frozen (immutable)."""
-        env = IsolatedEnv(charm_source=CHARMS / 'alpha')
+        """_IsolatedEnv is frozen (immutable)."""
+        env = _IsolatedEnv(charm_source=CHARMS / 'alpha')
         with pytest.raises((AttributeError, TypeError)):
             env.python_executable = '/other/python'  # type: ignore[misc]
 
     def test_custom_python_executable(self):
-        """IsolatedEnv stores a custom python_executable."""
-        env = IsolatedEnv(
+        """_IsolatedEnv stores a custom python_executable."""
+        env = _IsolatedEnv(
             charm_source=CHARMS / 'alpha',
             python_executable='/usr/bin/python3',
         )
         assert env.python_executable == '/usr/bin/python3'
 
     def test_extra_sys_path(self):
-        """IsolatedEnv stores extra_sys_path as a tuple."""
-        env = IsolatedEnv(
+        """_IsolatedEnv stores extra_sys_path as a tuple."""
+        env = _IsolatedEnv(
             charm_source=CHARMS / 'alpha',
             extra_sys_path=('/foo', '/bar'),
         )

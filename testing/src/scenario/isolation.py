@@ -3,7 +3,7 @@
 
 """Per-charm dependency isolation for ops.testing.
 
-This module provides :class:`IsolatedEnv` and :class:`IsolatedContext` —
+This module provides :class:`IsolatedContext` —
 primitives that let a Scenario test drive *one* charm's event handler in an
 isolated subprocess with its own ``sys.path`` / venv.  No convergence loop, no
 multi-charm model: just the ability to run a single on-disk charm when its
@@ -26,7 +26,7 @@ full rationale.
 Persistent vs spawn-per-event
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 By default the worker is **persistent**: one long-lived process per
-:class:`IsolatedEnv`, spawned lazily on the first dispatch and reused for every
+:class:`IsolatedContext`, spawned lazily on the first dispatch and reused for every
 subsequent event.  The charm module is imported once, so only the first event
 pays interpreter startup and ``import ops`` cost.  The worker is torn down at
 :meth:`IsolatedContext.close` (or when the context is used as a context manager)
@@ -107,61 +107,27 @@ from .state import State, _Event
 
 __all__ = [
     'IsolatedContext',
-    'IsolatedEnv',
     'IsolationError',
 ]
 
 
-# Public data types
+# Data types
 
 
 @dataclasses.dataclass(frozen=True)
-class IsolatedEnv:
-    """Describes the isolated runtime environment for a single charm.
+class _IsolatedEnv:
+    """Internal bundle of the isolated runtime settings for a single charm.
 
-    An :class:`IsolatedEnv` pairs a charm source directory with the Python
-    interpreter that should run it.  Use this when the charm has dependencies
-    that conflict with the packages installed in the test process.
+    Held by :class:`IsolatedContext`, which takes these as constructor
+    arguments and documents them for users.  Not public API: nothing accepts
+    or returns one.
 
     Args:
-        charm_source: Path to the charm repository root.  Must contain a
-            ``src/`` directory (and optionally ``lib/``) whose ``charm.py``
-            defines the charm class.  The metadata files
-            (``metadata.yaml`` / ``charmcraft.yaml``) are read here in the
-            parent; the charm code itself is only imported inside the worker
-            subprocess.
-        python_executable: The Python interpreter to use for the worker
-            subprocess.  Point this at a per-charm venv's ``bin/python`` to
-            isolate the charm's dependencies.  Defaults to the current
-            interpreter (useful when there are no dependency conflicts).
+        charm_source: Path to the charm repository root.
+        python_executable: The Python interpreter that runs the worker
+            subprocess.  Defaults to the current interpreter.
         extra_sys_path: Directories prepended to ``sys.path`` in the worker
-            before the charm is imported.  A lightweight stand-in for (or
-            supplement to) a full venv — handy for fast, offline tests where
-            the dependency directory is already available on disk.
-
-    Invariant:
-        The per-charm venv selected via ``python_executable`` must carry the
-        exact same ``ops.testing`` version as the parent test process: there
-        is no cross-version negotiation.  Only the charm's own runtime
-        dependencies are otherwise expected to differ between the two
-        environments.  A mismatched version raises
-        :class:`~ops.testing.StateVersionMismatchError`, which may arrive
-        wrapped in an :class:`IsolationError` if the worker is the side that
-        hits it.
-
-    Examples::
-
-        # Point at a pre-built venv:
-        env = IsolatedEnv(
-            charm_source=pathlib.Path('./charms/myapp'),
-            python_executable='/path/to/myapp-venv/bin/python',
-        )
-
-        # Inject a dependency directory (no venv needed):
-        env = IsolatedEnv(
-            charm_source=pathlib.Path('./charms/myapp'),
-            extra_sys_path=('./deps/mylib_v2',),
-        )
+            before the charm is imported.
     """
 
     charm_source: pathlib.Path
@@ -235,7 +201,9 @@ def _child_environ() -> dict[str, str]:
 # Spawn-per-event dispatch (debug mode)
 
 
-def _dispatch_spawn(env: IsolatedEnv, child_env: dict[str, str], request: dict[str, Any]) -> State:
+def _dispatch_spawn(
+    env: _IsolatedEnv, child_env: dict[str, str], request: dict[str, Any]
+) -> State:
     """Run a single charm event in a fresh subprocess and return the output State.
 
     This is the spawn-per-event debug transport: the request and response cross
@@ -283,7 +251,7 @@ def _dispatch_spawn(env: IsolatedEnv, child_env: dict[str, str], request: dict[s
 
 
 class _PersistentWorker:
-    """A long-lived worker subprocess for one :class:`IsolatedEnv`.
+    """A long-lived worker subprocess for one :class:`_IsolatedEnv`.
 
     The process is spawned lazily on the first :meth:`dispatch` and reused for
     every subsequent event.  Communication is a length-prefixed framed JSON
@@ -297,7 +265,7 @@ class _PersistentWorker:
 
     def __init__(
         self,
-        env: IsolatedEnv,
+        env: _IsolatedEnv,
         child_env: dict[str, str],
         idle_timeout: float | None = None,
     ):
@@ -586,7 +554,7 @@ class IsolatedContext:
         if not charm_root.exists():
             raise ValueError(f'charm_source {charm_root!r} does not exist.')
 
-        self._env = IsolatedEnv(
+        self._env = _IsolatedEnv(
             charm_source=charm_root,
             python_executable=python_executable or sys.executable,
             extra_sys_path=extra_sys_path,
@@ -605,11 +573,6 @@ class IsolatedContext:
         self._child_env = _child_environ()
         self._worker: _PersistentWorker | None = None
 
-    @property
-    def env(self) -> IsolatedEnv:
-        """The :class:`IsolatedEnv` that describes this context's execution environment."""
-        return self._env
-
     def _build_request(self, event: _Event, state: State) -> dict[str, Any]:
         return {
             'charm_source': str(self._env.charm_source),
@@ -627,7 +590,7 @@ class IsolatedContext:
         """Trigger a charm execution with an event and a State.
 
         Serialises ``event`` and ``state``, dispatches them to a worker
-        subprocess running in :attr:`env`'s interpreter, and returns the output
+        subprocess running in this context's interpreter, and returns the output
         :class:`~ops.testing.State`.  In the default persistent mode the worker
         is spawned on the first call and reused thereafter.
 

@@ -8,7 +8,7 @@ This module is executed as::
     python -m scenario._isolated_worker <request_file> <response_file>
 
 by the (potentially per-charm) Python interpreter selected in
-:class:`~ops.testing.IsolatedEnv`.  The whole point is that *this* process may
+:class:`~ops.testing.IsolatedContext`.  The whole point is that *this* process may
 have a completely different ``sys.path`` / set of installed packages than the
 parent test process, so two charms with conflicting dependencies can each run in
 their own world.

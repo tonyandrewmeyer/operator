@@ -3,7 +3,7 @@
 
 """Per-charm dependency isolation for ops.testing.
 
-This module provides :class:`IsolatedEnv` and :class:`IsolatedContext` —
+This module provides :class:`IsolatedContext` —
 primitives that let a Scenario test drive *one* charm's event handler in an
 isolated subprocess with its own ``sys.path`` / venv.  No convergence loop, no
 multi-charm model: just the ability to run a single on-disk charm when its
@@ -80,58 +80,27 @@ from .state import State, _Event
 
 __all__ = [
     'IsolatedContext',
-    'IsolatedEnv',
     'IsolationError',
 ]
 
 
-# Public data types
+# Data types
 
 
 @dataclasses.dataclass(frozen=True)
-class IsolatedEnv:
-    """Describes the isolated runtime environment for a single charm.
+class _IsolatedEnv:
+    """Internal bundle of the isolated runtime settings for a single charm.
 
-    An :class:`IsolatedEnv` pairs a charm source directory with the Python
-    interpreter that should run it.  Use this when the charm has dependencies
-    that conflict with the packages installed in the test process.
+    Held by :class:`IsolatedContext`, which takes these as constructor
+    arguments and documents them for users.  Not public API: nothing accepts
+    or returns one.
 
     Args:
-        charm_source: Path to the charm repository root.  Must contain a
-            ``src/`` directory (and optionally ``lib/``) whose ``charm.py``
-            defines the charm class.  The metadata files
-            (``metadata.yaml`` / ``charmcraft.yaml``) are read here in the
-            parent; the charm code itself is only imported inside the worker
-            subprocess.
-        python_executable: The Python interpreter to use for the worker
-            subprocess.  Point this at a per-charm venv's ``bin/python`` to
-            isolate the charm's dependencies.  Defaults to the current
-            interpreter (useful when there are no dependency conflicts).
+        charm_source: Path to the charm repository root.
+        python_executable: The Python interpreter that runs the worker
+            subprocess.  Defaults to the current interpreter.
         extra_sys_path: Directories prepended to ``sys.path`` in the worker
-            before the charm is imported.  A lightweight stand-in for (or
-            supplement to) a full venv — handy for fast, offline tests where
-            the dependency directory is already available on disk.
-
-    Invariant:
-        The per-charm venv selected via ``python_executable`` must have **the
-        same** ``ops`` version installed as the parent test process.  Only the
-        charm's own runtime dependencies may differ between the two environments.
-        A mismatch typically surfaces as an :class:`IsolationError` whose
-        traceback names an unknown dataclass on the wire.
-
-    Examples::
-
-        # Point at a pre-built venv:
-        env = IsolatedEnv(
-            charm_source=pathlib.Path('./charms/myapp'),
-            python_executable='/path/to/myapp-venv/bin/python',
-        )
-
-        # Inject a dependency directory (no venv needed):
-        env = IsolatedEnv(
-            charm_source=pathlib.Path('./charms/myapp'),
-            extra_sys_path=('./deps/mylib_v2',),
-        )
+            before the charm is imported.
     """
 
     charm_source: pathlib.Path
@@ -187,7 +156,7 @@ def _read_charm_metadata(charm_root: pathlib.Path) -> dict[str, Any]:
 
 
 def _dispatch(
-    env: IsolatedEnv,
+    env: _IsolatedEnv,
     *,
     meta: dict[str, Any],
     config: dict[str, Any] | None,
@@ -373,7 +342,7 @@ class IsolatedContext:
         if not charm_root.exists():
             raise ValueError(f'charm_source {charm_root!r} does not exist.')
 
-        self._env = IsolatedEnv(
+        self._env = _IsolatedEnv(
             charm_source=charm_root,
             python_executable=python_executable or sys.executable,
             extra_sys_path=extra_sys_path,
@@ -387,16 +356,11 @@ class IsolatedContext:
         self._unit_id = unit_id
         self._juju_version = juju_version
 
-    @property
-    def env(self) -> IsolatedEnv:
-        """The :class:`IsolatedEnv` that describes this context's execution environment."""
-        return self._env
-
     def run(self, event: _Event, state: State) -> State:
         """Trigger a charm execution with an event and a State.
 
         Serialises ``event`` and ``state``, dispatches them to a worker
-        subprocess running in :attr:`env`'s interpreter, and returns the output
+        subprocess running in this context's interpreter, and returns the output
         :class:`~ops.testing.State`.
 
         .. note::

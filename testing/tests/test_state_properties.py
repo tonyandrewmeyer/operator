@@ -3,11 +3,12 @@
 
 """Hypothesis property-based tests for scenario.state.
 
-Two properties are tested here against the _EntityStatus / Port conversion
-glue between scenario and ops; see
-non-roadmap/operator-hypothesis-tests/STEP1-2.md and STEP3-4.md in the
-canonical-work-queue staging repo for the design notes and the measurement
-that motivated keeping exactly these two.
+Two properties are tested here, against the _EntityStatus / Port conversion
+glue between scenario and ops. The scope is deliberately narrow: these two
+round-trips are pure in-memory conversions with a wide input space and a
+simple invariant, which is where property-based testing earns its keep.
+Both run in well under a second at 200 examples, so they need no separate
+CI job.
 """
 
 from __future__ import annotations

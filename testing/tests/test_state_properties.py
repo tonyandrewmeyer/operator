@@ -3,11 +3,12 @@
 
 """Hypothesis property-based tests for scenario.state.
 
-Two properties are tested here against the _EntityStatus / Port conversion
-glue between scenario and ops; see
-non-roadmap/operator-hypothesis-tests/STEP1-2.md and STEP3-4.md in the
-canonical-work-queue staging repo for the design notes and the measurement
-that motivated keeping exactly these two.
+Two properties are tested here, against the _EntityStatus / Port conversion
+glue between scenario and ops. The scope is deliberately narrow: these two
+round-trips are pure in-memory conversions with a wide input space and a
+simple invariant, which is where property-based testing earns its keep.
+Both run in well under a second at 200 examples, so they need no separate
+CI job.
 """
 
 from __future__ import annotations
@@ -22,25 +23,25 @@ from scenario.state import (
     MaintenanceStatus,
     TCPPort,
     UDPPort,
+    UnknownStatus,
     WaitingStatus,
     _EntityStatus,
 )
 
 # ── strategies ──────────────────────────────────────────────────────────────
 #
-# Strategy design is where Hypothesis pays off or doesn't (per the plan).
+# Strategy design is where Hypothesis pays off or doesn't.
 # The choices below are deliberately broad so the tool can discover input
 # combinations the authors wouldn't reach for by hand.
 
-# All settable status types (UnknownStatus is excluded: its __init__ takes no
-# args, so _EntityStatus.from_status_name('unknown', msg) raises TypeError —
-# a known limitation documented in from_status_name's own docstring).
+# Every status type. UnknownStatus takes no message, so it is the one fixed value.
 _status_strategy = st.one_of(
     st.builds(ActiveStatus, message=st.text()),
     st.builds(BlockedStatus, message=st.text()),
     st.builds(MaintenanceStatus, message=st.text()),
     st.builds(WaitingStatus, message=st.text()),
     st.builds(ErrorStatus, message=st.text()),
+    st.just(UnknownStatus()),
 )
 
 # All three concrete Port types; TCPPort/UDPPort accept validated port numbers.

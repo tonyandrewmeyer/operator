@@ -72,7 +72,7 @@ from ._state_serde import StateVersionMismatchError, decode_state, encode_state
 from .context import CharmEvents, Context, Manager
 from .deployment import App, Dispatch, Juju, JujuError, Unit
 from .errors import StateValidationError  # For backwards compatibility.
-from .isolation import IsolatedContext, IsolatedEnv, IsolationError
+from .isolation import IsolatedContext, IsolationError
 from .state import (
     ActiveStatus,
     Address,
@@ -135,7 +135,6 @@ __all__ = [
     'Exec',
     'ICMPPort',
     'IsolatedContext',
-    'IsolatedEnv',
     'IsolationError',
     'Juju',
     'JujuError',

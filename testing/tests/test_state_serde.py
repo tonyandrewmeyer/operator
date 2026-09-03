@@ -14,8 +14,8 @@ import pytest
 from scenario._state_serde import (
     StateVersionMismatchError,
     _decode,
-    decode_state,
-    encode_state,
+    _decode_state,
+    _encode_state,
 )
 from scenario.state import (
     ActiveStatus,
@@ -45,7 +45,7 @@ from ops import SecretRotate, pebble
 
 
 def _roundtrip(state: State) -> State:
-    return decode_state(encode_state(state))
+    return _decode_state(_encode_state(state))
 
 
 # Leaf-type round-trips
@@ -335,12 +335,12 @@ class TestEncoderTypeError:
     def test_unrecognised_type_raises(self):
         state = State(stored_states=frozenset([StoredState(content={'obj': object()})]))
         with pytest.raises(TypeError, match="No JSON encoding for type 'object'"):
-            encode_state(state)
+            _encode_state(state)
 
     def test_error_includes_path(self):
         state = State(stored_states=frozenset([StoredState(content={'bad': object()})]))
         with pytest.raises(TypeError, match='path'):
-            encode_state(state)
+            _encode_state(state)
 
     def test_unrecognised_enum_raises(self):
         import enum
@@ -350,7 +350,7 @@ class TestEncoderTypeError:
 
         state = State(stored_states=frozenset([StoredState(content={'e': MyEnum.VAL})]))
         with pytest.raises(TypeError, match='Unrecognised enum type'):
-            encode_state(state)
+            _encode_state(state)
 
 
 class TestDecoderTypeError:
@@ -370,12 +370,12 @@ class TestDecoderTypeError:
 class TestOpsTestingVersion:
     def test_current_version_matches(self):
         state = State()
-        encoded = encode_state(state)
+        encoded = _encode_state(state)
         data = json.loads(encoded)
         assert data['ops_testing_version'] == ops.version.version
 
     def test_matching_version_round_trips(self):
-        # encode_state always stamps the running version, so a plain
+        # _encode_state always stamps the running version, so a plain
         # round-trip exercises the match path.
         state = State()
         out = _roundtrip(state)
@@ -384,17 +384,17 @@ class TestOpsTestingVersion:
     def test_mismatched_version_raises(self):
         payload = json.dumps({'ops_testing_version': '0.0.0-does-not-exist', 'state': {}})
         with pytest.raises(StateVersionMismatchError, match=re.escape('0.0.0-does-not-exist')):
-            decode_state(payload)
+            _decode_state(payload)
 
     def test_mismatched_version_names_both_versions(self):
         payload = json.dumps({'ops_testing_version': '0.0.0-does-not-exist', 'state': {}})
         with pytest.raises(StateVersionMismatchError, match=re.escape(ops.version.version)):
-            decode_state(payload)
+            _decode_state(payload)
 
     def test_missing_version_raises(self):
         payload = json.dumps({'state': {}})
         with pytest.raises(StateVersionMismatchError):
-            decode_state(payload)
+            _decode_state(payload)
 
 
 # Status round-trips

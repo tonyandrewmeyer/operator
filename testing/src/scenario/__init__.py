@@ -68,7 +68,6 @@ from __future__ import annotations
 
 from ops._private.harness import ActionFailed  # For backwards compatibility.
 
-from ._state_serde import StateVersionMismatchError, decode_state, encode_state
 from .context import CharmEvents, Context, Manager
 from .deployment import App, Dispatch, Juju, JujuError, Unit
 from .errors import StateValidationError  # For backwards compatibility.
@@ -155,7 +154,6 @@ __all__ = [
     'Secret',
     'State',
     'StateValidationError',
-    'StateVersionMismatchError',
     'Storage',
     'StoredState',
     'SubordinateRelation',
@@ -165,7 +163,5 @@ __all__ = [
     'UnitID',
     'UnknownStatus',
     'WaitingStatus',
-    'decode_state',
-    'encode_state',
     'layer_from_rockcraft',
 ]

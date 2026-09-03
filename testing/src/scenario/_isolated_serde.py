@@ -5,9 +5,9 @@
 
 ``State`` payloads use the typed codec in :mod:`scenario._state_serde` — the
 canonical ``ops.testing`` State serialiser (step 2 of the Saddle delivery
-plan).  This module re-exports :func:`encode_state` / :func:`decode_state`
-from there so the isolation layer has a single import point, and adds the
-matching :class:`_Event` (de)serialisation built on the *same* primitives.
+plan).  ``State`` payloads go through :meth:`~ops.testing.State._to_json` /
+:meth:`~ops.testing.State._from_json`; this module adds the matching
+:class:`_Event` (de)serialisation, built on the *same* primitives.
 
 Events are encoded with the same typed encoder as ``State`` rather than a
 parallel one: an ``_Event`` carries the same leaf types as ``State`` (pebble
@@ -31,15 +31,8 @@ from . import state as _state
 
 __all__ = [
     'decode_event',
-    'decode_state',
     'encode_event',
-    'encode_state',
 ]
-
-# State codec — re-exported from the canonical serialiser so callers import the
-# State and event codecs from one place.
-encode_state = _state_serde.encode_state
-decode_state = _state_serde.decode_state
 
 
 def encode_event(event: _state._Event) -> str:

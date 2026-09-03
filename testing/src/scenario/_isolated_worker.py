@@ -127,7 +127,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context, _isolated_serde
+    from scenario import Context, State, _isolated_serde
 
     charm_source = request['charm_source']
     if charm_cache is not None and charm_source in charm_cache:
@@ -138,7 +138,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
             charm_cache[charm_source] = charm_type
 
     event = _isolated_serde.decode_event(request['event'])
-    state_in = _isolated_serde.decode_state(request['state_in'])
+    state_in = State._from_json(request['state_in'])
 
     ctx = Context(
         charm_type,
@@ -149,7 +149,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         unit_id=request['unit_id'],
     )
     state_out = ctx.run(event, state_in)
-    return {'state_out': _isolated_serde.encode_state(state_out)}
+    return {'state_out': state_out._to_json()}
 
 
 def serve() -> int:

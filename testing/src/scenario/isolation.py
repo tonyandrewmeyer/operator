@@ -244,7 +244,7 @@ def _dispatch_spawn(
     if 'error' in response:
         raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
 
-    return _isolated_serde.decode_state(response['state_out'])
+    return State._from_json(response['state_out'])
 
 
 # Persistent worker (default transport)
@@ -424,7 +424,7 @@ class _PersistentWorker:
                 raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
 
             self._arm_timer()
-            return _isolated_serde.decode_state(response['state_out'])
+            return State._from_json(response['state_out'])
 
     def close(self) -> None:
         """Shut the worker down cleanly (idempotent)."""
@@ -588,7 +588,7 @@ class IsolatedContext:
             'app_name': self._app_name,
             'unit_id': self._unit_id if unit_id is None else unit_id,
             'event': _isolated_serde.encode_event(event),
-            'state_in': _isolated_serde.encode_state(state),
+            'state_in': state._to_json(),
         }
 
     def _run_as(self, unit_id: int, event: _Event, state: State) -> State:

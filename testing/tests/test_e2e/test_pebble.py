@@ -2082,6 +2082,108 @@ def test_service_requires_cycle_terminates_instead_of_hanging():
         assert workload.get_service('loop_b').current == ops.pebble.ServiceStatus.ACTIVE
 
 
+def _stop_requires_dependant_layer() -> ops.pebble.Layer:
+    """sdep requires/after stgt (Real-Pebble probe #6, WORKLOAD-MOCK-DESIGN.md
+    §28.2; probe8-layers/002-stop-with-dependants.yaml). Both long-running,
+    both startup: disabled.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'stgt': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'sdep': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['stgt'],
+                'after': ['stgt'],
+            },
+        }
+    })
+
+
+def test_service_requires_stop_expands_to_dependant_and_stops_it_first():
+    """`stop` expands membership through `requires`, in reverse, dependent first.
+
+    Real-Pebble probe #6 (WORKLOAD-MOCK-DESIGN.md §28.2): sdep requires/after
+    stgt; stopping only stgt pulled sdep into the change too, and stopped it
+    *first* -- the reverse of start order, which is the only order that
+    makes sense if `requires` means what it says. Confirms stop_services,
+    which previously expanded nothing (§26/§27 both left it untouched),
+    now matches.
+    """
+    container = Container(
+        'foo', can_connect=True, layers={'base': _stop_requires_dependant_layer()}
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['sdep'])
+        change_id = workload.pebble.stop_services(['stgt'])
+        change = workload.pebble.get_change(change_id)
+        assert change.kind == 'stop'
+        assert [t.summary for t in change.tasks] == [
+            'Stop service "sdep"',
+            'Stop service "stgt"',
+        ]
+        assert [t.status for t in change.tasks] == ['Done', 'Done']
+        assert change.summary == 'Stop service "stgt" and 1 more'
+        assert workload.get_service('sdep').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('stgt').current == ops.pebble.ServiceStatus.INACTIVE
+
+
+def test_service_requires_stop_reverse_expansion_is_transitive():
+    """Stop's reverse `requires` expansion walks a full chain, not one hop.
+
+    Real-Pebble probe #6 (§28.2) measured only a single hop (sdep/stgt).
+    This mock's ``_service_requires_closure(reverse=True)`` is transitive
+    by construction, the same visited-set walk as the forward direction
+    (§25.1) -- an inference by symmetry with the forward case, not
+    something any probe has measured on real Pebble
+    (WORKLOAD-MOCK-DESIGN.md §29). Reuses _transitive_requires_layer's
+    afail/bmid/ctop chain (bmid requires afail, ctop requires bmid) to show
+    a service two `requires` hops away -- ctop, which never names afail
+    directly -- is pulled into a stop of afail and stopped ahead of it.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _transitive_requires_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['ctop'])
+        change_id = workload.pebble.stop_services(['afail'])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks] == [
+            'Stop service "ctop"',
+            'Stop service "bmid"',
+            'Stop service "afail"',
+        ]
+        assert change.summary == 'Stop service "afail" and 2 more'
+        for name in ('afail', 'bmid', 'ctop'):
+            assert workload.get_service(name).current == ops.pebble.ServiceStatus.INACTIVE
+
+
+def test_service_requires_stop_cycle_terminates_instead_of_hanging():
+    """A `requires` cycle does not hang stop's reverse membership closure either.
+
+    Mirrors test_service_requires_cycle_terminates_instead_of_hanging for
+    the reverse direction this stage adds -- not a claim about real Pebble
+    (WORKLOAD-MOCK-DESIGN.md §26/§28.3 leave that open), only that the
+    reverse walk is exactly as cycle-safe as the forward one.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _requires_cycle_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        change_id = workload.pebble.stop_services(['loop_a'])
+        change = workload.pebble.get_change(change_id)
+        assert {t.summary for t in change.tasks} == {
+            'Stop service "loop_a"',
+            'Stop service "loop_b"',
+        }
+        assert change.status == 'Done'
+        assert workload.get_service('loop_a').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('loop_b').current == ops.pebble.ServiceStatus.INACTIVE
+
+
 def _required_autostart_layer() -> ops.pebble.Layer:
     """rdep requires/after rfail, both startup: enabled (Real-Pebble probe #5,
 

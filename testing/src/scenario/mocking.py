@@ -1023,6 +1023,18 @@ class _MockPebbleClient(_TestingPebbleClient):
         ``ServiceStop`` outcome to declare, so this always succeeds for
         every known service, matching real Pebble (Real-Pebble probe #3,
         WORKLOAD-MOCK-DESIGN.md §22.2).
+
+        ``requires`` expands membership here too, the same as it does for
+        start/restart/autostart/replan, but in the opposite direction:
+        stopping a service pulls in the services that require *it*, not the
+        ones it requires, and they stop first -- the dependent before the
+        target (Real-Pebble probe #6, WORKLOAD-MOCK-DESIGN.md §28.2).
+        ``_service_requires_closure(services, known_services, reverse=True)``
+        computes that membership; every member, pulled-in or requested,
+        stops uniformly regardless of its status going in -- this mock
+        does not special-case a dependent already in ``Hold`` rather than
+        ``Active``, since no probe has measured whether real Pebble treats
+        that case differently (§29).
         """
         if isinstance(services, str):
             raise TypeError(f'stop_services should take a list of names, not just "{services}"')
@@ -1035,7 +1047,8 @@ class _MockPebbleClient(_TestingPebbleClient):
             if name not in known_services:
                 raise self._api_error(400, f'cannot stop services: service {name} does not exist')
 
-        ordered = self._service_dependency_order(services, known_services, reverse=True)
+        members = self._service_requires_closure(services, known_services, reverse=True)
+        ordered = self._service_dependency_order(members, known_services, reverse=True)
 
         spawn_time = datetime.datetime.now(tz=datetime.timezone.utc)
         ready_time = spawn_time + datetime.timedelta(milliseconds=10)
@@ -1047,7 +1060,10 @@ class _MockPebbleClient(_TestingPebbleClient):
         # Matches start/restart, not autostart/replan: the summary leads
         # with the caller's first-requested name, not the topologically
         # first task (§22.3) -- stop has no autostart/replan-style entry
-        # point to lead alphabetically instead.
+        # point to lead alphabetically instead. The count is every member
+        # of the change, requested or pulled in via `requires` (§28.2),
+        # same as start/restart/autostart/replan already count their own
+        # closure (§26).
         summary = f'Stop service "{services[0]}"'
         if len(ordered) > 1:
             summary += f' and {len(ordered) - 1} more'
@@ -1150,6 +1166,8 @@ class _MockPebbleClient(_TestingPebbleClient):
         self,
         names: Iterable[str],
         known_services: dict[str, pebble.Service],
+        *,
+        reverse: bool = False,
     ) -> set[str]:
         """Expand ``names`` to the full ``requires`` transitive closure.
 
@@ -1163,6 +1181,21 @@ class _MockPebbleClient(_TestingPebbleClient):
         names it either. ``before``/``after`` play no part here; see
         ``_service_dependency_order`` for the ordering half.
 
+        ``reverse=True`` walks the ``requires`` edges the other way: the
+        closure gains services that *require* a member, rather than the
+        services a member requires. Real Pebble uses this direction for
+        ``stop`` -- stopping a service pulls in the services that depend on
+        it, and only that direction, dependent-first (Real-Pebble probe #6,
+        WORKLOAD-MOCK-DESIGN.md §28.2). Whether this reverse expansion is
+        itself transitive the way the forward one was measured to be
+        (§25.1) has not been measured -- §28.2's case is one hop -- but a
+        visited-set closure is naturally transitive by construction, and
+        there is no principled reason to expect ``stop`` to stop
+        propagating after one hop when ``start`` doesn't; this walks it the
+        same way as the forward case on that inference rather than
+        special-casing one hop, flagged here as exactly that -- an
+        inference, not a measurement -- pending a future probe.
+
         This computes the closure only; it does not itself decide anything
         about failure. ``_start_with_behaviours`` reuses it a second way, per
         service, to decide cascade -- whether a service's own closure
@@ -1171,21 +1204,34 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         Traversal is iterative over a visited set (``closure`` itself),
         never recursive, so a ``requires`` cycle terminates instead of
-        looping forever. Real Pebble's own behaviour on a ``requires`` cycle
-        has not been measured by any probe -- this is the defensive choice,
-        not a claimed match to real Pebble; see the probe #6 question list
-        in WORKLOAD-MOCK-DESIGN.md §26.
+        looping forever, in either direction. Real Pebble's own behaviour
+        on a ``requires`` cycle has not been measured by any probe -- this
+        is the defensive choice, not a claimed match to real Pebble; see
+        the probe #6 question list in WORKLOAD-MOCK-DESIGN.md §26.
+
+        The forward direction reads each frontier member's own ``requires``
+        list directly -- an O(1) lookup already sitting on the service.
+        There is no equivalent list for the reverse direction ("who
+        requires me" isn't stored anywhere on a service), so ``reverse``
+        first builds the inverted edge map with a single pass over every
+        known service, then runs the identical visited-set walk against
+        it. The traversal is shared between both readings; the edge set
+        genuinely is not (WORKLOAD-MOCK-DESIGN.md §29).
         """
+        edges: dict[str, list[str]]
+        if reverse:
+            edges = {name: [] for name in known_services}
+            for name, service in known_services.items():
+                for target in service.requires:
+                    edges.setdefault(target, []).append(name)
+        else:
+            edges = {name: service.requires for name, service in known_services.items()}
+
         closure = set(names)
         frontier = list(closure)
         while frontier:
             name = frontier.pop()
-            service = known_services.get(name)
-            if service is None:
-                # A `requires` target outside the known plan -- nothing to
-                # expand from; leave it as an (unorderable) member and move on.
-                continue
-            for other in service.requires:
+            for other in edges.get(name, []):
                 if other not in closure:
                     closure.add(other)
                     frontier.append(other)

@@ -1958,6 +1958,35 @@ class State:
         # bypass frozen dataclass
         object.__setattr__(self, 'secrets', new_secrets)
 
+    def _to_json(self) -> str:
+        """Serialise this ``State`` to a JSON string for the isolated worker.
+
+        Not public API. The wire format is internal to ``ops.testing`` and may
+        change between releases: the payload embeds the producing
+        ``ops.testing`` version, and :meth:`_from_json` requires it to match.
+
+        Raises:
+            TypeError: if any field value has no registered encoding.
+        """
+        from . import _state_serde
+
+        return _state_serde._encode_state(self)
+
+    @classmethod
+    def _from_json(cls, payload: str) -> State:
+        """Rebuild a ``State`` from a string produced by :meth:`_to_json`.
+
+        Not public API; see :meth:`_to_json`.
+
+        Raises:
+            StateVersionMismatchError: if the payload was produced by a
+                different ``ops.testing`` version.
+            TypeError: if the payload contains an unknown type tag.
+        """
+        from . import _state_serde
+
+        return _state_serde._decode_state(payload)
+
     def get_container(self, container: str, /) -> Container:
         """Get container from this State, based on its name."""
         for state_container in self.containers:

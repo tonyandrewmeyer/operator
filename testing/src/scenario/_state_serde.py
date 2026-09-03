@@ -3,10 +3,11 @@
 
 """Typed JSON encoder/decoder for ops.testing.State.
 
-Public surface (re-exported via ops.testing):
+Internal surface.  The entry points are the private ``State`` methods that
+wrap these:
 
-    encode_state(state: State) -> str
-    decode_state(payload: str) -> State
+    State._to_json() -> str            (calls _encode_state)
+    State._from_json(payload) -> State (calls _decode_state)
     StateVersionMismatchError
 
 Wire format
@@ -17,7 +18,7 @@ string and the encoded state tree::
     {"ops_testing_version": "3.8.1", "state": <encoded>}
 
 Every per-charm venv is required to carry the same ``ops.testing`` version as
-the parent process (no cross-version negotiation).  ``decode_state`` asserts
+the parent process (no cross-version negotiation).  ``_decode_state`` asserts
 that ``ops_testing_version`` equals the version of the running process, and
 raises :class:`StateVersionMismatchError`, naming both versions, if it does
 not.
@@ -83,8 +84,8 @@ _JSON: TypeAlias = Union[bool, int, float, str, 'list[_JSON]', 'dict[str, _JSON]
 
 __all__ = [
     'StateVersionMismatchError',
-    'decode_state',
-    'encode_state',
+    '_decode_state',
+    '_encode_state',
 ]
 
 _T = '__t__'
@@ -236,12 +237,13 @@ def _encode(obj: Any, path: str = 'state') -> _JSON:
     raise TypeError(f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}.')
 
 
-def encode_state(state: _state.State) -> str:
+def _encode_state(state: _state.State) -> str:
     """Serialise a :class:`~ops.testing.State` to a JSON string.
 
-    The payload embeds the producing ``ops.testing`` version. Use
-    :func:`decode_state` to round-trip the result back to a ``State`` in a
-    process running the same version.
+    The entry point is :meth:`~ops.testing.State._to_json`; this is its
+    implementation. The payload embeds the producing ``ops.testing`` version,
+    and round-trips through :meth:`~ops.testing.State._from_json` in a process
+    running that same version.
 
     Raises:
         TypeError: if any field value in *state* has no registered encoding.
@@ -355,8 +357,8 @@ def _decode(obj: _JSON) -> Any:
     raise TypeError(f'Unknown wire type tag {kind!r} in payload.')
 
 
-def decode_state(payload: str) -> _state.State:
-    """Decode a JSON string produced by :func:`encode_state` back to a :class:`~ops.testing.State`.
+def _decode_state(payload: str) -> _state.State:
+    """Decode a JSON string produced by :meth:`~ops.testing.State._to_json`.
 
     Raises:
         StateVersionMismatchError: if the payload's producing ``ops.testing``

@@ -3,10 +3,11 @@
 
 """Typed JSON encoder/decoder for ops.testing.State.
 
-Public surface (re-exported via ops.testing):
+Internal surface.  The entry points are the private ``State`` methods that
+wrap these:
 
-    encode_state(state: State) -> str
-    decode_state(payload: str) -> State
+    State._to_json() -> str            (calls _encode_state)
+    State._from_json(payload) -> State (calls _decode_state)
     StateVersionMismatchError
 
 Wire format
@@ -17,7 +18,7 @@ string and the encoded state tree::
     {"ops_testing_version": "3.8.1", "state": <encoded>}
 
 Every per-charm venv is required to carry the same ``ops.testing`` version as
-the parent process (no cross-version negotiation).  ``decode_state`` asserts
+the parent process (no cross-version negotiation).  ``_decode_state`` asserts
 that ``ops_testing_version`` equals the version of the running process, and
 raises :class:`StateVersionMismatchError`, naming both versions, if it does
 not.

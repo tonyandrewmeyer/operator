@@ -375,7 +375,7 @@ class TestOpsTestingVersion:
         assert data['ops_testing_version'] == ops.version.version
 
     def test_matching_version_round_trips(self):
-        # encode_state always stamps the running version, so a plain
+        # _encode_state always stamps the running version, so a plain
         # round-trip exercises the match path.
         state = State()
         out = _roundtrip(state)

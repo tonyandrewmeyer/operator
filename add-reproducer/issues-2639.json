@@ -1,0 +1,37 @@
+[
+  {
+    "author": {
+      "id": "MDQ6VXNlcjM0ODQyOTYz",
+      "is_bot": false,
+      "login": "skourta",
+      "name": "Smail KOURTA"
+    },
+    "body": "Juju (through ops) only emits `pebble-custom-notice` events for **public** Pebble notices \u2014 i.e. notices recorded by the `root` user. In rocks, the recommended practice is to run workloads as the unprivileged `_daemon_` user. Custom notices emitted by a non-root user are scoped to that user's UID and are not public, so Juju never emits an event for them and the charm never wakes up.\n\n## Current behavior\n\n- A workload running as `_daemon_` (non-root) records a custom notice via `pebble notify`.\n- Because the notice is emitted by a non-root UID, Pebble binds the notice to that user and it is **not** public.\n- Juju/ops only surfaces public notices, so no `pebble-custom-notice` event is emitted.\n- The charm never observes the notice and does not react.\n\n## Expected behavior\n\nCharms should be able to react to custom notices emitted by workloads regardless of whether the workload runs as `root` or as the unprivileged `_daemon_` user \u2014 the recommended way to run workloads in rocks.\n\n## Impact\n\nThis makes custom notices effectively unusable as an event mechanism for any rock that follows the best practice of running its workload as `_daemon_`. Charm authors are forced to either:\n\n- run the workload as `root` (against rock best practices), or\n- abandon custom notices as a signaling mechanism.\n\n## Environment\n\n- Component: Juju / ops (Pebble custom notice handling)\n- Workload user: `_daemon_` (non-root)\n- Notice visibility: user-scoped (not public)",
+    "createdAt": "2026-07-10T12:07:31Z",
+    "labels": [
+      {
+        "id": "MDU6TGFiZWwyMDA1OTI3MDk5",
+        "name": "needs design",
+        "description": "Needs more thought or a spec",
+        "color": "7df2ee"
+      },
+      {
+        "id": "LA_kwDODKRcgM8AAAACA-M-jQ",
+        "name": "roadmap",
+        "description": "An official roadmap item",
+        "color": "fbca04"
+      },
+      {
+        "id": "LA_kwDODKRcgM8AAAACy9F-sQ",
+        "name": "27.04",
+        "description": "An item we hope to do in the 27.04 cycle",
+        "color": "1b7f5a"
+      }
+    ],
+    "number": 2639,
+    "state": "OPEN",
+    "title": "Juju/ops only reacts to public Pebble custom notices, breaking custom notices in rocks that run workloads as `_daemon_`",
+    "repo": "canonical/operator",
+    "comments": []
+  }
+]

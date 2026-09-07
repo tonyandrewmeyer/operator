@@ -1,0 +1,61 @@
+# Measures criterion 7's wall-clock on GHA-hosted hardware.
+#
+# The add-reproducer spike has cold timings from dev multipass VMs
+# (prepare + pack alone is ~24m45s, over the 20-minute budget), but the
+# criterion is about the runtime the design actually targets: a stock
+# `ubuntu-latest` runner. That number cannot be taken from a VM or a
+# container, so it is taken here.
+#
+# The harness runs `sudo concierge prepare` itself, so this workflow
+# installs concierge and then gets out of the way -- pre-preparing would
+# warm exactly the step being measured. `--fixture-llm` replays the
+# recorded extraction for canonical/operator#2639 instead of calling
+# OpenRouter, so no secret is needed and only the substrate half runs.
+# #2639 pins no juju version, so the harness provisions its own
+# `_DEFAULT_JUJU_CHANNEL` (4.0/stable) -- the same channel the two cold VM
+# runs used, which is what makes the numbers comparable.
+name: add-reproducer wall-clock
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wallclock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+
+      - name: Install concierge
+        run: sudo snap install --classic concierge
+
+      # Deliberately no `concierge prepare` step: the harness runs it, and
+      # its cold cost is the measurement.
+      - name: Run the pipeline against #2639
+        working-directory: add-reproducer/harness
+        run: |
+          uv run python pipeline.py \
+            --issues ../issues-2639.json \
+            --live \
+            --fixture-llm \
+            --calibration-mode \
+            --dump-run \
+            --out-dir out/
+
+      - name: Summarise per-step elapsed
+        if: always()
+        working-directory: add-reproducer/harness
+        run: python3 ../summarise-run.py out/ >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        if: always()
+        with:
+          name: add-reproducer-wallclock-run
+          path: add-reproducer/harness/out/

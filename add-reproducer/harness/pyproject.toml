@@ -1,0 +1,14 @@
+[project]
+name = "add-reproducer-harness"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

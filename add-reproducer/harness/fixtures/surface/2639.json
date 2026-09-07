@@ -1,0 +1,14 @@
+{
+  "charm_name": "repro-i2639-pebble-notice",
+  "relation": {},
+  "storage": {},
+  "pebble_service": {
+    "container": "workload",
+    "service": "notice-source",
+    "command": "/charm/bin/pebble notify canonical.com/repro/notice-1 key=value",
+    "user": "_daemon_"
+  },
+  "ops_api_surface": "pebble-custom-notice",
+  "expected_signal": "observed notice:",
+  "_command_note": "pebble_service.command was null until the runner's k8s-scratch orchestration was completed (2026-07-27): spike-step-3/FINDINGS.md 'Left out' explicitly says command/user belong 'in whatever seeds the rock/container environment for reproduction (step 4's runner), not in the charm scaffolding itself' -- render.py still doesn't wire it, but the runner now does, so this field needs a real value to exercise the stimulus/control steps. Value is verbatim from spike-step-4/2639/RESULT.md's hand walk."
+}

@@ -1,0 +1,14 @@
+{
+  "number": 2304,
+  "title": "Testing (Scenario): `check_cloudspec_consistency` can be removed",
+  "body": "In [check_cloudspec_consistency](https://github.com/canonical/operator/blob/main/testing/src/scenario/_consistency_checker.py#L722), Scenario complains if the cloud spec's type is set to `kubernetes`. This is no longer relevant as the cloud spec type is now also reported on `kubernetes` models.",
+  "labels": [
+    "small item",
+    "26.04",
+    "rainy day"
+  ],
+  "createdAt": "2026-02-02T08:25:41Z",
+  "state": "CLOSED",
+  "author": "reneradoi",
+  "repo": "canonical/operator"
+}

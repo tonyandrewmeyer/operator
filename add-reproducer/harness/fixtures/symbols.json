@@ -1,0 +1,5 @@
+{
+  "ops.model.Model.get_relation": true,
+  "ops.model.RelationMapping._get_unique": true,
+  "ops.testing.scenario.Relation.relation_id": false
+}

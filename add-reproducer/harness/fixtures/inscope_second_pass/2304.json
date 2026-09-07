@@ -1,0 +1,15 @@
+{
+  "concrete_defect": false,
+  "reason": "The current behaviour (check_cloudspec_consistency flags a kubernetes cloud-spec as inconsistent) matches what the code does today; the reporter argues the check is now obsolete and should be removed. That is a proposal to change the codebase, not a symptom of a broken promise.",
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": null,
+    "other": {}
+  },
+  "commands": [],
+  "expected": "",
+  "observed": "",
+  "confidence": "low"
+}

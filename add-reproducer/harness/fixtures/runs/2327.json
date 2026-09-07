@@ -1,0 +1,28 @@
+{
+  "hypothesis_number": 2327,
+  "branch": "none",
+  "commands": [
+    {
+      "command": "uv venv",
+      "exit_code": 0,
+      "stdout": "Using CPython 3.14.3\nCreated virtual environment",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "uv pip install ops",
+      "exit_code": 0,
+      "stdout": "Installed ops==3.8.0 ops-scenario==8.8.0",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "uv run pytest repro_test.py -v",
+      "exit_code": 0,
+      "stdout": "repro_test.py::test_get_relation_wrong_name_same_id PASSED\nrelation.data[charm.app] == {}\n1 passed in 0.05s",
+      "stderr": "",
+      "log_records": []
+    }
+  ],
+  "control": null
+}

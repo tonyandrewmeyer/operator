@@ -1,0 +1,114 @@
+name: Dogfood canary
+
+# FORK-ONLY. Never merge this upstream, and never branch a PR from a fork
+# main that has it. It exists to drive the ai-failure-notifications pair
+# (notify-scheduled-failure.yaml -> ai-failure-enrich.yaml) end to end in
+# seconds, instead of waiting ~50 minutes on a real scheduled workflow that
+# also needs secrets a fork does not have.
+#
+# It stands in for one of the seven real callers, so it reproduces the real
+# nesting depth: this workflow -> the notifier -> the enricher.
+#
+# Real callers gate on `failure() && github.event_name == 'schedule'`; this
+# one drops the event half so it can be dispatched. Nothing downstream
+# inspects the event any more -- with the enricher on `workflow_call` there
+# is no `schedule`-only gate left to widen, which there was when this was
+# last run.
+#
+# It also runs on push to its own branch. Every workflow in the chain is
+# `workflow_call` now, so nothing here needs to sit on the default branch,
+# and the old procedure (force-push to fork main, dispatch, revert main)
+# has no reason left to exist. A push to this branch is the whole run.
+
+on:
+  push:
+    branches:
+      - dogfood-canary
+  workflow_dispatch:
+    inputs:
+      shape:
+        description: Which failure shape to emit.
+        type: choice
+        options:
+          - pytest
+          - traceback-only
+          - infra-only
+        default: pytest
+
+permissions: {}
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Emit a realistic failure
+        env:
+          # `inputs.shape` is empty on a push, and an unmatched `case` emits
+          # nothing at all -- which is the degraded-signature input every
+          # enriched artefact this project has produced was built from.
+          SHAPE: ${{ inputs.shape || 'pytest' }}
+        run: |
+          case "$SHAPE" in
+            pytest)
+              cat <<'OUT'
+          ============================= test session starts ==============================
+          collected 412 items
+
+          test/test_charm.py ...................................              [ 34%]
+          test/test_model.py .........F.......F....                           [ 71%]
+          test/test_pebble.py ..................F..                           [100%]
+
+          =================================== FAILURES ===================================
+          _______________________ TestModel.test_relation_data_get _______________________
+          test/test_model.py:481: in test_relation_data_get
+              assert rel.data[self.app]['host'] == 'example.com'
+          E   KeyError: 'host'
+          ______________________ TestModel.test_status_set_message _______________________
+          test/test_model.py:702: in test_status_set_message
+              self.assertEqual(self.model.unit.status, ActiveStatus('ready'))
+          E   AssertionError: ActiveStatus('') != ActiveStatus('ready')
+          ________________________ TestPebble.test_pull_missing __________________________
+          test/test_pebble.py:1204: in test_pull_missing
+              client.pull('/nonexistent')
+          E   ops.pebble.PathError: stat /nonexistent: no such file or directory
+          =========================== short test summary info ============================
+          FAILED test/test_model.py::TestModel::test_relation_data_get - KeyError: 'host'
+          FAILED test/test_model.py::TestModel::test_status_set_message - AssertionError
+          FAILED test/test_pebble.py::TestPebble::test_pull_missing - ops.pebble.PathError
+          ======================== 3 failed, 409 passed in 41.28s ========================
+          OUT
+              ;;
+            traceback-only)
+              cat <<'OUT'
+          Traceback (most recent call last):
+            File "/home/runner/work/operator/operator/.github/patch-charm-deps.py", line 88, in <module>
+              main()
+            File "/home/runner/work/operator/operator/.github/patch-charm-deps.py", line 71, in main
+              pyproject['project']['dependencies'] = patched
+                                                     ~~~~~~^
+          KeyError: 'loki/0'
+          OUT
+              ;;
+            infra-only)
+              cat <<'OUT'
+          Error: The operation was canceled.
+          The runner has received a shutdown signal.
+          OUT
+              ;;
+          esac
+          exit 1
+
+  # Stands in for the real callers' `open-issue-on-failure-if-scheduled`.
+  # Mirrors what a real caller passes: the two permissions and the secret,
+  # named explicitly rather than inherited (the enricher's own comment
+  # explains why naming it at every level is load-bearing).
+  open-issue-on-failure-if-scheduled:
+    if: ${{ failure() }}
+    needs: [canary]
+    permissions:
+      issues: write
+      actions: read
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    uses: ./.github/workflows/notify-scheduled-failure.yaml

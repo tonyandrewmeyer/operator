@@ -11,6 +11,10 @@
 # warm exactly the step being measured. `--fixture-llm` replays the
 # recorded extraction for canonical/operator#2639 instead of calling
 # OpenRouter, so no secret is needed and only the substrate half runs.
+# `--out-dir` must be absolute: the harness builds `juju deploy` from the
+# work dir verbatim, and juju 4 rejects a relative local-charm path that is
+# not `./`-prefixed ("The charm or bundle ... is ambiguous").
+#
 # #2639 pins no juju version, so the harness provisions its own
 # `_DEFAULT_JUJU_CHANNEL` (4.0/stable) -- the same channel the two cold VM
 # runs used, which is what makes the numbers comparable.
@@ -47,7 +51,7 @@ jobs:
             --fixture-llm \
             --calibration-mode \
             --dump-run \
-            --out-dir out/
+            --out-dir "$PWD/out"
 
       - name: Summarise per-step elapsed
         if: always()

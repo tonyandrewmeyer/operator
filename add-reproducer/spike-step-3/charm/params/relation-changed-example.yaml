@@ -1,0 +1,24 @@
+# Structural example, not tied to one issue. Demonstrates the
+# relation-changed axis for a *deployed* charm (real juju, not
+# ops.testing) -- for contrast with operator#2341/#2327, which are both
+# substrate=none and don't need a packed charm at all (see FINDINGS.md
+# "what this scaffolding is actually for").
+#
+# Stands in for the case PLAN.md's v1 target list anticipates on
+# charmlibs / charm-ubuntu: a relation-shaped bug that only reproduces
+# against a real controller (peer-relation timing, leadership races,
+# multi-unit databag visibility) rather than Scenario's single-process
+# event model.
+
+charm_name: repro-relation-example
+source_issue: null
+
+relation:
+  name: db
+  interface: pgsql
+  role: requirer
+
+storage: {}
+pebble_service: {}
+
+ops_api_surface: relation-changed

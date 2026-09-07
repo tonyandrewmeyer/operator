@@ -1,0 +1,23 @@
+{
+  "in_scope": true,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": "k8s",
+    "other": {
+      "pebble_notify_user": "_daemon_"
+    },
+    "ci_run_url": null,
+    "symbol_anchor": null
+  },
+  "commands": [
+    "sudo concierge prepare -p k8s",
+    "juju deploy <k8s-charm-with-workload-running-as-_daemon_>",
+    "juju ssh --container <workload-container> <unit>/0 -- pebble notify canonical.com/mycharm/test-notice key=value",
+    "juju debug-log --include <unit>/0 --replay | grep pebble-custom-notice"
+  ],
+  "expected": "A pebble-custom-notice event fires for the charm to observe, regardless of whether the notice was recorded by root or by the unprivileged _daemon_ user.",
+  "observed": "Per the reporter: no event fires for notices recorded by a non-root UID, because Pebble scopes them to that user and Juju only surfaces public (root-recorded) notices.",
+  "confidence": "low"
+}

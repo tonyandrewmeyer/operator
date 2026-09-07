@@ -1,0 +1,10 @@
+{
+  "number": 9002,
+  "title": "[SYNTHETIC] custom notice from a non-default user is silently never observed",
+  "body": "[SYNTHETIC -- not real GitHub content; written to exercise inscope_second_pass.py's recovery path in tests] Current behavior: when a workload process running as a non-default user emits a Pebble custom notice, the charm's notice observer never fires -- no log line, no hook run, nothing. Expected behavior: charms should be able to react to a custom notice regardless of which user emitted it.",
+  "labels": ["needs design", "roadmap"],
+  "createdAt": "2026-06-01T00:00:00Z",
+  "state": "OPEN",
+  "author": "someuser",
+  "repo": "canonical/operator"
+}

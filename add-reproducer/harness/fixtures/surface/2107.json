@@ -1,0 +1,9 @@
+{
+  "charm_name": "repro-i2107-machine-id",
+  "relation": {},
+  "storage": {},
+  "pebble_service": {},
+  "ops_api_surface": "update-status",
+  "expected_signal": null,
+  "_provenance": "Not a real surface-inference call (no LLM key in this sandbox, see harness/README.md) -- hand-derived to match #2107's real extraction (fixtures/extractions/2107.json), whose synthesized test fires on ctx.on.update_status(). pebble_service is deliberately empty: the bug is a plain JujuContext parsing crash with no container/workload involved, so render.py (is_k8s = bool(pebble_service.container)) renders a machine charm, not a k8s one -- the correct shape for a substrate:lxd hypothesis. expected_signal is left null on purpose: the bug is a crash, not a positive-signal-absent shape, so nothing here should invent one just to exercise the control-case code path (see test_seams_runner.py for that, using a synthetic surface instead)."
+}

@@ -1,0 +1,19 @@
+{
+  "in_scope": false,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": null,
+    "other": {},
+    "ci_run_url": null,
+    "symbol_anchor": null
+  },
+  "commands": [],
+  "expected": "",
+  "observed": "",
+  "confidence": "low",
+  "_review": {
+    "notes": "[SYNTHETIC] Models this project's own recorded failure mode (spike-step-5/inscope-instrument/RESULT.md): the first pass reads the 'needs design'/'roadmap' labels plus the should-phrased expected text and drops the issue with empty observed/expected fields, even though the current-behaviour text names a concrete broken mechanism."
+  }
+}

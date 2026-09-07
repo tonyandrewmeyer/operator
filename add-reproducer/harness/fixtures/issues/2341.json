@@ -1,0 +1,13 @@
+{
+  "number": 2341,
+  "title": "state transition testing relation events don't like remote unit zero",
+  "body": "This test:\n\n```py\n    ctx = testing.Context(DummyCharm, meta=META)\n    secret = testing.Secret(tracked_content=BAD_SECRET_DATA)\n    rel = testing.Relation(\n        \"rel\", \"intr\",\n        remote_app_data={\"secret-uri\": f'\"secret://{secret.id}\"'},\n        remote_units_data={0: {}},\n    )\n\n    state_in = testing.State(relations={rel}, secrets={secret})\n    state_out = ctx.run(ctx.on.relation_changed(relation=rel, remote_unit=0), state_in)\n```\n\nYields \u26a0\ufe0f `WARNING  ops-scenario.runtime.consistency_checker:_consistency_checker.py:122 This scenario is probably inconsistent. Double check, and ignore this warning if you're sure. The following warnings were found: 'rel_relation_changed' is implicitly using 0 as the remote unit. Consider passing `remote_unit` explicitly.`\n\nIf I change the remote unit to `1` in both `remote_units_data=...` and `remote_unit=...` the warning disappears.\n\nI think this means we're confusing the explicit remote unit `1` with the implicit/default.\n\nGiven that unit 0 is legal in Juju, we should fix this.",
+  "labels": [
+    "small item",
+    "rainy day"
+  ],
+  "createdAt": "2026-02-25T11:02:40Z",
+  "state": "CLOSED",
+  "author": "dimaqq",
+  "repo": "canonical/operator"
+}

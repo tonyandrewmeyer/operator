@@ -1,0 +1,28 @@
+{
+  "hypothesis_number": 2045,
+  "branch": "none",
+  "commands": [
+    {
+      "command": "uv init /tmp/repro-2045-cwd",
+      "exit_code": 0,
+      "stdout": "Initialized project `repro-2045-cwd`",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "cd /tmp/repro-2045-cwd && uv add \"ops[testing]\"",
+      "exit_code": 0,
+      "stdout": "Resolved packages\nInstalled packages\n + ops==3.8.0\n + ops-scenario==8.8.0\n + pytest==9.1.1",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "cd /tmp/repro-2045-cwd && uv run pytest test_cwd.py -v",
+      "exit_code": 1,
+      "stdout": "test_cwd.py::test_cwd_matches_charm_dir \nlaunch_cwd  = '/home/tony.meyer@canonical.com/tmp/repro-2045-cwd'\nhook cwd    = '/home/tony.meyer@canonical.com/tmp/repro-2045-cwd'\ncharm_dir   = '/tmp/tmpmlrr53s9'\nFAILED\n\n=================================== FAILURES ===================================\n__________________________ test_cwd_matches_charm_dir __________________________\n\n    def test_cwd_matches_charm_dir():\n        launch_cwd = os.getcwd()\n        ctx = testing.Context(MyCharm, meta={\"name\": \"test-charm\"})\n        ctx.run(ctx.on.install(), testing.State())\n        print(f\"\\nlaunch_cwd  = {launch_cwd!r}\")\n        print(f\"hook cwd    = {captured['cwd']!r}\")\n        print(f\"charm_dir   = {captured['charm_dir']!r}\")\n>       assert captured[\"cwd\"] == captured[\"charm_dir\"], (\n            f\"cwd inside hook is {captured['cwd']!r} but charm_dir is \"\n            f\"{captured['charm_dir']!r} -- under real juju these match\"\n        )\nE       AssertionError: cwd inside hook is '/home/tony.meyer@canonical.com/tmp/repro-2045-cwd' but charm_dir is '/tmp/tmpmlrr53s9' -- under real juju these match\n\ntest_cwd.py:31: AssertionError\n------------------------------ Captured log call -------------------------------\nDEBUG    root:_main.py:340 ops 3.8.0 up and running.\nDEBUG    root:storage.py:70 Initializing SQLite local storage: :memory:.\nDEBUG    root:_main.py:476 Emitting Juju event install.\n1 failed in 0.20s",
+      "stderr": "",
+      "log_records": []
+    }
+  ],
+  "control": null
+}

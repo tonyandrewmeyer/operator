@@ -1,0 +1,10 @@
+{
+  "number": 2484,
+  "title": "Tracing integration test failure",
+  "body": "The tracing `test_deployment` integration test is consistently failing.\n\n1. For some reason test_tracing is run under the secret tests. I assume that should not be the case.\n2. The test fails when [integrating with tempo](https://github.com/canonical/operator/actions/runs/26018272398/job/76473267127) before getting to the actual tracing checks. The Juju log indicates minio or maybe k8s is not correctly configured.",
+  "labels": [],
+  "createdAt": "2026-05-18T22:26:34Z",
+  "state": "OPEN",
+  "author": "tonyandrewmeyer",
+  "repo": "canonical/operator"
+}

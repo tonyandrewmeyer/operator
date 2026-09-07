@@ -3586,14 +3586,16 @@ class _ModelBackend:
         except hookcmds.Error as e:
             self._check_for_security_event(e.cmd[0], e.returncode, e.stderr)
             stderr_lower = e.stderr.lower()
-            if cmd.startswith(('relation-', 'network-')) and 'relation not found' in stderr_lower:
-                raise RelationNotFoundError() from e
-            elif cmd in ('relation-get', 'relation-list') and 'permission denied' in stderr_lower:
-                # Juju's uniter facade reports "permission denied" rather than
-                # "relation not found" when the relation has already gone away
-                # entirely (cross-model relation mid-teardown, remove-saas, or
-                # an app/relation removed with --force), so treat it the same
-                # as the "relation not found" case above.
+            if cmd.startswith(('relation-', 'network-')) and (
+                'relation not found' in stderr_lower
+                # Juju reports "permission denied" rather than "relation not
+                # found" when the relation is gone from its state entirely,
+                # such as the consuming side of a cross-model relation after
+                # `juju remove-saas <saas> --force`. Both the bare wording and
+                # "permission denied (unauthorized access)" occur, so match on
+                # the substring.
+                or 'permission denied' in stderr_lower
+            ):
                 raise RelationNotFoundError() from e
             elif cmd.startswith('secret-') and 'not found' in stderr_lower:
                 raise SecretNotFoundError() from e

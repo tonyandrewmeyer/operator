@@ -2611,6 +2611,34 @@ class TestModelBindings:
 }"""
         return model
 
+    def test_dangling_cross_model_relation(
+        self, fake_script: FakeScript, monkeypatch: pytest.MonkeyPatch, root_logging: None
+    ):
+        # A cross-model relation that is gone from Juju's state, but that the uniter still
+        # offers to the charm: `relation-ids` and `relation-list` succeed, but every
+        # `relation-get` fails with "permission denied" rather than "relation not found".
+        # Verified against Juju 3.6.27 after `juju remove-saas <saas> --force --no-wait`.
+        monkeypatch.setenv('JUJU_VERSION', '3.6.27')
+        meta = ops.CharmMeta()
+        meta.relations = {
+            'db1': ops.RelationMeta(
+                ops.RelationRole.requires, 'db1', {'interface': 'db1', 'scope': 'global'}
+            ),
+        }
+        model = ops.Model(meta, _ModelBackend('myapp/0'))
+        fake_script.write('relation-ids', """([ "$1" = db1 ] && echo '["db1:2"]') || echo '[]'""")
+        fake_script.write(
+            'relation-list',
+            """if [ "$2" = --app ]; then echo '"remoteapp1"'; else echo '[]'; fi""",
+        )
+        fake_script.write('relation-get', 'echo "ERROR permission denied" >&2; exit 1')
+        fake_script.write('is-leader', 'echo false')
+        fake_script.write('juju-log', 'exit 0')
+
+        relation = model.relations['db1'][0]
+        assert dict(relation.data[relation.app]) == {}
+        assert dict(relation.data[model.unit]) == {}
+
     def ensure_relation(self, model: ops.Model, name: str = 'db1', relation_id: int | None = None):
         """Wrapper around model.get_relation that enforces that None is not returned."""
         rel_db1 = model.get_relation(name, relation_id)
@@ -2890,6 +2918,31 @@ class TestModelBackend:
         backend._leader_check_time = None
         assert model.unit.is_leader()
 
+    @pytest.mark.parametrize(
+        'stderr',
+        [
+            # Juju returns "permission denied" rather than "relation not found" for hook
+            # commands on a relation that is gone from its state, such as the consuming
+            # side of a cross-model relation after `juju remove-saas <saas> --force`.
+            'ERROR permission denied',
+            'ERROR permission denied (unauthorized access)',
+        ],
+    )
+    def test_relation_get_gone_relation(
+        self,
+        fake_script: FakeScript,
+        monkeypatch: pytest.MonkeyPatch,
+        root_logging: None,
+        stderr: str,
+    ):
+        monkeypatch.setenv('JUJU_VERSION', '3.6.27')
+        backend = _ModelBackend('myapp/0')
+        fake_script.write('relation-get', f'echo "{stderr}" >&2 ; exit 1')
+        fake_script.write('is-leader', 'echo false')
+        fake_script.write('juju-log', 'exit 0')
+        with pytest.raises(ops.RelationNotFoundError):
+            backend.relation_get(2, 'remoteapp1', is_app=True)
+
     def test_relation_hook_command_errors(
         self, fake_script: FakeScript, monkeypatch: pytest.MonkeyPatch
     ):
@@ -2897,8 +2950,9 @@ class TestModelBackend:
         backend = _ModelBackend('myapp/0')
         err_msg = 'ERROR invalid value "$2" for option -r: relation not found'
         # Juju's uniter facade reports this instead of "relation not found" when
-        # the relation has already gone away entirely (cross-model relation
-        # mid-teardown, remove-saas, or an app/relation removed with --force).
+        # the relation is gone from its state entirely. Reproduced against Juju
+        # 3.6.27 on the consuming side of a cross-model relation, after
+        # `juju remove-saas <saas> --force --no-wait`.
         permission_denied_msg = 'ERROR permission denied'
         # "permission denied" is also a security-event trigger, which looks up
         # leadership; stub it so those test cases don't need real Juju tools.
@@ -2935,15 +2989,23 @@ class TestModelBackend:
                 [['relation-set', '-r', '3', '--file', '-']],
             ),
             (
-                # Unlike relation-get/relation-list, relation-set is a write, so
-                # "permission denied" is left as a plain ModelError: it may be a
-                # genuine authorisation failure rather than a gone relation.
                 lambda: fake_script.write(
                     'relation-set', f'echo {permission_denied_msg} >&2 ; exit 2'
                 ),
                 lambda: backend.relation_set(3, {'foo': 'bar'}, is_app=False),
-                ops.ModelError,
+                ops.RelationNotFoundError,
                 [['relation-set', '-r', '3', '--file', '-']],
+            ),
+            (
+                # Juju words this one differently for our own application's
+                # databag, so match on the substring rather than the whole line.
+                lambda: fake_script.write(
+                    'relation-get',
+                    'echo "ERROR permission denied (unauthorized access)" >&2 ; exit 2',
+                ),
+                lambda: backend.relation_get(3, 'remoteapp1', is_app=True),
+                ops.RelationNotFoundError,
+                [['relation-get', '--format=json', '-r', '3', '--app', '-', 'remoteapp1']],
             ),
             (
                 lambda: fake_script.write('relation-set', f'echo {err_msg} >&2 ; exit 2'),

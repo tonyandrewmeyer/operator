@@ -1,0 +1,8 @@
+name: hardexit
+summary: Charm that hard-exits its worker on the start event.
+description: |
+  Test fixture for the persistent-worker isolation path. On the ``start`` event
+  it calls ``os._exit`` to kill the worker process abruptly (bypassing the
+  worker's try/except), simulating a true worker crash. On the ``install`` event
+  it behaves normally, which lets tests verify that a dead worker is not
+  silently re-spawned mid-test.

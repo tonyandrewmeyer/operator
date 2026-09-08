@@ -1933,17 +1933,23 @@ def test_service_requires_pulls_in_undeclared_member_without_ordering():
         assert workload.get_service('zulu').current == ops.pebble.ServiceStatus.ACTIVE
 
 
-def test_service_requires_one_hop_holds_dependent_on_failure():
-    """A service is held, not started, when the service it `requires` fails.
+def test_service_requires_only_dependent_not_held_when_it_sorts_first():
+    """A bare `requires` dependent is not held if it sorts ahead of the failure.
 
-    Real-Pebble probe #4 (WORKLOAD-MOCK-DESIGN.md §24.2): with `requires`
-    declared, a dependency's failed task (`Error`) holds its dependent's
-    task (`Hold`) rather than letting it run -- unlike a bare `after`
-    relationship, which does not cascade (see
-    test_service_dependency_start_order_matches_probe). Reuses
-    _requires_only_layer's yankee/zulu shape -- no `after` at all -- to
-    show the cascade follows `requires` alone, not the `before`/`after`
-    ordering.
+    Real-Pebble probe #8 (WORKLOAD-MOCK-DESIGN.md §32.5/§32.8, and probe #4's
+    own §31.2 recheck with this exact yankee/zulu shape): `Hold` is not
+    decided by `requires` closure membership alone -- a service also has to
+    be ordered *after* the failing one in the realized
+    `_service_dependency_order` output, and with no `after` edge at all that
+    position comes from the alphabetical tie-break. yankee requires zulu
+    with no `after`; `yankee` < `zulu` alphabetically, so yankee is ordered
+    first, runs to completion before zulu's failure is known, and reaches
+    `Done`/`ACTIVE` -- it is *not* held, even though zulu is in its
+    `requires` closure and fails. This corrects the mock's earlier
+    over-holding behaviour on exactly this shape (§31); see
+    test_service_requires_only_dependent_held_when_it_sorts_last for the
+    paired shape where renaming flips the tie-break and the dependent *is*
+    held.
     """
     container = Container(
         'foo',
@@ -1961,9 +1967,64 @@ def test_service_requires_one_hop_holds_dependent_on_failure():
             'Start service "yankee"',
             'Start service "zulu"',
         ]
-        assert [t.status for t in change.tasks] == ['Hold', 'Error']
-        assert workload.get_service('yankee').current == ops.pebble.ServiceStatus.INACTIVE
+        assert [t.status for t in change.tasks] == ['Done', 'Error']
+        assert workload.get_service('yankee').current == ops.pebble.ServiceStatus.ACTIVE
         assert workload.get_service('zulu').current != ops.pebble.ServiceStatus.ACTIVE
+
+
+def _requires_only_layer_tiebreak_reversed() -> ops.pebble.Layer:
+    """The same declared shape as _requires_only_layer -- one bare `requires`
+    edge, no `after` at all -- renamed so the alphabetical tie-break sorts
+    the dependent *after* the target instead of before it (Real-Pebble
+    probe #8, WORKLOAD-MOCK-DESIGN.md §32.5's paired layers 005/006: same
+    edges, only the names change). `zdep` requires `atgt`; `atgt` < `zdep`.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'atgt': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'zdep': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['atgt'],
+            },
+        }
+    })
+
+
+def test_service_requires_only_dependent_held_when_it_sorts_last():
+    """The same bare `requires` shape, renamed so the tie-break flips -- and the outcome with it.
+
+    Real-Pebble probe #8 (WORKLOAD-MOCK-DESIGN.md §32.5/§32.8): identical
+    declared edges to
+    test_service_requires_only_dependent_not_held_when_it_sorts_first --
+    one `requires` edge, no `after` -- with the two names swapped so `zdep`
+    (the dependent) sorts *after* `atgt` (the target) instead of before it.
+    Real Pebble held the renamed dependent in exactly this shape (§32.5's
+    `atop`/`zbot`/`mmid` and `aamid`/`aatop`/`zzbot` layers); only a check
+    against realized-order position, not graph reachability, gets both
+    members of this pair right at once -- a reachability check would call
+    this one `Done` too, since neither shape has an `after` edge to walk.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _requires_only_layer_tiebreak_reversed()},
+        service_behaviours={ServiceBehaviour('atgt', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('zdep')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "atgt"',
+            'Start service "zdep"',
+        ]
+        assert [t.status for t in change.tasks] == ['Error', 'Hold']
+        assert workload.get_service('zdep').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('atgt').current != ops.pebble.ServiceStatus.ACTIVE
 
 
 def _transitive_requires_layer() -> ops.pebble.Layer:

@@ -1329,14 +1329,21 @@ class _MockPebbleClient(_TestingPebbleClient):
         A service with no declared ``ServiceBehaviour`` of its own still
         resolves from its own status by default (§3's "declare, don't
         derive") -- *unless* its ``requires`` closure contains a failing
-        service, direct or transitive, in which case it is ``Hold``, not
-        ``Done``, and never reaches ACTIVE (Real-Pebble probe #5,
-        WORKLOAD-MOCK-DESIGN.md §25.1/§27). This is cascade, and it is
-        scoped to ``requires``: a dependent declared only via ``before``/
-        ``after`` is unaffected by an ancestor's failure, exactly the gap
+        service that also sorts earlier than it in ``ordered``, in which
+        case it is ``Hold``, not ``Done``, and never reaches ACTIVE
+        (Real-Pebble probe #5, WORKLOAD-MOCK-DESIGN.md §25.1/§27; probe #8,
+        §32/§33, on the ordering half). This is cascade, and it is scoped
+        to ``requires``: a dependent declared only via ``before``/``after``
+        is unaffected by an ancestor's failure, exactly the gap
         ``test_service_dependency_start_order_matches_probe`` records for
         that case -- real Pebble draws that line (§24.2) and this mock
-        follows it.
+        follows it. The ordering half is not a declared-graph reachability
+        check -- it is each service's position in the already-computed
+        ``ordered`` list, which folds in the alphabetical tie-break for any
+        pair the declared ``before``/``after`` graph leaves unconstrained
+        (§32.5/§32.8): two requests with identical ``requires``/``after``
+        edges can disagree on ``Hold`` if renaming the services flips which
+        one the tie-break sorts first.
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
@@ -1366,11 +1373,25 @@ class _MockPebbleClient(_TestingPebbleClient):
         # decides membership also decides how far a Hold propagates, so a
         # dependent two or more `requires` hops from the failure is caught
         # exactly like a one-hop dependent, not just the immediate one.
+        #
+        # That closure membership is necessary but not sufficient (Real-
+        # Pebble probe #8, §32/§33): a service also has to be ordered after
+        # the failing one to be held. "Ordered after" means its position in
+        # `ordered` -- the realized order already computed above, ties and
+        # all -- not a declared-`after`-graph reachability check. Comparing
+        # against `ordered`'s indices, rather than walking `after` edges
+        # again, is why an index lookup is enough here and no second graph
+        # is built.
+        order_index = {name: index for index, name in enumerate(ordered)}
         held: set[str] = {
             name
             for name in ordered
             if name not in failing_by_name
-            and self._service_requires_closure({name}, known_services) & failing_by_name.keys()
+            and any(
+                order_index[failed] < order_index[name]
+                for failed in self._service_requires_closure({name}, known_services)
+                & failing_by_name.keys()
+            )
         }
 
         for name in ordered:

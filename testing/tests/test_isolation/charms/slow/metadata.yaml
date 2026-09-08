@@ -1,0 +1,5 @@
+name: slow
+summary: Blocks for longer than any test is willing to wait.
+description: |
+  Used by the isolation tests to check that a charm which never returns is
+  killed once dispatch_timeout expires.

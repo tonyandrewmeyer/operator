@@ -61,7 +61,20 @@ class Pipeline:
     def __init__(self, llm: LLMSeam, runner: RunnerSeam, *, work_dir: Path | None = None):
         self.llm = llm
         self.runner = runner
-        self.work_dir = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="add-reproducer-"))
+        # `.resolve()`, not just `Path(...)`: `charm_dir` below is built
+        # under `work_dir` and then embedded verbatim into shell command
+        # strings (`seams/runner.py`'s `_scratch_sequence` -- `juju deploy
+        # -m <target> {charm_dir}/*.charm ...`), which run with `cwd` set to
+        # the *issue's* directory, not the process's. A relative `work_dir`
+        # -- the CLI default (`add-reproducer-out`) is one -- therefore
+        # produces a `charm_dir` that resolves against the wrong directory
+        # at execution time; juju 4 additionally refuses a local-charm path
+        # that isn't absolute or `./`-prefixed outright ("... is ambiguous").
+        # Both VM sessions that measured this harness happened to pass an
+        # absolute `--out-dir`, so this went unnoticed until a GHA run
+        # passed a relative one (spike-step-5/gha-wallclock-2026-09-07/
+        # RESULT.md §3).
+        self.work_dir = (Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="add-reproducer-"))).resolve()
         self.work_dir.mkdir(parents=True, exist_ok=True)
         # PLAN.md Approach §3 delta, `spike-step-5/inscope-instrument/
         # RESULT.md`: a second, narrower-question pass on every first-pass

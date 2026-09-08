@@ -1,0 +1,5 @@
+name: pid
+summary: Reports the process it runs in.
+description: |
+  Used by the model-level tests to check that every unit of an isolated
+  application runs in the same worker process.

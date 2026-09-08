@@ -1,58 +1,65 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Subprocess worker that runs a single charm event in an isolated environment.
+"""Subprocess worker that runs charm events in an isolated environment.
 
-This module is executed as::
-
-    python -m scenario._isolated_worker <request_file> <response_file>
-
-by the (potentially per-charm) Python interpreter selected in
+The worker runs under the (potentially per-charm) Python interpreter selected in
 :class:`~ops.testing.IsolatedContext`. The whole point is that *this* process may
 have a completely different ``sys.path`` / set of installed packages than the
 parent test process, so two charms with conflicting dependencies can each run in
 their own world.
 
-Protocol (spawn-per-event)
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-``argv[1]`` — path to a JSON file with the request dict. Keys:
+Two transports
+~~~~~~~~~~~~~~
+**Persistent (default).** Invoked as::
 
+    python -m scenario._isolated_worker --serve
+
+The worker enters a serve loop, reading framed JSON requests from ``stdin`` and
+writing framed JSON responses to ``stdout`` (see :mod:`scenario._worker_protocol`
+for the framing). The charm module is imported once and cached, so subsequent
+events on the same charm avoid both interpreter startup and ``import`` cost.
+This is the mode that makes a convergence run affordable.
+
+**Spawn-per-event (debug).** Invoked as::
+
+    python -m scenario._isolated_worker <request_file> <response_file>
+
+The worker reads one request from ``request_file``, writes one response to
+``response_file``, and exits. A fresh process per event means no shared
+interpreter state between events, and a debugger can attach to the single
+process; it is much slower and is offered only as an explicit debug mode.
+
+Request / response shape
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+A request dict has the keys:
+
+- ``cmd`` (``str``, persistent only): ``"run"`` or ``"shutdown"``.
 - ``charm_source`` (``str``): path to the charm repo root (``src/``, ``lib/``).
-- ``extra_sys_path`` (``list[str]``): prepended to ``sys.path`` before the charm
-  is imported.
+- ``extra_sys_path`` (``list[str]``): prepended to ``sys.path`` before import.
 - ``meta`` / ``config`` / ``actions`` (``dict | None``): charm spec.
 - ``app_name`` (``str``), ``unit_id`` (``int``).
 - ``event`` (``str``): the JSON wire form of the input ``_Event``.
 - ``state_in`` (``str``): the JSON wire form of the input ``State``.
 
-``argv[2]`` — path to write the response JSON file. Keys:
-
-- ``{"state_out": <str>}`` — the JSON wire form of the output ``State``.
-- ``{"error": <str>}`` — formatted traceback on charm failure.
+A response dict is either ``{"state_out": <str>}`` (the JSON wire form of the
+output ``State``) or ``{"error": <str>}`` (a formatted traceback when the charm
+raises). A worker *crash* (process death) is detected by the parent as a
+missing response, not via this dict.
 
 Serialisation compatibility
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ``State`` and ``_Event`` are round-tripped through
-:mod:`scenario._state_serde`, which reconstructs scenario dataclasses by
-name. The parent and worker must therefore have the **same** ``ops`` version.
-The parent sets ``PYTHONPATH`` to include the ``testing/src`` directory so the
-worker imports the matching ``scenario.*`` classes.
-
-Only the charm's *own* runtime dependencies (``cryptography``, ``pydantic``,
-charm libs, ...) may differ between the worker venv and the parent process.
-
-Auto-detection
-~~~~~~~~~~~~~~
-The worker detects the charm class by scanning the imported ``charm`` module for
-subclasses of :class:`ops.CharmBase`. The charm source must therefore expose
-a single ``CharmBase`` subclass in ``src/charm.py``. If multiple or zero charm
-classes are found, the worker exits with an error.
+:mod:`scenario._state_serde`, which the event codec also uses. The parent and
+worker must therefore have the **same** ``ops`` version; only the charm's *own*
+runtime dependencies may differ.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
+import os
 import pathlib
 import sys
 import traceback
@@ -102,18 +109,21 @@ def _load_charm_type(charm_source: pathlib.Path) -> type[CharmBase]:
     return charm_types[0]
 
 
-def _run(request: dict[str, Any]) -> dict[str, str]:
+def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> dict[str, str]:
     """Execute a single charm event and return the serialised output state.
 
     Args:
         request: The request dict from the parent process.
+        charm_cache: Optional ``{charm_source: charm_type}`` cache. In the
+            persistent serve loop the charm module is imported once and reused;
+            in spawn-per-event mode this is ``None`` (a fresh process each time).
 
     Returns:
         ``{"state_out": <json-str>}`` on success.
 
-    Raises:
-        Any exception raised by the charm or by ops.testing is propagated to
-        the caller, which wraps it in ``{"error": traceback_str}``.
+    Note:
+        This propagates any exception the charm or ops.testing raises; the
+        caller wraps it in ``{"error": traceback_str}``.
     """
     # Make the per-charm dependency set importable BEFORE anything else.
     # extra_sys_path entries are prepended so they take priority over any
@@ -124,8 +134,13 @@ def _run(request: dict[str, Any]) -> dict[str, str]:
 
     from scenario import Context, State, _isolated_serde
 
-    charm_source = pathlib.Path(request['charm_source'])
-    charm_type = _load_charm_type(charm_source)
+    charm_source = request['charm_source']
+    if charm_cache is not None and charm_source in charm_cache:
+        charm_type = charm_cache[charm_source]
+    else:
+        charm_type = _load_charm_type(pathlib.Path(charm_source))
+        if charm_cache is not None:
+            charm_cache[charm_source] = charm_type
 
     event = _isolated_serde.decode_event(request['event'])
     state_in = State._from_json(request['state_in'])
@@ -143,21 +158,59 @@ def _run(request: dict[str, Any]) -> dict[str, str]:
     return {'state_out': state_out._to_json()}
 
 
+def serve() -> int:
+    """Run the persistent serve loop, reading framed requests until EOF/shutdown.
+
+    The charm module is imported once and cached for the lifetime of the
+    process. ``stdout`` is reserved for the framed protocol, so the charm's own
+    ``stdout`` is redirected to ``stderr`` to keep it from corrupting the stream.
+
+    Returns:
+        ``0`` on a clean shutdown (``{"cmd": "shutdown"}`` or stdin closed).
+    """
+    from . import _worker_protocol
+
+    real_stdin = sys.stdin.buffer
+    # Anything written to stdout would corrupt the framed protocol. Reassigning
+    # sys.stdout only covers Python-level writes: a charm that shells out
+    # without capturing, or a C extension calling write(1, ...), goes straight
+    # past it. So the protocol moves to a private descriptor and fd 1 itself is
+    # pointed at stderr, which the parent drains separately.
+    protocol_fd = os.dup(1)
+    os.dup2(2, 1)
+    real_stdout = os.fdopen(protocol_fd, 'wb')
+    sys.stdout = sys.stderr
+
+    charm_cache: dict[str, Any] = {}
+
+    while True:
+        raw = _worker_protocol.read_frame(real_stdin)
+        if raw is None:
+            return 0  # Parent closed stdin.
+        request = json.loads(raw.decode('utf8'))
+        if request.get('cmd') == 'shutdown':
+            return 0
+        try:
+            response = _run(request, charm_cache)
+        except Exception:
+            response = {'error': traceback.format_exc()}
+        _worker_protocol.write_frame(real_stdout, json.dumps(response).encode('utf8'))
+
+
 def main(argv: list[str]) -> int:
     """Entry point for the worker subprocess.
 
-    Reads the request JSON file, runs :func:`_run`, and writes the response
-    JSON file. Exceptions from the charm are caught and returned as an
-    ``{"error": traceback_str}`` response so the parent can raise
-    :class:`~ops.testing.errors.IsolationError` with the full traceback.
-
-    Args:
-        argv: ``sys.argv``-style argument list; ``argv[1]`` is the request file
-            path and ``argv[2]`` is the response file path.
+    With ``argv[1] == '--serve'`` the worker runs the persistent serve loop.
+    Otherwise ``argv[1]`` / ``argv[2]`` are the request / response file paths for
+    a single spawn-per-event dispatch.
 
     Returns:
-        ``0`` always (errors are communicated via the response file).
+        ``0`` always (charm errors are communicated via the response, never the
+        exit code).
     """
+    if argv[1] == '--serve':
+        return serve()
+
     request_file, response_file = argv[1], argv[2]
 
     with open(request_file, encoding='utf8') as fh:

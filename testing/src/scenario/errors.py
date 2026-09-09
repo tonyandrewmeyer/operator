@@ -59,3 +59,25 @@ class NoObserverError(RuntimeError):
 
 class BadOwnerPath(RuntimeError):  # ruff: ignore[error-suffix-on-exception-name]  # Need to keep the name for backwards compatibility.
     """Error raised when the owner path does not lead to a valid ObjectEvents instance."""
+
+
+class IsolationError(RuntimeError):
+    """Raised when a charm event fails inside the isolated worker subprocess.
+
+    This wraps any exception raised by the worker - either an uncaught charm
+    exception or a worker-infrastructure error (for example, the charm module
+    could not be imported, or the worker process crashed without producing a
+    response).
+
+    The original traceback from the worker is included in the message.
+    """
+
+
+class StateVersionMismatchError(RuntimeError):
+    """Raised when a payload's producing ``ops.testing`` version differs from this process's.
+
+    Every per-charm venv is required to carry the same ``ops.testing`` version
+    as the parent test process; there is no cross-version negotiation. Install
+    a matching ``ops.testing`` (part of the ``ops[testing]`` extra) in the
+    charm's venv.
+    """

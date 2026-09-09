@@ -9,6 +9,8 @@ run isolated via ops.testing.IsolatedContext, this process is a separate
 subprocess, so a beta charm using confdep v2 in its own subprocess cannot clash.
 """
 
+import os
+
 import confdep
 
 import ops
@@ -25,6 +27,11 @@ class AlphaCharm(ops.CharmBase):
         framework.observe(self.on.install, self._on_any)
         framework.observe(self.on.start, self._on_any)
         framework.observe(self.on.config_changed, self._on_any)
+        framework.observe(self.on.whoami_action, self._on_whoami)
+
+    def _on_whoami(self, event: ops.ActionEvent):
+        event.log('reporting in')
+        event.set_results({'pid': os.getpid()})
 
     def _on_any(self, _event: ops.EventBase):
         self.unit.status = ops.ActiveStatus(

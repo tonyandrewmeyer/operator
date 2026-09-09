@@ -42,10 +42,12 @@ A request dict has the keys:
 - ``event`` (``str``): the JSON wire form of the input ``_Event``.
 - ``state_in`` (``str``): the JSON wire form of the input ``State``.
 
-A response dict is either ``{"state_out": <str>}`` (the JSON wire form of the
-output ``State``) or ``{"error": <str>}`` (a formatted traceback when the charm
-raises). A worker *crash* (process death) is detected by the parent as a
-missing response, not via this dict.
+A response dict is either a success or ``{"error": <str>}`` (a formatted
+traceback when the charm raises). A success carries ``state_out`` (the JSON
+wire form of the output ``State``), ``action_logs`` and ``action_results``
+(JSON strings) and, when an action called ``event.fail()``,
+``action_failure`` (the failure message). A worker *crash* (process death)
+is detected by the parent as a missing response, not via this dict.
 
 Serialisation compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -119,7 +121,8 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
             in spawn-per-event mode this is ``None`` (a fresh process each time).
 
     Returns:
-        ``{"state_out": <json-str>}`` on success.
+        The response dict: ``state_out``, the action output, and
+        ``action_failure`` when the charm called ``event.fail()``.
 
     Note:
         This propagates any exception the charm or ops.testing raises; the
@@ -132,6 +135,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
+    from ops.testing import ActionFailed
     from scenario import Context, State, _isolated_serde
 
     charm_source = request['charm_source']
@@ -154,8 +158,24 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         unit_id=request['unit_id'],
         juju_version=request['juju_version'],
     )
-    state_out = ctx.run(event, state_in)
-    return {'state_out': state_out._to_json()}
+    try:
+        state_out = ctx.run(event, state_in)
+    except ActionFailed as e:
+        # An action calling event.fail() is a charm outcome, not a worker
+        # failure, so it travels as data rather than as the
+        # {"error": traceback} that a crash uses.
+        assert e.state is not None
+        return {
+            'state_out': cast('State', e.state)._to_json(),
+            'action_logs': json.dumps(ctx.action_logs),
+            'action_results': json.dumps(ctx.action_results),
+            'action_failure': e.message,
+        }
+    return {
+        'state_out': state_out._to_json(),
+        'action_logs': json.dumps(ctx.action_logs),
+        'action_results': json.dumps(ctx.action_results),
+    }
 
 
 def serve() -> int:

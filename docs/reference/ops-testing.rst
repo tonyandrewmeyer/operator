@@ -103,6 +103,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.ErrorStatus
 .. autoclass:: ops.testing.Exec
 .. autoclass:: ops.testing.ICMPPort
+.. autoclass:: ops.testing.IsolatedContext
 .. autoclass:: ops.testing.JujuLogLine
 .. autoclass:: ops.testing.MaintenanceStatus
 .. autoclass:: ops.testing.Manager
@@ -129,6 +130,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.errors.ScenarioRuntimeError
 .. autoclass:: ops.testing.errors.UncaughtCharmError
 .. autoclass:: ops.testing.errors.InconsistentScenarioError
+.. autoclass:: ops.testing.errors.IsolationError
 .. autoclass:: ops.testing.errors.StateValidationError
 .. autoclass:: ops.testing.errors.MetadataNotFoundError
 .. autoclass:: ops.testing.errors.ActionMissingFromContextError

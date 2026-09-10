@@ -52,6 +52,7 @@ unit = [
     "ops[testing,tracing]",
     "pytest~=9.0",
     "pydantic~=2.10",
+    "hypothesis~=6.0",
 ]
 xdist = [
     "pytest-xdist~=3.6",

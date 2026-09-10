@@ -11,14 +11,12 @@ name: Dogfood canary
 #
 # Real callers gate on `failure() && github.event_name == 'schedule'`; this
 # one drops the event half so it can be dispatched. Nothing downstream
-# inspects the event any more -- with the enricher on `workflow_call` there
-# is no `schedule`-only gate left to widen, which there was when this was
-# last run.
+# inspects the event, so there is no `schedule`-only gate left to widen.
 #
 # It also runs on push to its own branch. Every workflow in the chain is
-# `workflow_call` now, so nothing here needs to sit on the default branch,
-# and the old procedure (force-push to fork main, dispatch, revert main)
-# has no reason left to exist. A push to this branch is the whole run.
+# `workflow_call`, so nothing here needs to sit on the default branch: a
+# push to this branch is the whole run. Note that the enricher skips a run
+# id it has already stamped, so each iteration needs a fresh commit.
 
 on:
   push:
@@ -44,9 +42,9 @@ jobs:
     steps:
       - name: Emit a realistic failure
         env:
-          # `inputs.shape` is empty on a push, and an unmatched `case` emits
-          # nothing at all -- which is the degraded-signature input every
-          # enriched artefact this project has produced was built from.
+          # `inputs.shape` is empty on a push, so default it here: an
+          # unmatched `case` emits nothing at all, and an empty log is not
+          # a signature worth testing against.
           SHAPE: ${{ inputs.shape || 'pytest' }}
         run: |
           case "$SHAPE" in
@@ -102,7 +100,7 @@ jobs:
   # Stands in for the real callers' `open-issue-on-failure-if-scheduled`.
   # Mirrors what a real caller passes: the two permissions and the secret,
   # named explicitly rather than inherited (the enricher's own comment
-  # explains why naming it at every level is load-bearing).
+  # explains why naming it at every level matters).
   open-issue-on-failure-if-scheduled:
     if: ${{ failure() }}
     needs: [canary]

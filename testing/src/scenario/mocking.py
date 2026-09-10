@@ -1197,10 +1197,13 @@ class _MockPebbleClient(_TestingPebbleClient):
         inference, not a measurement -- pending a future probe.
 
         This computes the closure only; it does not itself decide anything
-        about failure. ``_start_with_behaviours`` reuses it a second way, per
-        service, to decide cascade -- whether a service's own closure
-        contains a failing one (WORKLOAD-MOCK-DESIGN.md §25.4/§27) -- rather
-        than walking a second, separate graph for that purpose.
+        about failure. Deciding cascade -- which members a failure holds --
+        reads the same ``requires`` edges a second way, undirected, in
+        ``_service_requires_lanes``: not this walk, and not a second graph
+        either (Real-Pebble probe #9, WORKLOAD-MOCK-DESIGN.md §34.5).
+        Between §25.4 and §33 the cascade decision did reuse this function
+        per service; §34.1-§34.4 measured shapes where a service's own
+        forward closure is the wrong question to ask.
 
         Traversal is iterative over a visited set (``closure`` itself),
         never recursive, so a ``requires`` cycle terminates instead of
@@ -1236,6 +1239,71 @@ class _MockPebbleClient(_TestingPebbleClient):
                     closure.add(other)
                     frontier.append(other)
         return closure
+
+    def _service_requires_lanes(
+        self,
+        names: Iterable[str],
+        known_services: dict[str, pebble.Service],
+    ) -> list[set[str]]:
+        """Partition ``names`` into ``requires`` lanes, the way Pebble does.
+
+        Real Pebble's ``internals/plan/plan.go`` follows its realized order
+        (``order()``, modelled here by ``_service_dependency_order``) with a
+        ``createLanes`` pass that groups the ordered names into lanes, and
+        ``internals/overlord/servstate/request.go`` then makes each task in a
+        lane ``WaitFor`` the previous task in that same lane -- a serial
+        chain, whether or not a ``requires`` edge joins that specific pair.
+        Pebble holds a task when something it waits for errors, so a lane is
+        exactly the unit a failure's ``Hold`` propagates through
+        (Real-Pebble probe #9, WORKLOAD-MOCK-DESIGN.md §34.5).
+
+        ``createLanes`` groups a service with the services it requires *and*
+        maps all of those onto the same lane, so the grouping is an
+        undirected one: ``a requires b`` puts ``a`` and ``b`` in one lane
+        whichever way the walk arrives at the edge, and a third service
+        requiring two otherwise-unrelated ones merges their lanes too. So
+        this is weakly-connected components of the ``requires`` graph,
+        restricted to ``names``.
+
+        This is deliberately *not* the same walk as
+        ``_service_requires_closure``, whose forward-only direction is still
+        exactly right for membership (Real-Pebble probe #4, §24.3): the same
+        edge set, read a second way, for a different question. Two services
+        can share a lane while neither appears in the other's forward
+        closure -- §34.3's `brnnfree`, held only because a third service
+        requires both it and the chain leading to the failure.
+
+        Traversal is iterative over a visited set, so a ``requires`` cycle
+        terminates here as it does in ``_service_requires_closure``. The
+        order of the returned lanes, and of the names within one, carry no
+        meaning: callers order a lane's members by their position in
+        ``_service_dependency_order``'s output, since a lane is a
+        subsequence of the realized order rather than an ordering of its
+        own.
+        """
+        members = set(names)
+        adjacency: dict[str, set[str]] = {name: set() for name in members}
+        for name in members:
+            for target in known_services[name].requires:
+                if target not in members:
+                    continue
+                adjacency[name].add(target)
+                adjacency[target].add(name)
+
+        lanes: list[set[str]] = []
+        unassigned = set(members)
+        while unassigned:
+            lane = {unassigned.pop()}
+            frontier = list(lane)
+            while frontier:
+                name = frontier.pop()
+                for other in adjacency[name]:
+                    if other not in lane:
+                        lane.add(other)
+                        unassigned.discard(other)
+                        frontier.append(other)
+            lanes.append(lane)
+        return lanes
 
     def _service_dependency_order(
         self,
@@ -1326,24 +1394,28 @@ class _MockPebbleClient(_TestingPebbleClient):
         default, or their own declared EXITS status -- since Pebble tracks
         each service's start attempt independently.
 
-        A service with no declared ``ServiceBehaviour`` of its own still
-        resolves from its own status by default (§3's "declare, don't
-        derive") -- *unless* its ``requires`` closure contains a failing
-        service that also sorts earlier than it in ``ordered``, in which
-        case it is ``Hold``, not ``Done``, and never reaches ACTIVE
-        (Real-Pebble probe #5, WORKLOAD-MOCK-DESIGN.md §25.1/§27; probe #8,
-        §32/§33, on the ordering half). This is cascade, and it is scoped
-        to ``requires``: a dependent declared only via ``before``/``after``
-        is unaffected by an ancestor's failure, exactly the gap
-        ``test_service_dependency_start_order_matches_probe`` records for
-        that case -- real Pebble draws that line (§24.2) and this mock
-        follows it. The ordering half is not a declared-graph reachability
-        check -- it is each service's position in the already-computed
-        ``ordered`` list, which folds in the alphabetical tie-break for any
-        pair the declared ``before``/``after`` graph leaves unconstrained
-        (§32.5/§32.8): two requests with identical ``requires``/``after``
-        edges can disagree on ``Hold`` if renaming the services flips which
-        one the tie-break sorts first.
+        A service resolves from its own declared behaviour, or from its own
+        status by default (§3's "declare, don't derive") -- *unless* an
+        earlier member of its ``requires`` lane fails, in which case it is
+        ``Hold``, not ``Done``, and never reaches ACTIVE (Real-Pebble probe
+        #5, WORKLOAD-MOCK-DESIGN.md §25.1/§27; probe #8, §32/§33, on the
+        ordering half; probe #9, §34.5, on lanes). This is cascade, and it
+        is scoped to ``requires``: a dependent declared only via
+        ``before``/``after`` is unaffected by an ancestor's failure, exactly
+        the gap ``test_service_dependency_start_order_matches_probe``
+        records for that case -- real Pebble draws that line (§24.2) and
+        this mock follows it. The ordering half is not a declared-graph
+        reachability check -- it is each service's position in the
+        already-computed ``ordered`` list, which folds in the alphabetical
+        tie-break for any pair the declared ``before``/``after`` graph
+        leaves unconstrained (§32.5/§32.8): two requests with identical
+        ``requires``/``after`` edges can disagree on ``Hold`` if renaming
+        the services flips which one the tie-break sorts first. "Earlier
+        member of its lane" and not "earlier failing service in its own
+        ``requires`` closure", because Pebble chains a lane's tasks
+        serially: a service holds even when nothing it requires failed
+        (§34.3), and a service that declares ``FAILS`` itself holds rather
+        than erroring when a lane-mate failed ahead of it (§34.1).
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
@@ -1365,34 +1437,43 @@ class _MockPebbleClient(_TestingPebbleClient):
             if behaviour is not None and behaviour.start is ServiceStart.FAILS:
                 failing_by_name[name] = behaviour
 
-        # Cascade (Real-Pebble probe #5, WORKLOAD-MOCK-DESIGN.md §25.1): a
-        # service is held, not started, when its own `requires` closure --
-        # direct or transitive -- contains a service that is failing. This
-        # reuses `_service_requires_closure` per service rather than a
-        # second traversal (§25.4/§27): the same closure computation that
-        # decides membership also decides how far a Hold propagates, so a
-        # dependent two or more `requires` hops from the failure is caught
-        # exactly like a one-hop dependent, not just the immediate one.
+        # Cascade (Real-Pebble probe #5, WORKLOAD-MOCK-DESIGN.md §25.1, and
+        # probe #9, §34.5): a service is held, not started, when an earlier
+        # member of its own *lane* fails. A lane is a weakly-connected
+        # component of the `requires` graph (`_service_requires_lanes`,
+        # mirroring Pebble's `createLanes`); within one, each task waits on
+        # the previous one in realized order, so everything after the lane's
+        # first failure is held and never gets a turn to run.
         #
-        # That closure membership is necessary but not sufficient (Real-
-        # Pebble probe #8, §32/§33): a service also has to be ordered after
-        # the failing one to be held. "Ordered after" means its position in
-        # `ordered` -- the realized order already computed above, ties and
-        # all -- not a declared-`after`-graph reachability check. Comparing
-        # against `ordered`'s indices, rather than walking `after` edges
-        # again, is why an index lookup is enough here and no second graph
-        # is built.
+        # Two consequences that a per-service `requires`-closure check gets
+        # wrong, and that §34.1-§34.4 measured on a real daemon:
+        #
+        # - A service with no failing service anywhere in its own forward
+        #   closure still holds if a third service requires both it and the
+        #   chain that leads to the failure, merging the two into one lane
+        #   (§34.3's `brnnfree`).
+        # - A service that declares FAILS itself is held rather than
+        #   erroring when a lane-mate fails ahead of it (§34.1/§34.2's
+        #   `duozfail`/`duqzfail`): its own failure never manifests, because
+        #   its task never runs. Hence `held` is consulted ahead of
+        #   `failing_by_name` everywhere below.
+        #
+        # This subsumes the position rule §33 implemented rather than
+        # discarding it: with a single failure in a lane, "the lane's first
+        # failure" and "a failing member of my own closure that sorts
+        # earlier" pick out the same services. Ordering within a lane is
+        # still position in `ordered` -- the realized order already computed
+        # above, ties and all -- since a lane is a subsequence of it, not an
+        # ordering of its own.
         order_index = {name: index for index, name in enumerate(ordered)}
-        held: set[str] = {
-            name
-            for name in ordered
-            if name not in failing_by_name
-            and any(
-                order_index[failed] < order_index[name]
-                for failed in self._service_requires_closure({name}, known_services)
-                & failing_by_name.keys()
-            )
-        }
+        held: set[str] = set()
+        for lane in self._service_requires_lanes(members, known_services):
+            lane_failed = False
+            for name in sorted(lane, key=order_index.__getitem__):
+                if lane_failed:
+                    held.add(name)
+                elif name in failing_by_name:
+                    lane_failed = True
 
         for name in ordered:
             if name in failing_by_name or name in held:
@@ -1437,7 +1518,7 @@ class _MockPebbleClient(_TestingPebbleClient):
                 tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
 
         for name in ordered:
-            behaviour = failing_by_name.get(name)
+            behaviour = None if name in held else failing_by_name.get(name)
             if behaviour is not None:
                 reason, status, log = self._service_failure_detail(known_services[name], behaviour)
                 self._service_status[name] = status
@@ -1446,7 +1527,10 @@ class _MockPebbleClient(_TestingPebbleClient):
             elif name in held:
                 # Real Pebble's error message names only the task that
                 # actually failed, not the ones held because of it (§25.1) --
-                # so a held service adds a task but no bullet.
+                # so a held service adds a task but no bullet. A held
+                # service that declares FAILS of its own is no exception
+                # (§34.1): its task never ran, so there is nothing for the
+                # error message to name.
                 tasks.append(_pebble_task(name, 'start', 'Hold', spawn_time, ready_time))
             else:
                 # Pebble emits a Done task for services that did start, not

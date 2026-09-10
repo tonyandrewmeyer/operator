@@ -2094,6 +2094,305 @@ def test_service_requires_transitive_closure_pulls_in_full_chain():
         assert workload.get_service('ctop').current == ops.pebble.ServiceStatus.INACTIVE
 
 
+def _two_failures_layer() -> ops.pebble.Layer:
+    """duomdep requires duoafail and duozfail independently, both of which fail.
+
+    Real-Pebble probe #9 (WORKLOAD-MOCK-DESIGN.md §34.1;
+    probe11-layers/001-two-failures-tiebreak-favourable.yaml). No `after`
+    edges anywhere, and the two failures have no `requires` relationship to
+    each other -- they are siblings under the one dependent, which is named
+    so it sorts alphabetically *between* them.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'duoafail': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'duozfail': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'duomdep': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['duoafail', 'duozfail'],
+            },
+        }
+    })
+
+
+def test_service_requires_two_failures_hold_the_second_failure_and_the_dependent():
+    """A second failure in the same lane is held, and never fails on its own.
+
+    Real-Pebble probe #9 (WORKLOAD-MOCK-DESIGN.md §34.1): duomdep requires
+    duoafail and duozfail, both declared FAILS, neither requiring the other.
+    Real Pebble errored duoafail (first in the realized order), then held
+    *both* duomdep and duozfail. duozfail holding is the discriminating
+    result: nothing in its own `requires` closure fails -- it requires
+    nothing at all -- and it declares FAILS itself, yet it never gets a turn
+    to run, because Pebble chains the tasks of one lane serially and duozfail
+    shares duomdep's lane (§34.5). A rule that asked only whether a failing
+    service sorts earlier in this service's own closure would let duozfail
+    error independently; a rule about lanes holds it. See
+    test_service_requires_two_failures_hold_the_second_failure_not_the_leading_dependent
+    for the same edges renamed so the tie-break moves the dependent ahead of
+    both failures.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _two_failures_layer()},
+        service_behaviours={
+            ServiceBehaviour('duoafail', start=ServiceStart.FAILS),
+            ServiceBehaviour('duozfail', start=ServiceStart.FAILS),
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('duomdep')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "duoafail"',
+            'Start service "duomdep"',
+            'Start service "duozfail"',
+        ]
+        assert [t.status for t in change.tasks] == ['Error', 'Hold', 'Hold']
+        assert change.summary == 'Start service "duomdep" and 2 more'
+        # Only the task that actually errored is named: duozfail's own
+        # failure never manifested, so there is nothing to report about it.
+        assert 'duoafail' in str(exc_info.value)
+        assert 'duozfail' not in str(exc_info.value)
+        assert workload.get_service('duoafail').current == 'backoff'
+        assert workload.get_service('duomdep').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('duozfail').current == ops.pebble.ServiceStatus.INACTIVE
+
+
+def _two_failures_layer_tiebreak_reversed() -> ops.pebble.Layer:
+    """The same declared shape as _two_failures_layer -- one dependent requiring
+    two independently-failing services, no `after` at all -- renamed so the
+    dependent sorts *before* both failures instead of between them
+    (Real-Pebble probe #9, WORKLOAD-MOCK-DESIGN.md §34.2;
+    probe11-layers/002-two-failures-tiebreak-reversed.yaml).
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'duqhead': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['duqmfail', 'duqzfail'],
+            },
+            'duqmfail': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'duqzfail': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+        }
+    })
+
+
+def test_service_requires_two_failures_hold_the_second_failure_not_the_leading_dependent():
+    """The same two-failure shape, renamed so the dependent leads -- and runs.
+
+    Real-Pebble probe #9 (WORKLOAD-MOCK-DESIGN.md §34.2): identical declared
+    edges to
+    test_service_requires_two_failures_hold_the_second_failure_and_the_dependent,
+    renamed so duqhead sorts ahead of both failures. Real Pebble ran duqhead
+    to completion (Done/active), errored duqmfail, and held duqzfail. The
+    pair is what separates the two readings: holding duqzfail is not
+    explained by anything in its own `requires` closure in either naming, but
+    duqhead's fate does flip with the tie-break, so a lane-position rule is
+    the only one that gets all six answers right across the pair.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _two_failures_layer_tiebreak_reversed()},
+        service_behaviours={
+            ServiceBehaviour('duqmfail', start=ServiceStart.FAILS),
+            ServiceBehaviour('duqzfail', start=ServiceStart.FAILS),
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('duqhead')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "duqhead"',
+            'Start service "duqmfail"',
+            'Start service "duqzfail"',
+        ]
+        assert [t.status for t in change.tasks] == ['Done', 'Error', 'Hold']
+        assert 'duqmfail' in str(exc_info.value)
+        assert 'duqzfail' not in str(exc_info.value)
+        assert workload.get_service('duqhead').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('duqmfail').current == 'backoff'
+        assert workload.get_service('duqzfail').current == ops.pebble.ServiceStatus.INACTIVE
+
+
+def _branch_requires_layer() -> ops.pebble.Layer:
+    """A branching `requires` graph: brntop requires brnmreq and brnnfree,
+    brnmreq requires brnfail, and brnnfree requires nothing at all.
+
+    Real-Pebble probe #9 (WORKLOAD-MOCK-DESIGN.md §34.3;
+    probe11-layers/003-branch-graph-tiebreak-favourable.yaml). No `after`
+    edges; named so the failure sorts first. brnnfree is the branch with no
+    causal path to the failure in either direction -- it is joined to it only
+    by brntop, which requires both.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'brnfail': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'brnmreq': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['brnfail'],
+            },
+            'brnnfree': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'brntop': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['brnmreq', 'brnnfree'],
+            },
+        }
+    })
+
+
+def test_service_requires_branch_sibling_held_through_the_shared_lane():
+    """A service with no path to the failure still holds, if a lane-mate merges them.
+
+    Real-Pebble probe #9 (WORKLOAD-MOCK-DESIGN.md §34.3): brnnfree requires
+    nothing, is required only by brntop, and has no `requires` relationship
+    to brnfail in either direction, direct or transitive -- its own closure
+    is just itself. Real Pebble held it anyway, along with brnmreq (the
+    direct dependent) and brntop. Pebble's `createLanes` walks `requires`
+    edges undirected, so brntop requiring both branches merges them into one
+    lane, and every task in a lane after the erroring one holds (§34.5).
+    This is the shape §33 named as untested and the mock got wrong: a
+    per-service closure check reaches brnnfree by no route at all and lets it
+    reach Done/ACTIVE.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _branch_requires_layer()},
+        service_behaviours={ServiceBehaviour('brnfail', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('brntop')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "brnfail"',
+            'Start service "brnmreq"',
+            'Start service "brnnfree"',
+            'Start service "brntop"',
+        ]
+        assert [t.status for t in change.tasks] == ['Error', 'Hold', 'Hold', 'Hold']
+        assert change.summary == 'Start service "brntop" and 3 more'
+        assert workload.get_service('brnfail').current == 'backoff'
+        assert workload.get_service('brnmreq').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('brnnfree').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('brntop').current == ops.pebble.ServiceStatus.INACTIVE
+
+
+def _branch_requires_layer_tiebreak_reversed() -> ops.pebble.Layer:
+    """The same branching shape as _branch_requires_layer, renamed so the
+    failure sorts *last* rather than first (Real-Pebble probe #9,
+    WORKLOAD-MOCK-DESIGN.md §34.4;
+    probe11-layers/004-branch-graph-tiebreak-reversed.yaml). brqhead requires
+    brqmreq and brqnfree; brqmreq requires brqzfail; no `after` anywhere.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'brqhead': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['brqmreq', 'brqnfree'],
+            },
+            'brqmreq': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['brqzfail'],
+            },
+            'brqnfree': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'brqzfail': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+        }
+    })
+
+
+def test_service_requires_branch_sibling_not_held_when_the_failure_sorts_last():
+    """The same branching shape, renamed so nothing holds at all.
+
+    Real-Pebble probe #9 (WORKLOAD-MOCK-DESIGN.md §34.4): identical declared
+    edges to test_service_requires_branch_sibling_held_through_the_shared_lane
+    -- one lane again -- but with the failure last in the realized order, so
+    every other member runs to completion before it errors, the direct
+    dependent brqmreq included. Being in the failure's lane is not on its own
+    enough to hold a service; being in it *after* the failure is. Without
+    this half of the pair, the other half could equally be read as "anything
+    sharing a lane with a failure holds".
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _branch_requires_layer_tiebreak_reversed()},
+        service_behaviours={ServiceBehaviour('brqzfail', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('brqhead')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "brqhead"',
+            'Start service "brqmreq"',
+            'Start service "brqnfree"',
+            'Start service "brqzfail"',
+        ]
+        assert [t.status for t in change.tasks] == ['Done', 'Done', 'Done', 'Error']
+        assert workload.get_service('brqhead').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('brqmreq').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('brqnfree').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('brqzfail').current == 'backoff'
+
+
 def _requires_cycle_layer() -> ops.pebble.Layer:
     """A `requires` cycle: loop_a requires loop_b requires loop_a.
 

@@ -31,7 +31,8 @@ on:
           - pytest
           - traceback-only
           - infra-only
-        default: pytest
+          - import-error
+        default: import-error
 
 permissions: {}
 
@@ -45,7 +46,13 @@ jobs:
           # `inputs.shape` is empty on a push, so default it here: an
           # unmatched `case` emits nothing at all, and an empty log is not
           # a signature worth testing against.
-          SHAPE: ${{ inputs.shape || 'pytest' }}
+          #
+          # The default is whichever shape nothing in the fork's issues
+          # already matches. A shape this repo has seen before makes the
+          # enricher comment on the old issue, which never exercises the
+          # create path -- so change this when the current default has an
+          # issue of its own.
+          SHAPE: ${{ inputs.shape || 'import-error' }}
         run: |
           case "$SHAPE" in
             pytest)
@@ -92,6 +99,14 @@ jobs:
               cat <<'OUT'
           Error: The operation was canceled.
           The runner has received a shutdown signal.
+          OUT
+              ;;
+            import-error)
+              cat <<'OUT'
+          ImportError while loading conftest '/home/runner/work/operator/operator/testing/conftest.py'.
+          testing/conftest.py:22: in <module>
+              from ops.testing import ActionFailed
+          E   ImportError: cannot import name 'ActionFailed' from 'ops.testing'
           OUT
               ;;
           esac

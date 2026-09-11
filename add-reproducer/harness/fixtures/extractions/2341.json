@@ -1,0 +1,21 @@
+{
+  "in_scope": true,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": "none",
+    "other": {},
+    "ci_run_url": null,
+    "symbol_anchor": null
+  },
+  "commands": [
+    "uv venv",
+    "uv pip install ops",
+    "cat > repro_test.py << 'EOF'\nimport ops\nfrom ops import testing\n\nclass DummyCharm(ops.CharmBase):\n    pass\n\nMETA = {\n    \"name\": \"dummy\",\n    \"requires\": {\"rel\": {\"interface\": \"intr\"}},\n}\n\nBAD_SECRET_DATA = {\"token\": \"s3cret\"}\n\ndef test_remote_unit_zero_explicit():\n    ctx = testing.Context(DummyCharm, meta=META)\n    secret = testing.Secret(tracked_content=BAD_SECRET_DATA)\n    rel = testing.Relation(\n        \"rel\", \"intr\",\n        remote_app_data={\"secret-uri\": f'\"secret://{secret.id}\"'},\n        remote_units_data={0: {}},\n    )\n    state_in = testing.State(relations={rel}, secrets={secret})\n    state_out = ctx.run(ctx.on.relation_changed(relation=rel, remote_unit=0), state_in)\nEOF",
+    "uv run pytest repro_test.py -v"
+  ],
+  "expected": "No consistency warning; remote_unit=0 is a legal explicit unit number in Juju and should not be treated as the implicit default.",
+  "observed": "Scenario's consistency checker emits: \"'rel_relation_changed' is implicitly using 0 as the remote unit. Consider passing `remote_unit` explicitly.\" even though remote_unit=0 was passed explicitly.",
+  "confidence": "high"
+}

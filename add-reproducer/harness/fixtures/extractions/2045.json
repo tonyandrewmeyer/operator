@@ -1,0 +1,26 @@
+{
+  "in_scope": true,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": "none",
+    "other": {},
+    "ci_run_url": null,
+    "symbol_anchor": "ops.testing._runtime"
+  },
+  "commands": [
+    "uv init /tmp/repro-2045-cwd",
+    "cd /tmp/repro-2045-cwd && uv add 'ops[testing]'",
+    "# write test_cwd.py: minimal Scenario test that captures os.getcwd() and self.charm_dir inside a hook, asserts they match",
+    "cd /tmp/repro-2045-cwd && uv run pytest test_cwd.py -v"
+  ],
+  "expected": "Inside a Scenario Context.run() hook dispatch, os.getcwd() returns the charm root (self.charm_dir) -- matching real-juju behaviour where cwd is the charm root at the start of a hook.",
+  "observed": "Under Scenario, os.getcwd() is NOT the charm root; it stays at wherever pytest was launched (repo root / /tmp/repro-...). Charm code that reads files with relative paths (e.g., paas_charm reading config.yaml from cwd) cannot find them.",
+  "confidence": "medium",
+  "_review": {
+    "in_scope_correct": true,
+    "commands_runnable": false,
+    "notes": "Real spike-step-5/2045 extraction (2026-07-24), copied verbatim from spike-step-5/2045/extraction.json for harness fixture use. commands_runnable=false despite commands[] being non-empty: the third entry is a *comment* ('# write test_cwd.py: ...'), not a heredoc that actually creates the file the fourth command's pytest invocation references -- surface_inference.needs_test_file() detects this specific shape (pytest references a .py file, but nothing in commands[] materialises it), not just an empty commands[]."
+  }
+}

@@ -47,3 +47,6 @@ juju-crashdump*.tar.xz
 /pkgs
 /reports
 .statefile.yaml
+
+# add-reproducer scratch runs
+/add-reproducer/harness/out/

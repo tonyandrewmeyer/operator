@@ -1,0 +1,43 @@
+{
+  "_synthetic_note": "SYNTHETIC CAPTURED OUTPUT -- no real lxd/juju/concierge run has ever happened for this branch (see harness/README.md and PLAN.md's dated entry for the lxd-scratch branch). The extraction this is paired with (fixtures/extractions/2107.json) is real -- a real live OpenRouter call against the real canonical/operator#2107 -- and the traceback text in the 'juju debug-log' command below is copied verbatim from that real issue's real body. What is fabricated is the claim that running these commands against a deployed scratch charm produced this exact output; that command sequence has never actually been executed. Do not treat this file as evidence the lxd-scratch branch works end-to-end -- it only pins how runner_stage/classifier consume a RunResult on this branch, with output realistic enough to be a meaningful test, not asserted to be accurate.",
+  "hypothesis_number": 2107,
+  "branch": "lxd-scratch",
+  "commands": [
+    {
+      "command": "sudo concierge prepare -p lxd",
+      "exit_code": 0,
+      "stdout": "concierge: lxd substrate ready, controller concierge-lxd-7",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "charmcraft pack -p charm-2107",
+      "exit_code": 0,
+      "stdout": "Packed repro-i2107-machine-id_amd64.charm",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "juju deploy charm-2107/*.charm repro",
+      "exit_code": 0,
+      "stdout": "Deployed \"repro\" from local charm \"repro-i2107-machine-id\"",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "juju status repro/0",
+      "exit_code": 0,
+      "stdout": "Unit      Workload  Agent  Address      Ports  Message\nrepro/0*  error     idle   10.246.71.2         hook failed: \"install\"\n",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "juju debug-log --include repro/0 --replay",
+      "exit_code": 0,
+      "stdout": "unit-repro-0: 16:10:03 ERROR unit.repro/0.juju-log Uncaught exception while in charm code:\nTraceback (most recent call last):\n  File \"/var/lib/juju/agents/unit-repro-0/charm/venv/ops/jujucontext.py\", line 256, in _from_dict\n    machine_id=int(env['JUJU_MACHINE_ID']) if env.get('JUJU_MACHINE_ID') else None,\nValueError: invalid literal for int() with base 10: '0/lxd/4'\n",
+      "stderr": "",
+      "log_records": []
+    }
+  ],
+  "control": null
+}

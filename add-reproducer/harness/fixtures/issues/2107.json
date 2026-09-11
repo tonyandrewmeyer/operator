@@ -1,0 +1,22 @@
+{
+  "number": 2107,
+  "title": "JujuContext creation fails when loading JUJU_MACHINE_ID",
+  "body": "From [Matrix](https://matrix.to/#/!xdClnUGkurzjxqiQcN:ubuntu.com/$Bss03fOsKh7m42_eJZWvaGL5SWK3h2Kve02BGQdg3Zw?via=ubuntu.com&via=matrix.org&via=sft.lol):\n\nI have an issue with one charm that I've already written, avaialble here https://github.com/dell-esg/powermax-cinder-charm\nWhen deploying it, the following error shows up in the logs\n\n```\n'unit-cinder-powermax1646-2: 16:10:03 WARNING unit.cinder-powermax1646/2.install   File \"/var/lib/juju/agents/unit-cinder-powermax1646-2/charm/venv/ops/jujucontext.py\", line 256, in _from_dict\nunit-cinder-powermax1646-2: 16:10:03 WARNING unit.cinder-powermax1646/2.install     machine_id=int(env['JUJU_MACHINE_ID']) if env.get('JUJU_MACHINE_ID') else None,\nunit-cinder-powermax1646-2: 16:10:03 WARNING unit.cinder-powermax1646/2.install ValueError: invalid literal for int() with base 10: '0/lxd/4'\n```",
+  "labels": [],
+  "createdAt": "2025-10-15T21:03:07Z",
+  "state": "CLOSED",
+  "author": "tonyandrewmeyer",
+  "repo": "canonical/operator",
+  "comments": [
+    {
+      "author": {"login": "tonyandrewmeyer"},
+      "body": "We added exposure of the machine ID in the recent JujuContext changes in #1996.",
+      "createdAt": "2025-10-15T21:03:38Z"
+    },
+    {
+      "author": {"login": "tonyandrewmeyer"},
+      "body": "Locally, my environment looks like:\n\n```\nJUJU_MACHINE_ID=90\n```\n\nHowever, [it does seem like it's a string in Juju](https://github.com/juju/names/blob/b50ca77a4137d8a23ec895d76d051d88248ecdee/machine.go#L31), so it must vary depending on the kind of machine.",
+      "createdAt": "2025-10-15T21:12:54Z"
+    }
+  ]
+}

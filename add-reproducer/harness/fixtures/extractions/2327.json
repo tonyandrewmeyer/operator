@@ -1,0 +1,21 @@
+{
+  "in_scope": true,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": "none",
+    "other": {},
+    "ci_run_url": null,
+    "symbol_anchor": "ops.model.RelationMapping._get_unique"
+  },
+  "commands": [
+    "uv venv",
+    "uv pip install ops",
+    "cat > repro_test.py << 'EOF'\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    pass\n\nMETA = {\n    \"name\": \"my-charm\",\n    \"requires\": {\n        \"db\": {\"interface\": \"pgsql\"},\n        \"not-integrated\": {\"interface\": \"whatever\"},\n    },\n}\n\ndef test_get_relation_wrong_name_same_id():\n    ctx = testing.Context(MyCharm, meta=META)\n    rel = testing.Relation(\"db\", id=1)\n    state_in = testing.State(relations={rel}, leader=True)\n    with ctx(ctx.on.update_status(), state_in) as manager:\n        charm = manager.charm\n        relation = charm.model.get_relation(\"not-integrated\", 1)\n        print(relation.data[charm.app])\nEOF",
+    "uv run pytest repro_test.py -v"
+  ],
+  "expected": "get_relation('not-integrated', 1) should raise an error, since relation id 1 belongs to the 'db' endpoint, not 'not-integrated' (which has no active relations).",
+  "observed": "Per the reporter: relation object creation is not blocked, and accessing relation.data[app] silently returns the databag belonging to relation id 1 (i.e. the 'db' relation's data), instead of raising.",
+  "confidence": "medium"
+}

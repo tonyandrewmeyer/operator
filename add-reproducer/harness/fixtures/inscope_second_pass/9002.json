@@ -1,0 +1,18 @@
+{
+  "concrete_defect": true,
+  "reason": "[SYNTHETIC] Current-behaviour text names a mechanism (notice emitted -> observer fires) that silently does not happen for a non-default user. That is a concrete defect independent of the should-phrased expected text and the needs design/roadmap labels.",
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": "k8s",
+    "other": {}
+  },
+  "commands": [
+    "uv init --bare .",
+    "uv add 'ops[testing]'"
+  ],
+  "expected": "Charms react to a custom notice regardless of which user emitted it.",
+  "observed": "The notice observer never fires when the notice is emitted by a non-default user.",
+  "confidence": "medium"
+}

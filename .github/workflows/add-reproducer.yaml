@@ -1,0 +1,151 @@
+# Tries to reproduce a newly-opened bug report, and comments with the
+# reproducer when it succeeds.
+#
+# The pipeline lives in `add-reproducer/`; `add-reproducer/README.md`
+# describes it. In outline: a deterministic filter drops issues that are not
+# bug-shaped or already carry a reproducer, a model extracts a hypothesis
+# (versions, substrate, commands) from the issue body and its comments and
+# is asked separately whether the issue is in scope at all, a scratch charm
+# is rendered and deployed on a concierge-provisioned substrate, the
+# captured output is classified against what the reporter said they saw, and
+# only some of those outcomes compose a comment. Most issues stop well
+# before the runner, and staying silent is the designed-for result.
+#
+# Substrate is `sudo concierge prepare`, the same shape `integration.yaml`
+# uses. There is deliberately no `prepare` step here: the harness runs it
+# itself, because the juju channel it prepares depends on the version the
+# issue pins. Unpinned issues -- the common case -- get `4.0/stable`, and
+# the juju the verdict was actually produced on is named in the comment, so
+# a reproduction on a version the reporter did not mention is disclosed
+# rather than hidden. A channel matrix is deliberately not built here.
+#
+# SAFE BY DEFAULT. `POST_COMMENTS` below is `false`, so an `issues.opened`
+# run does everything except deliver the comment: the composed text goes to
+# the job summary and the run artifact instead. Set it to `true` to let the
+# agent comment for real. `workflow_dispatch` takes the same switch as an
+# input, so a single issue can be tried by hand either way before the
+# automatic trigger is trusted with it.
+#
+# WHAT THIS JOB EXECUTES. The runner shells out to commands derived from the
+# issue body, on a throwaway `ubuntu-latest` runner, which is what makes the
+# reproduction real. A runnability gate rejects anything that does not parse
+# as shell or whose first token is not a tool the runner provides, but that
+# gate is about usefulness, not containment. The job therefore takes no
+# write access beyond `issues: write`, and the only secret it can see is the
+# OpenRouter key in the `llm` environment.
+#
+# **Known limitation — CI-run-only bug reports produce no comment.**
+#
+# An issue that links a GitHub Actions run and gives no local reproduction
+# steps (no commands, no self-contained snippet) is routed to the
+# `k8s-clone` runner branch, and is then dropped, silently and by design,
+# with `commands[] is empty`. Nothing in this pipeline builds a
+# reproduction from a CI run URL alone: it does not fetch CI logs, does not
+# infer a test invocation from a failing job, and does not clone a
+# repository other than the one the issue was filed in (a linked run often
+# belongs to a different repo).
+#
+# This is a deliberate limitation, not an oversight. Building a
+# reproduction from a CI run would mean re-reading CI output the reporter
+# has already seen — a triage summariser rather than a reproducer — and the
+# alternative, guessing the failing invocation and handing it to a shell,
+# is the shape this pipeline's runnability gate exists to stop.
+#
+# The practical effect: **a bug report whose only evidence is "this CI run
+# failed" gets silence.** If you want a reproducer comment on such an
+# issue, add local reproduction steps to the issue body. On record
+# (2026-09-10) this shape has never occurred on production traffic —
+# 0 of 77 open issues across two production-configuration runs — and has
+# only ever been produced by two issues in this project's corpora,
+# `canonical/operator#1329` and `#2484`.
+name: add-reproducer
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to try to reproduce.
+        required: true
+        type: string
+      repository:
+        description: The owner/name the issue lives in.
+        required: true
+        default: canonical/operator
+        type: string
+      post_comment:
+        description: Post the comment for real, instead of only logging it.
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+env:
+  # Whether an `issues.opened` run posts what it composes. Start at `false`:
+  # every automatic run then goes all the way through the pipeline and
+  # reports what it would have said, without saying it to anyone. Flip to
+  # `true` to let the agent comment on new issues.
+  POST_COMMENTS: 'false'
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    # Holds OPENROUTER_API_KEY.
+    environment: llm
+    permissions:
+      contents: read
+      issues: write
+    # Eight measured runs of the substrate half on GitHub's own hardware
+    # (cold `concierge prepare`, `charmcraft pack`, deploy, stimulus, and a
+    # control case) took 5m07s to 12m28s end to end, the maximum being a
+    # slow `snap install`. Extraction and composition add a handful of
+    # OpenRouter calls on top. 30 minutes is therefore a backstop against a
+    # juju command that has hung, not a second and tighter budget.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - run: sudo snap install --classic concierge
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+
+      # No `concierge prepare` step: the harness runs it, with the juju
+      # channel the issue's own version pin selects.
+      - name: Try to reproduce the issue
+        working-directory: add-reproducer/harness
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ISSUE: ${{ github.event_name == 'workflow_dispatch' && inputs.issue || github.event.issue.number }}
+          REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.repository || github.repository }}
+          POST: ${{ (github.event_name == 'workflow_dispatch' && inputs.post_comment) || (github.event_name == 'issues' && env.POST_COMMENTS == 'true') }}
+        run: |
+          set -ueo pipefail
+          post=()
+          if [ "$POST" = "true" ]; then
+            post=(--post)
+          fi
+          # An absolute --out-dir: the charm directory built underneath it is
+          # embedded verbatim in `juju deploy`, and juju 4 rejects a relative
+          # local-charm path that is not `./`-prefixed.
+          uv run python ../run.py \
+            --repo "$REPO" \
+            --issue "$ISSUE" \
+            --out-dir "$PWD/out" \
+            "${post[@]}"
+
+      # The run record (every command, exit code, stdout and stderr) and the
+      # composed comment, but not the scratch directory underneath them --
+      # that holds a packed charm.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        if: always()
+        with:
+          name: add-reproducer-run
+          if-no-files-found: ignore
+          path: |
+            add-reproducer/harness/out/*.json
+            add-reproducer/harness/out/*.md

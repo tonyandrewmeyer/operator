@@ -1,0 +1,22 @@
+{
+  "in_scope": true,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": "lxd",
+    "other": {},
+    "ci_run_url": null,
+    "symbol_anchor": null
+  },
+  "commands": [
+    "uv init --bare .",
+    "uv add 'ops[testing]'",
+    "cat > test_jujucontext.py << 'PYEOF'\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    pass\n\ndef test_machine_id_parsing():\n    env = {'JUJU_MACHINE_ID': '0/lxd/4'}\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    with ctx(ctx.on.update_status(), testing.State(env=env)) as mgr:\n        with pytest.raises(ValueError):\n            mgr.charm.model._get_machine_id()\nPYEOF",
+    "uv run pytest test_jujucontext.py -v"
+  ],
+  "expected": "Should raise ValueError when parsing '0/lxd/4' as an integer",
+  "observed": "Traceback shows ValueError when parsing '0/lxd/4' as an integer",
+  "confidence": "high",
+  "_provenance": "Real live OpenRouter extraction (deepseek/deepseek-chat) of the real canonical/operator#2107, verbatim from spike-step-5/corpus-v2/out-inscope-v2-confirm/2107.json's `live_extraction` field. This is the worked example the task that added the lxd-scratch branch pointed at: it is the only substrate:lxd extraction in the whole project's corpus. Note the mismatch left as-is, not fixed here: `commands[]` never actually touches juju/lxd (uv init/uv add/pytest against ops.testing), which is arguably a `substrate: none` shape the live model mislabelled as lxd -- see harness/README.md's fixture-corpus note and PLAN.md's dated entry for this branch."
+}

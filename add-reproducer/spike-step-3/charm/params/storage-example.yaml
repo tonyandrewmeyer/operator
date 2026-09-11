@@ -1,0 +1,19 @@
+# Speculative example -- NOT corpus-evidenced. Zero of the 18 step-2
+# KEEPs (in-scope or not) mention storage in any form. Included because
+# spike-step-3's task brief lists storage as one of the four moving_parts
+# axes to support, and to prove render.py's storage stanza actually
+# renders valid-looking YAML -- not because a real hypothesis needed it.
+# See FINDINGS.md "left out" list.
+
+charm_name: repro-storage-example
+source_issue: null
+
+relation: {}
+
+storage:
+  name: scratch
+  type: filesystem
+  location: /srv/data
+
+pebble_service: {}
+ops_api_surface: config-changed

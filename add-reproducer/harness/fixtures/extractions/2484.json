@@ -1,0 +1,20 @@
+{
+  "in_scope": true,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": "k8s",
+    "other": {},
+    "ci_run_url": "https://github.com/canonical/operator/actions/runs/26018272398",
+    "symbol_anchor": null
+  },
+  "commands": [
+    "git clone https://github.com/canonical/operator",
+    "cd operator && sudo concierge prepare -p k8s",
+    "uv run tox -e integration -- -k test_deployment"
+  ],
+  "expected": "The tracing integration test (test_deployment) passes: the charm under test integrates with Tempo and the tracing checks run.",
+  "observed": "Test fails before reaching the tracing assertions, while integrating with Tempo; Juju log suggests minio or k8s isn't correctly configured. Reporter also flags that test_tracing runs (incorrectly, they believe) under the secrets test group.",
+  "confidence": "low"
+}

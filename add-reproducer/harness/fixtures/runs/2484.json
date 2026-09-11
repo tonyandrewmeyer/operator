@@ -1,0 +1,28 @@
+{
+  "hypothesis_number": 2484,
+  "branch": "k8s-clone",
+  "commands": [
+    {
+      "command": "git clone https://github.com/canonical/operator",
+      "exit_code": 0,
+      "stdout": "Cloning into 'operator'...",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "git checkout 54d5c1f0",
+      "exit_code": 0,
+      "stdout": "HEAD is now at 54d5c1f0",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "uv run tox -e integration -- -k test_deployment",
+      "exit_code": 2,
+      "stdout": "!!!!!!!!!!!!!!!!!!! Interrupted: 15 errors during collection !!!!!!!!!!!!!!!!!!!\n=========== no tests collected (2482 deselected), 15 errors in 8.79s ===========\nintegration: exit 2 (10.44 seconds)",
+      "stderr": "",
+      "log_records": []
+    }
+  ],
+  "control": null
+}

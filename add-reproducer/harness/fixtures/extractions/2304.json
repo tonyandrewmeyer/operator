@@ -1,0 +1,16 @@
+{
+  "in_scope": false,
+  "moving_parts": {
+    "repo_version": null,
+    "juju_version": null,
+    "base": null,
+    "substrate": null,
+    "other": {},
+    "ci_run_url": null,
+    "symbol_anchor": null
+  },
+  "commands": [],
+  "expected": "N/A - not a bug report",
+  "observed": "Reporter notes check_cloudspec_consistency flags kubernetes cloud-spec type as inconsistent, but this is now valid; proposes removing the check.",
+  "confidence": "low"
+}

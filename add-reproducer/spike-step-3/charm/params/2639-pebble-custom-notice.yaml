@@ -1,0 +1,27 @@
+# Corpus-driven example. Derived from operator#2639's moving_parts
+# (spike-step-2/extractions/2639.json) -- the one real KEEP that actually
+# needs a deployed, packable charm rather than a self-contained ops.testing
+# script. See spike-step-3/mapped-hypotheses.md for the full walk-through.
+#
+# operator#2639: Pebble custom notices recorded by a non-root user
+# (_daemon_) never surface a pebble-custom-notice event to the charm,
+# because Juju only relays notices recorded by root. The issue names no
+# concrete charm/rock -- the extractor invented a placeholder
+# (<k8s-charm-with-workload-running-as-_daemon_>). This params file is
+# what a real target-identification step would need to produce instead.
+
+charm_name: repro-i2639-pebble-notice
+source_issue: 2639
+
+relation: {}
+storage: {}
+
+pebble_service:
+  container: workload
+  service: notice-source
+  command: null   # not wired into charm.py by this generator -- see FINDINGS.md
+  user: _daemon_  # informs mapped-hypotheses.md's gap note; render.py doesn't
+                  # currently do anything with this value (see FINDINGS.md
+                  # "left out" list)
+
+ops_api_surface: pebble-custom-notice

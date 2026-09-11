@@ -1,0 +1,48 @@
+{
+  "hypothesis_number": 2639,
+  "branch": "k8s-scratch",
+  "commands": [
+    {
+      "command": "sudo concierge prepare -p k8s",
+      "exit_code": 0,
+      "stdout": "concierge: k8s substrate ready, controller concierge-k8s-4",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "charmcraft pack",
+      "exit_code": 0,
+      "stdout": "Packed repro-i2639-pebble-notice_amd64.charm",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "juju deploy ./repro-i2639-pebble-notice_amd64.charm repro",
+      "exit_code": 0,
+      "stdout": "Deployed \"repro\" from local charm \"repro-i2639-pebble-notice\"",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "as-user _daemon_ in container workload: pebble notify canonical.com/repro/notice-1 key=value",
+      "exit_code": 0,
+      "stdout": "Recorded notice 1",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "juju status repro/0",
+      "exit_code": 0,
+      "stdout": "Unit  Workload  Agent  Address  Ports  Message\nrepro/0*  unknown  idle  10.1.2.3         \n",
+      "stderr": "",
+      "log_records": []
+    }
+  ],
+  "control": {
+    "command": "as-user root in container workload: pebble notify canonical.com/repro/notice-root key=value; juju status repro/0",
+    "exit_code": 0,
+    "stdout": "Recorded notice 2\nUnit  Workload  Agent  Address  Ports  Message\nrepro/0*  active  idle  10.1.2.3         observed notice: canonical.com/repro/notice-root in workload\n",
+    "stderr": "",
+    "log_records": []
+  }
+}

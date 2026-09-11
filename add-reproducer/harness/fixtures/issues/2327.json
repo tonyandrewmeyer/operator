@@ -1,0 +1,12 @@
+{
+  "number": 2327,
+  "title": "ops returns databag for non-existing relation",
+  "body": "It is possible to create a relation Object for a relation that does not exist, as long as the relation ID exists,\nGiven a charm with a relation integrated, with id 1, I can run this:\n\n```python\nrelation = self.model.get_relation(\"not-integrated\", 1)\nrelation.data[self.app]\n```\n\nInterestingly:\n * The relation object creation is not blocked\n * accessing the relation databag returns the databag of the relation with id 1.\n\nThe reason for the first part is [here](https://github.com/canonical/operator/blob/deba324055802b34d4b320655ac00a4ffd85fc66/ops/model.py#L970)\nWe provide both the relation name and the relation id. We fall in the else case [here](https://github.com/canonical/operator/blob/deba324055802b34d4b320655ac00a4ffd85fc66/ops/model.py#L980) and return a relation object.\nThe thing is: we're not providing the information for a dead relation, AND we do have a relation existing with that id to a different relation name.\nI think this case should raise an error. It's not that the relation is dead but we refuse to forget it.\nMaybe the loop a few lines above should also check if there isn't a relation that has this relation ID.\nThis would work as relation ids are unique throughout a model lifetime.\n\nThe reason for the second part is [this line](https://github.com/canonical/operator/blob/deba324055802b34d4b320655ac00a4ffd85fc66/ops/model.py#L1998): while the relation object is created with a relation name and a relation id, loading the databag is ultimately done using only the relation id.\n\nThe reason: we pass a relation with an invalid name BUT a valid relation id. And when building the `RelationDataContent` object it uses only the relation ID. And that relation id is valid and does exist and hence we're accessing its databag.\n\nThe easy way to go would be to craft a valid identifier when running the `relation-get` hook command: it accepts `relation-get -r <relation_id>` but also `relation-get -r <relation_name>:<relation_id>`.\nThis would ensure that we're accessing exactly what is needed instead of returning data for a non existing relation.\n\n",
+  "labels": [
+    "rainy day"
+  ],
+  "createdAt": "2026-02-13T08:56:23Z",
+  "state": "CLOSED",
+  "author": "Gu1nness",
+  "repo": "canonical/operator"
+}

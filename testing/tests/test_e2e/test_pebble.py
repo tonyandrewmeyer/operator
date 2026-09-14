@@ -2544,6 +2544,295 @@ def test_service_requires_stop_cycle_terminates_instead_of_hanging():
         assert workload.get_service('loop_b').current == ops.pebble.ServiceStatus.INACTIVE
 
 
+def _two_lanes_interleaved_layer() -> ops.pebble.Layer:
+    """Two `requires` lanes whose members interleave in the alphabetical order.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.6;
+    probe12-layers/009-stop-two-lanes-interleaved.yaml). slcthree requires
+    slaone and sldfour requires slbtwo, so the lanes are
+    {slaone, slcthree} and {slbtwo, sldfour} while the realized order is
+    slaone, slbtwo, slcthree, sldfour. No `after` edges anywhere, so the
+    realized order is pure tie-break and lane grouping is the only thing
+    that can move a task.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'slaone': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'slbtwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'slcthree': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slaone'],
+            },
+            'sldfour': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slbtwo'],
+            },
+        }
+    })
+
+
+def test_service_requires_stop_emits_tasks_grouped_by_lane():
+    """A stop change's tasks come out lane by lane, not in the realized order.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.6/§36.9): stopping
+    all four gave slaone, slcthree, slbtwo, sldfour, where the flat realized
+    order is slaone, slbtwo, slcthree, sldfour. `StopOrder` lanes its own
+    output with the same `createLanes` `StartOrder` uses, and
+    `servstate/request.go`'s `Stop` builds the task list lane by lane. The
+    mock emitted the flat order until now; every shape measured before this
+    probe was single-lane, all-singleton, or contiguous by accident, so the
+    two coincided.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _two_lanes_interleaved_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['slaone', 'slbtwo', 'slcthree', 'sldfour'])
+        change_id = workload.pebble.stop_services(['slaone', 'slbtwo', 'slcthree', 'sldfour'])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks] == [
+            'Stop service "slaone"',
+            'Stop service "slcthree"',
+            'Stop service "slbtwo"',
+            'Stop service "sldfour"',
+        ]
+        assert change.summary == 'Stop service "slaone" and 3 more'
+        for name in ('slaone', 'slbtwo', 'slcthree', 'sldfour'):
+            assert workload.get_service(name).current == ops.pebble.ServiceStatus.INACTIVE
+
+
+def _two_lanes_pairing_swapped_layer() -> ops.pebble.Layer:
+    """The same four alphabetical positions as _two_lanes_interleaved_layer,
+    with the `requires` edges pairing first-with-last and second-with-third
+    instead (Real-Pebble probe #10, WORKLOAD-MOCK-DESIGN.md §36.6;
+    probe12-layers/010-stop-two-lanes-pairing-swapped.yaml).
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'slqaone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'slqbtwo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'slqcthree': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slqbtwo'],
+            },
+            'slqdfour': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slqaone'],
+            },
+        }
+    })
+
+
+def test_service_requires_stop_lane_grouping_follows_the_edges_not_the_names():
+    """The pairing twin: same names, different edges, different task order.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.6): slqaone,
+    slqdfour, slqbtwo, slqcthree, against slaone, slcthree, slbtwo,
+    sldfour for the layer above under an identical alphabetical order. One
+    layer alone could be read as a naming artefact; the pair cannot, and a
+    rule that ignored lanes would give a, b, c, d for both.
+    """
+    container = Container(
+        'foo', can_connect=True, layers={'base': _two_lanes_pairing_swapped_layer()}
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['slqaone', 'slqbtwo', 'slqcthree', 'slqdfour'])
+        change_id = workload.pebble.stop_services([
+            'slqaone',
+            'slqbtwo',
+            'slqcthree',
+            'slqdfour',
+        ])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks] == [
+            'Stop service "slqaone"',
+            'Stop service "slqdfour"',
+            'Stop service "slqbtwo"',
+            'Stop service "slqcthree"',
+        ]
+
+
+def test_service_requires_stop_reverse_expanded_members_are_lane_grouped_too():
+    """Members pulled in by stop's reverse expansion are laned like the rest.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.6): `pebble stop
+    slaone slbtwo` pulls in slcthree and sldfour (§28.2's reverse
+    expansion) and still emits slaone, slcthree, slbtwo, sldfour. The
+    laning happens after membership is settled, so it does not matter
+    whether a member was requested or pulled in.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _two_lanes_interleaved_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['slaone', 'slbtwo', 'slcthree', 'sldfour'])
+        change_id = workload.pebble.stop_services(['slaone', 'slbtwo'])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks] == [
+            'Stop service "slaone"',
+            'Stop service "slcthree"',
+            'Stop service "slbtwo"',
+            'Stop service "sldfour"',
+        ]
+        assert change.summary == 'Stop service "slaone" and 3 more'
+
+
+def _two_lanes_with_after_layer() -> ops.pebble.Layer:
+    """_two_lanes_interleaved_layer with an `after` edge inside each lane, so
+    stop's `before`/`after` swap has something to act on (Real-Pebble probe
+    #10, WORKLOAD-MOCK-DESIGN.md §36.7;
+    probe12-layers/011-stop-two-lanes-with-after.yaml).
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'slraone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'slrbtwo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'slrcthree': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slraone'],
+                'after': ['slraone'],
+            },
+            'slrdfour': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slrbtwo'],
+                'after': ['slrbtwo'],
+            },
+        }
+    })
+
+
+def test_service_requires_stop_lanes_are_computed_on_stops_own_realized_order():
+    """The lanes come out in stop order, with each lane's contents reversed.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.7): slrcthree,
+    slraone, slrdfour, slrbtwo. The lanes are the same two as the start
+    pass's and come in the same order, but each lane's contents are
+    reversed -- so `StopOrder` lanes the result of its own
+    `order(..., stop=true)` rather than reusing a partition computed on the
+    start order. This shape's task list happens to be lane-grouped already,
+    which is why it agreed with the mock before the fix and why the
+    interleaving pair above was needed to find the bug.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _two_lanes_with_after_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['slraone', 'slrbtwo', 'slrcthree', 'slrdfour'])
+        change_id = workload.pebble.stop_services([
+            'slraone',
+            'slrbtwo',
+            'slrcthree',
+            'slrdfour',
+        ])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks] == [
+            'Stop service "slrcthree"',
+            'Stop service "slraone"',
+            'Stop service "slrdfour"',
+            'Stop service "slrbtwo"',
+        ]
+
+
+def _two_lanes_one_failing_layer() -> ops.pebble.Layer:
+    """Two lanes, one of which contains a failing service (Real-Pebble probe
+    #10, WORKLOAD-MOCK-DESIGN.md §36.8/§36.9;
+    probe12-layers/012-stop-two-lanes-one-failing.yaml). slfcdep requires
+    slfafail, slfdok requires slfbok; no `after` edges.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'slfafail': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'slfbok': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'slfcdep': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slfafail'],
+            },
+            'slfdok': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['slfbok'],
+            },
+        }
+    })
+
+
+def test_service_requires_start_emits_tasks_grouped_by_lane_with_one_lane_failing():
+    """A start change's tasks are lane-grouped too, and a clean lane is untouched.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.8/§36.9): starting
+    all four gave slfafail (Error), slfcdep (Hold), slfbok (Done), slfdok
+    (Done) -- lane-grouped, where the flat realized order is slfafail,
+    slfbok, slfcdep, slfdok. This is also the first measurement of §34/§35's
+    lane hold rule on a genuinely multi-lane graph: every shape in §34 was
+    one lane, so "held because of a lane-mate" and "held because of anything
+    earlier in the change" could not be separated there. Lane B is untouched
+    by lane A's failure.
+    """
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _two_lanes_one_failing_layer()},
+        service_behaviours={ServiceBehaviour('slfafail', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            workload.start('slfafail', 'slfbok', 'slfcdep', 'slfdok')
+        change = exc_info.value.change
+        assert [t.summary for t in change.tasks] == [
+            'Start service "slfafail"',
+            'Start service "slfcdep"',
+            'Start service "slfbok"',
+            'Start service "slfdok"',
+        ]
+        assert [t.status for t in change.tasks] == ['Error', 'Hold', 'Done', 'Done']
+        assert change.summary == 'Start service "slfafail" and 3 more'
+        assert workload.get_service('slfafail').current == 'backoff'
+        assert workload.get_service('slfcdep').current == ops.pebble.ServiceStatus.INACTIVE
+        assert workload.get_service('slfbok').current == ops.pebble.ServiceStatus.ACTIVE
+        assert workload.get_service('slfdok').current == ops.pebble.ServiceStatus.ACTIVE
+        assert 'slfafail' in str(exc_info.value)
+        assert 'slfcdep' not in str(exc_info.value)
+
+
 def _required_autostart_layer() -> ops.pebble.Layer:
     """rdep requires/after rfail, both startup: enabled (Real-Pebble probe #5,
 

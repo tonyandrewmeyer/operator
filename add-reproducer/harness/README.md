@@ -129,6 +129,19 @@ instead.
 uv run pytest              # the whole suite: no key, no juju, no network
 ```
 
+The repository's own `tox -e unit` collects this suite as well, so it runs in
+`canonical/operator` CI alongside the library's tests. Only the scratch charms
+under `../spike-step-3/charm/examples/` are ignored there, because their three
+`src/charm.py` files share a basename and pytest can import one at a time.
+
+56 of the 434 tests skip in this checkout, and that is the expected result
+rather than a broken setup. They assert against recorded output from the
+spike runs that produced the pipeline (the `in_scope` retunes, the model
+comparison, the four live-LLM calibration runs, the comments A/B), and those
+run directories live in a private staging tree rather than here. Each one
+names the directory it wanted in its skip reason, so no skip is silent. The
+378 that do run cover every stage against the committed `fixtures/` corpus.
+
 Replay mode from the CLI, which uses the same seams as the test suite:
 
 ```shell

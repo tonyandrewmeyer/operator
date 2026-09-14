@@ -1035,6 +1035,13 @@ class _MockPebbleClient(_TestingPebbleClient):
         does not special-case a dependent already in ``Hold`` rather than
         ``Active``, since no probe has measured whether real Pebble treats
         that case differently (§29).
+
+        The resulting tasks are emitted grouped by ``requires`` lane rather
+        than in the flat realized order -- ``stop``'s lane grouping is
+        identical to ``start``'s, measured in Real-Pebble probe #10
+        (WORKLOAD-MOCK-DESIGN.md §36.6), including when the extra members
+        come from the reverse expansion above. See
+        ``_service_lanes_in_realized_order``.
         """
         if isinstance(services, str):
             raise TypeError(f'stop_services should take a list of names, not just "{services}"')
@@ -1053,9 +1060,16 @@ class _MockPebbleClient(_TestingPebbleClient):
         spawn_time = datetime.datetime.now(tz=datetime.timezone.utc)
         ready_time = spawn_time + datetime.timedelta(milliseconds=10)
         tasks: list[pebble.Task] = []
-        for name in ordered:
-            self._service_status[name] = pebble.ServiceStatus.INACTIVE
-            tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
+        # Lane by lane, not `ordered` flat: `StopOrder` lanes its own
+        # realized order the same way `StartOrder` does, and `request.go`'s
+        # `Stop` builds the task list from those lanes (Real-Pebble probe
+        # #10, WORKLOAD-MOCK-DESIGN.md §36.6/§36.9). Measured on a
+        # two-lane graph whose lanes interleave in the realized order, and
+        # on its pairing-swapped twin.
+        for lane in self._service_lanes_in_realized_order(ordered, known_services):
+            for name in lane:
+                self._service_status[name] = pebble.ServiceStatus.INACTIVE
+                tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
 
         # Matches start/restart, not autostart/replan: the summary leads
         # with the caller's first-requested name, not the topologically
@@ -1276,10 +1290,11 @@ class _MockPebbleClient(_TestingPebbleClient):
         Traversal is iterative over a visited set, so a ``requires`` cycle
         terminates here as it does in ``_service_requires_closure``. The
         order of the returned lanes, and of the names within one, carry no
-        meaning: callers order a lane's members by their position in
-        ``_service_dependency_order``'s output, since a lane is a
-        subsequence of the realized order rather than an ordering of its
-        own.
+        meaning -- this is the partition and nothing more.
+        ``_service_lanes_in_realized_order`` puts both orders back, and is
+        what every caller actually uses; it is a separate method because
+        the partition needs the realized order to be ordered at all, and
+        this walk does not take one.
         """
         members = set(names)
         adjacency: dict[str, set[str]] = {name: set() for name in members}
@@ -1303,6 +1318,44 @@ class _MockPebbleClient(_TestingPebbleClient):
                         unassigned.discard(other)
                         frontier.append(other)
             lanes.append(lane)
+        return lanes
+
+    def _service_lanes_in_realized_order(
+        self,
+        ordered: list[str],
+        known_services: dict[str, pebble.Service],
+    ) -> list[list[str]]:
+        """``_service_requires_lanes``' partition of ``ordered``, in Pebble's own order.
+
+        Real Pebble's ``createLanes`` walks the realized order it was handed
+        and assigns each name to a lane as it first meets it, so the lanes
+        come out ordered by their first member's position in that realized
+        order, and each lane's own contents stay in it -- a lane is a
+        subsequence of the realized order, not an ordering of its own.
+
+        This matters because ``internals/overlord/servstate/request.go``'s
+        ``Start`` and ``Stop`` build a change's tasks from the lanes, lane by
+        lane (``for _, services := range lanes { for _, name := range
+        services { ... } }``), so the *task* order is this regrouping and not
+        the flat realized order (Real-Pebble probe #10,
+        WORKLOAD-MOCK-DESIGN.md §36.6/§36.9). The two coincide whenever a
+        change has one lane, or every lane is a singleton, or the realized
+        order happens to visit each lane contiguously -- which is every shape
+        this project measured before probe #10, and why the mock emitted
+        tasks flat until then.
+
+        Note that the first name is the same either way: the first lane is
+        by construction the one containing ``ordered[0]``, and ``ordered[0]``
+        is by construction its earliest member. So a summary that leads with
+        the first task (``autostart``, §24.1) reads the same from either
+        list.
+        """
+        order_index = {name: index for index, name in enumerate(ordered)}
+        lanes = [
+            sorted(lane, key=order_index.__getitem__)
+            for lane in self._service_requires_lanes(ordered, known_services)
+        ]
+        lanes.sort(key=lambda lane: order_index[lane[0]])
         return lanes
 
     def _service_dependency_order(
@@ -1417,6 +1470,11 @@ class _MockPebbleClient(_TestingPebbleClient):
         (§34.3), and a service that declares ``FAILS`` itself holds rather
         than erroring when a lane-mate failed ahead of it (§34.1).
 
+        The start pass's tasks come out grouped by ``requires`` lane, not in
+        the flat realized order (Real-Pebble probe #10,
+        WORKLOAD-MOCK-DESIGN.md §36.9) -- see
+        ``_service_lanes_in_realized_order``.
+
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
         change summary's verb follows it.
@@ -1465,15 +1523,23 @@ class _MockPebbleClient(_TestingPebbleClient):
         # still position in `ordered` -- the realized order already computed
         # above, ties and all -- since a lane is a subsequence of it, not an
         # ordering of its own.
-        order_index = {name: index for index, name in enumerate(ordered)}
+        lanes = self._service_lanes_in_realized_order(ordered, known_services)
         held: set[str] = set()
-        for lane in self._service_requires_lanes(members, known_services):
+        for lane in lanes:
             lane_failed = False
-            for name in sorted(lane, key=order_index.__getitem__):
+            for name in lane:
                 if lane_failed:
                     held.add(name)
                 elif name in failing_by_name:
                     lane_failed = True
+
+        # The change's tasks come out lane by lane, each lane internally in
+        # realized order, rather than following `ordered` flat (Real-Pebble
+        # probe #10, WORKLOAD-MOCK-DESIGN.md §36.9) -- see
+        # `_service_lanes_in_realized_order`. `ordered` is still what decides
+        # membership, statuses and the summary's count; only the task list is
+        # regrouped.
+        emitted = [name for lane in lanes for name in lane]
 
         for name in ordered:
             if name in failing_by_name or name in held:
@@ -1517,7 +1583,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             for name in stop_ordered:
                 tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
 
-        for name in ordered:
+        for name in emitted:
             behaviour = None if name in held else failing_by_name.get(name)
             if behaviour is not None:
                 reason, status, log = self._service_failure_detail(known_services[name], behaviour)

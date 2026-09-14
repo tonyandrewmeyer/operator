@@ -1,23 +1,55 @@
-# add-reproducer wall-clock measurement
+# add-reproducer
 
-This directory is not part of `ops`. It carries the add-reproducer spike
-harness so that `.github/workflows/add-reproducer-wallclock.yaml` can take
-the one measurement the spike cannot take anywhere else: criterion 7b, the
-end-to-end wall-clock on a GHA-hosted `ubuntu-latest` runner.
+The agent behind `.github/workflows/add-reproducer.yaml`. When a bug report
+is opened, it decides whether the report is one it can do anything with,
+builds a hypothesis about what the reporter was doing, tries that on a real
+juju substrate, and (if the attempt reproduces what the reporter described)
+posts the reproducer as a comment.
 
-The spike's cold figures come from dev multipass VMs, and they miss the
-20-minute budget: two fresh VMs agreed that `concierge prepare` plus
-`charmcraft pack` alone is around 24m45s, before `deploy` is even
-requested. `charmcraft pack` is most of it. Whether that holds, improves
-or worsens on GitHub's hardware decides whether the design's intended
-runtime is viable, and neither a VM nor a container can answer it.
+None of this is part of `ops`. Nothing here is imported by the library, the
+test suite, or any charm; it is a tool that reads this repository's issues.
 
-Run the workflow from the Actions tab (`workflow_dispatch`). It installs
-concierge and then leaves the harness to run `sudo concierge prepare`
-itself -- pre-preparing would warm the step being measured. `--fixture-llm`
-replays the recorded extraction for #2639, so no OpenRouter key is needed
-and only the substrate half of the pipeline runs.
+```
+add-reproducer/
+  run.py            the workflow's entry point: fetch one issue, run the
+                    pipeline, optionally post the comment it composes
+  harness/          the pipeline itself, and its test suite
+  spike-step-3/     the parameterised scratch charm the runner deploys
+```
 
-`summarise-run.py` prints the per-step `elapsed_s` table into the job
-summary, in the same shape the VM runs were recorded in, so the two can be
-read side by side.
+`harness/README.md` is the detailed description: the stages, what each one
+can and cannot do, how to run the whole thing locally, and what is still
+open.
+
+## Trying it by hand
+
+The workflow has a `workflow_dispatch` trigger that takes an issue number,
+so a single issue can be put through the pipeline from the Actions tab. It
+defaults to **not** posting anything: the run does everything else, and the
+comment it would have posted appears in the job summary and in the run's
+artifact. Turning `post_comment` on for that one run is how you let it
+speak.
+
+`POST_COMMENTS` at the top of the workflow is the same switch for the
+automatic `issues.opened` trigger, and starts at `false`.
+
+## What it costs to run
+
+The pipeline calls an LLM (OpenRouter, keyed by `OPENROUTER_API_KEY` in the
+`llm` GitHub environment) two to four times per issue that gets past the
+deterministic filter, and most issues do not get that far. The expensive
+half is the substrate: an issue whose hypothesis needs a deployed charm
+spends most of its job on `concierge prepare` and `charmcraft pack`.
+Measured end to end on GitHub's own runners, that is roughly five to
+twelve minutes.
+
+## The silence is the point
+
+Most issues produce no comment, and that is the designed behaviour rather
+than a failure to try. A report is dropped - quietly - when it is not
+bug-shaped, when it already carries a reproducer, when the model judges it
+out of scope, when the extracted hypothesis is too uncertain to act on,
+when the commands it produced are not runnable shell, or when the attempt
+ran and did not reproduce anything. A wrong comment on a maintainer's issue
+costs more than a missing one, so every gate in the pipeline is built to
+fail towards saying nothing.

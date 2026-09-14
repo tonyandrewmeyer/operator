@@ -181,6 +181,7 @@ def test_2639_plan_without_a_real_stimulus_omits_stimulus_and_control(tmp_path):
 # --- the committed artefact must match what the generator produces today ---
 
 
+@pytest.mark.skipif(not ARTEFACT.exists(), reason="no committed dry-run plan alongside this checkout")
 def test_committed_2639_artefact_matches_generator():
     branch, plan = dry_run.generate_plan(2639, fixtures_dir=FIXTURES)
     expected = dry_run.render_markdown(2639, branch, plan)

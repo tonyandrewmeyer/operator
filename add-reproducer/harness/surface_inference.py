@@ -333,6 +333,9 @@ class TestFileSynthesisInvalid(ValueError):
     TODO placeholder. Caught by `TestFileSynthesizer.synthesize()` itself,
     never propagated to a caller."""
 
+    # Not a pytest test class, despite the name. See `models.TestFile`.
+    __test__ = False
+
 
 def _is_raises_call(node: ast.AST) -> bool:
     """True for a `pytest.raises(...)`/`self.assertRaises(...)`-shaped call --
@@ -466,6 +469,9 @@ class TestFileSynthesizer:
     body`) falls back to `_loud_failing_test_file()` rather than raising or
     silently shipping an always-passing stub.
     """
+
+    # Not a pytest test class, despite the name. See `models.TestFile`.
+    __test__ = False
 
     def __init__(self, llm: LLMSeam):
         self.llm = llm

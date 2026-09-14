@@ -17,6 +17,13 @@ import pytest
 _SPIKE_STEP_5 = Path(__file__).parent.parent.parent / "spike-step-5"
 _CORPUS_V2 = _SPIKE_STEP_5 / "corpus-v2"
 _LABELS_PATH = _CORPUS_V2 / "hand-labels.json"
+_ANALYSE_PATH = _CORPUS_V2 / "analyse.py"
+
+if not _ANALYSE_PATH.is_file():  # pragma: no cover - spike output not always present
+    pytest.skip(
+        f"corpus-v2 scoring script not available at {_ANALYSE_PATH}",
+        allow_module_level=True,
+    )
 
 
 def _load_analyse():

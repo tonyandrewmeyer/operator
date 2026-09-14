@@ -21,11 +21,18 @@ found on -- `spike-step-5/corpus-v4/out/twopass-run5/1685.json` and
 import json
 from pathlib import Path
 
+import pytest
 import runnability
 from models import Hypothesis, _join_split_heredocs
 from runner_stage import needs_test_file
 
 CORPUS_V4_OUT = Path(__file__).resolve().parent.parent.parent / "spike-step-5" / "corpus-v4" / "out"
+
+if not CORPUS_V4_OUT.is_dir():  # pragma: no cover - spike output not always present
+    pytest.skip(
+        f"corpus-v4 run output not available at {CORPUS_V4_OUT}",
+        allow_module_level=True,
+    )
 
 
 def _real_commands(run_dir: str, issue_number: int) -> list[str]:

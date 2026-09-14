@@ -1473,7 +1473,9 @@ class _MockPebbleClient(_TestingPebbleClient):
         The start pass's tasks come out grouped by ``requires`` lane, not in
         the flat realized order (Real-Pebble probe #10,
         WORKLOAD-MOCK-DESIGN.md §36.9) -- see
-        ``_service_lanes_in_realized_order``.
+        ``_service_lanes_in_realized_order``. A ``restart``'s stop pass is
+        the one place in this mock where a task list's *membership* differs
+        from the start pass's; the comment on that branch says why.
 
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
@@ -1578,8 +1580,28 @@ class _MockPebbleClient(_TestingPebbleClient):
         # pass, then a StartOrder pass) and concatenates them, rather than
         # interleaving stop/start per service. The stop pass uses StopOrder,
         # not StartOrder reversed -- see _service_dependency_order.
+        #
+        # The two passes also differ in *membership*, and restart is the only
+        # entry point where they do (Real-Pebble probe #10,
+        # WORKLOAD-MOCK-DESIGN.md §36.1/§36.4/§36.5): the stop pass covers
+        # the requested names and nothing else, while the start pass keeps
+        # the full forward `requires` closure. `api_services.go`'s "restart"
+        # case runs `StopOrder` -- which does expand along reverse-`requires`,
+        # the same call `stop` makes -- and then throws that expansion away
+        # again with `intersectOrdered(payload.Services, lanes)`. So a
+        # restart is *not* a stop followed by a start: restarting a service
+        # neither takes down the services that require it (§36.1) nor stops
+        # the ones it requires, even though the start pass will start them.
+        # Hence `services` here where the start pass uses `members`.
+        #
+        # `intersectOrdered` preserves the lane structure it filters, so a
+        # restart whose requested names span more than one lane should emit
+        # its stop tasks lane-grouped too -- but no probe has measured that
+        # shape (every restart in §36 was one connected chain, where flat and
+        # lane-grouped coincide), so the stop pass is left flat rather than
+        # implementing an inference. Carried in §36.10.
         if kind == 'restart':
-            stop_ordered = self._service_dependency_order(members, known_services, reverse=True)
+            stop_ordered = self._service_dependency_order(services, known_services, reverse=True)
             for name in stop_ordered:
                 tasks.append(_pebble_task(name, 'stop', 'Done', spawn_time, ready_time))
 

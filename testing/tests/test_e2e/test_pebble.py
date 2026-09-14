@@ -2544,6 +2544,201 @@ def test_service_requires_stop_cycle_terminates_instead_of_hanging():
         assert workload.get_service('loop_b').current == ops.pebble.ServiceStatus.INACTIVE
 
 
+def _restart_near_hop_layer() -> ops.pebble.Layer:
+    """rnabot <- rnamid <- rnatop by `requires`, with `after` on the near hop only.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.1/§36.4;
+    probe12-layers/001-restart-near-hop-only.yaml). rnamid declares both
+    `requires` and `after` on rnabot; rnatop declares only `requires` on
+    rnamid, so the `after` graph is partial. Named so the alphabetical
+    tie-break ascends with the chain.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'rnabot': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'rnamid': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['rnabot'],
+                'after': ['rnabot'],
+            },
+            'rnatop': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['rnamid'],
+            },
+        }
+    })
+
+
+def test_service_requires_restart_stop_pass_covers_only_the_requested_names():
+    """restart's stop pass does not expand; its start pass does.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.1/§36.4/§36.5):
+    `pebble restart rnamid rnatop` gave two stop tasks and three start
+    tasks. `api_services.go` runs StopOrder and then discards its
+    reverse-`requires` expansion again with
+    `intersectOrdered(payload.Services, lanes)`, while StartOrder's forward
+    expansion survives -- so a restart is not a stop followed by a start,
+    and restarting a service neither takes down the services that require
+    it nor stops the ones it requires. The mock used to build both passes
+    from the start pass's membership, so it emitted a third stop task for
+    the pulled-in rnabot.
+
+    A proper subset is the only request shape that shows this: restarting
+    one name gives a one-task stop pass with no order to get wrong, and
+    restarting the whole set needs no expansion at all, so it takes the
+    no-task-list fast path (§36.4).
+
+    rnamid's own `after: [rnabot]` edge is dropped rather than pulling
+    rnabot in, leaving the stop pass to the alphabetical tie-break.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _restart_near_hop_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['rnatop'])
+        change_id = workload.pebble.restart_services(['rnamid', 'rnatop'])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks if t.kind == 'stop'] == [
+            'Stop service "rnamid"',
+            'Stop service "rnatop"',
+        ]
+        assert [t.summary for t in change.tasks if t.kind == 'start'] == [
+            'Start service "rnabot"',
+            'Start service "rnamid"',
+            'Start service "rnatop"',
+        ]
+        # The count is the start pass's membership, not the stop pass's
+        # (§36.5: the summary reads `lanes` as it stands after the start
+        # pass), so three and not two.
+        assert change.summary == 'Restart service "rnamid" and 2 more'
+        for name in ('rnabot', 'rnamid', 'rnatop'):
+            assert workload.get_service(name).current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def _restart_near_hop_layer_tiebreak_reversed() -> ops.pebble.Layer:
+    """The same declared shape as _restart_near_hop_layer, renamed so the
+    alphabetical tie-break runs opposite to the `requires` chain: top sorts
+    first, bot last (Real-Pebble probe #10, WORKLOAD-MOCK-DESIGN.md
+    §36.3/§36.4; probe12-layers/005-restart-near-hop-tiebreak-reversed.yaml).
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'rqnatop': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['rqnmmid'],
+            },
+            'rqnmmid': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['rqnzbot'],
+                'after': ['rqnzbot'],
+            },
+            'rqnzbot': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+        }
+    })
+
+
+def test_service_requires_restart_stop_pass_is_ordered_not_the_request_order():
+    """The restricted stop pass is still ordered, not the caller's list.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.4): the tie-break
+    twin of test_service_requires_restart_stop_pass_covers_only_the_requested_names.
+    The same request shape (`restart <mid> <top>`) against the same declared
+    edges, renamed so the tie-break runs the other way, gives
+    `rqnatop, rqnmmid` where the first gave `rnamid, rnatop`. Without the
+    pair, the first test reads just as well as "the stop pass is the
+    requested names in request order", which is wrong.
+
+    The start pass is the one recorded in §36.3's table for variant E:
+    rqnatop starts *ahead* of the chain it requires, because nothing
+    constrains it and the tie-break sorts it first.
+    """
+    container = Container(
+        'foo', can_connect=True, layers={'base': _restart_near_hop_layer_tiebreak_reversed()}
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['rqnatop'])
+        change_id = workload.pebble.restart_services(['rqnmmid', 'rqnatop'])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks if t.kind == 'stop'] == [
+            'Stop service "rqnatop"',
+            'Stop service "rqnmmid"',
+        ]
+        assert [t.summary for t in change.tasks if t.kind == 'start'] == [
+            'Start service "rqnatop"',
+            'Start service "rqnzbot"',
+            'Start service "rqnmmid"',
+        ]
+        assert change.summary == 'Restart service "rqnmmid" and 2 more'
+
+
+def _restart_far_hop_layer() -> ops.pebble.Layer:
+    """rfabot <- rfamid <- rfatop by `requires`, with `after` on the far hop
+    only (rfatop after rfamid) -- Real-Pebble probe #10,
+    WORKLOAD-MOCK-DESIGN.md §36.4; probe12-layers/002-restart-far-hop-only.yaml.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'rfabot': {'override': 'replace', 'command': '/bin/sleep 1000', 'startup': 'disabled'},
+            'rfamid': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['rfabot'],
+            },
+            'rfatop': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['rfamid'],
+                'after': ['rfamid'],
+            },
+        }
+    })
+
+
+def test_service_requires_restart_stop_pass_inverts_edges_inside_the_request():
+    """An `after` edge between two requested names still inverts in the stop pass.
+
+    Real-Pebble probe #10 (WORKLOAD-MOCK-DESIGN.md §36.4, variant B):
+    `pebble restart rfamid rfatop` stopped rfatop first. Restricting the
+    stop pass to the requested names (the fix above) must not also flatten
+    it to alphabetical order -- rfatop declares `after: [rfamid]`, both are
+    in the request, so the edge survives the restriction and inverts, which
+    is the opposite of the name order. The start pass is unchanged and
+    still runs bot-first.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _restart_far_hop_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['rfatop'])
+        change_id = workload.pebble.restart_services(['rfamid', 'rfatop'])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks if t.kind == 'stop'] == [
+            'Stop service "rfatop"',
+            'Stop service "rfamid"',
+        ]
+        assert [t.summary for t in change.tasks if t.kind == 'start'] == [
+            'Start service "rfabot"',
+            'Start service "rfamid"',
+            'Start service "rfatop"',
+        ]
+
+
 def _two_lanes_interleaved_layer() -> ops.pebble.Layer:
     """Two `requires` lanes whose members interleave in the alphabetical order.
 

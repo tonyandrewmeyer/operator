@@ -215,6 +215,10 @@ class TestFile:
     `commands[]` in.
     """
 
+    # Not a pytest test class, despite the name; pytest collects `Test*` by
+    # default and the repository's unit run turns that warning into an error.
+    __test__ = False
+
     path: str
     body: str
 

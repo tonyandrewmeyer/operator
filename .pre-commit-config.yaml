@@ -37,6 +37,10 @@ repos:
         entry: uv run --group lint -- codespell
         language: system
         types: [text]
+        # `[tool.codespell] skip` only prunes directories that codespell walks
+        # itself; pre-commit hands it explicit paths, so the same exclusion has
+        # to be spelled out here.
+        exclude: '^add-reproducer/'
       - id: zizmor
         name: zizmor (uv)
         entry: uv run --group lint -- zizmor

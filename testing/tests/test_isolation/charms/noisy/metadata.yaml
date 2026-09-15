@@ -1,0 +1,5 @@
+name: noisy
+summary: Writes to file descriptor 1 from a subprocess.
+description: |
+  Used by the isolation tests to check that a charm writing past Python's
+  sys.stdout cannot corrupt the worker's framed protocol.

@@ -81,3 +81,13 @@ class StateVersionMismatchError(RuntimeError):
     a matching ``ops.testing`` (part of the ``ops[testing]`` extra) in the
     charm's venv.
     """
+
+
+class JujuError(RuntimeError):
+    """Raised when an operation cannot be performed on a :class:`~ops.testing.Juju`.
+
+    For example: removing the last unit of an application, referring to an
+    application that was never deployed, removing units in a form that does
+    not match the application's substrate, or a convergence loop that does not
+    terminate.
+    """

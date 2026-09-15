@@ -96,9 +96,11 @@ import sys
 import tempfile
 import threading
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import yaml
+
+from ops._private.harness import ActionFailed
 
 from . import _isolated_serde, _worker_protocol
 from .context import _DEFAULT_JUJU_VERSION, CharmEvents
@@ -201,8 +203,8 @@ def _dispatch_spawn(
     child_env: dict[str, str],
     request: dict[str, Any],
     timeout: float | None,
-) -> State:
-    """Run a single charm event in a fresh subprocess and return the output State.
+) -> dict[str, Any]:
+    """Run a single charm event in a fresh subprocess and return the worker's response.
 
     This is the spawn-per-event debug transport: the request and response cross
     via JSON files in a short-lived temporary directory and the process is torn
@@ -253,7 +255,7 @@ def _dispatch_spawn(
     if 'error' in response:
         raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
 
-    return State._from_json(response['state_out'])
+    return cast('dict[str, Any]', response)
 
 
 # Persistent worker (default transport)
@@ -418,8 +420,8 @@ class _PersistentWorker:
 
     # Dispatch
 
-    def dispatch(self, request: dict[str, Any]) -> State:
-        """Send one event request to the worker and return the output State.
+    def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Send one event request to the worker and return its response.
 
         Raises:
             IsolationError: if the worker has crashed (it is not re-spawned), if
@@ -474,7 +476,7 @@ class _PersistentWorker:
                 raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
 
             self._arm_timer()
-            return State._from_json(response['state_out'])
+            return cast('dict[str, Any]', response)
 
     def close(self) -> None:
         """Shut the worker down cleanly (idempotent)."""
@@ -590,6 +592,13 @@ class IsolatedContext:
     #: Use ``ctx.on.<event>(...)`` to construct events for :meth:`run`.
     on: CharmEvents
 
+    #: Logs the charm emitted with ``event.log()`` during the last action run.
+    action_logs: list[str]
+
+    #: Results the charm set with ``event.set_results()`` during the last
+    #: action run, or ``None`` if it set none.
+    action_results: dict[str, Any] | None
+
     def __init__(
         self,
         charm_source: str | pathlib.Path,
@@ -607,6 +616,8 @@ class IsolatedContext:
         dispatch_timeout: float | None = _DEFAULT_DISPATCH_TIMEOUT,
     ):
         self.on = CharmEvents()
+        self.action_logs: list[str] = []
+        self.action_results: dict[str, Any] | None = None
 
         charm_root = pathlib.Path(charm_source)
         if not charm_root.exists():
@@ -634,7 +645,12 @@ class IsolatedContext:
         self._child_env = _child_environ()
         self._worker: _PersistentWorker | None = None
 
-    def _build_request(self, event: _Event, state: State) -> dict[str, Any]:
+    def _build_request(
+        self,
+        event: _Event,
+        state: State,
+        unit_id: int | None = None,
+    ) -> dict[str, Any]:
         return {
             'charm_source': str(self._env.charm_source),
             'extra_sys_path': list(self._env.extra_sys_path),
@@ -642,7 +658,7 @@ class IsolatedContext:
             'config': self._config,
             'actions': self._actions,
             'app_name': self.app_name,
-            'unit_id': self.unit_id,
+            'unit_id': self.unit_id if unit_id is None else unit_id,
             'juju_version': self.juju_version,
             'event': _isolated_serde.encode_event(event),
             'state_in': state._to_json(),
@@ -680,14 +696,37 @@ class IsolatedContext:
             state_out = ctx.run(ctx.on.install(), State())
             assert state_out.unit_status == ActiveStatus('ready')
         """
-        request = self._build_request(event, state)
+        return self._run_as(self.unit_id, event, state)
+
+    def _run_as(self, unit_id: int, event: _Event, state: State) -> State:
+        """Dispatch ``event`` as unit ``unit_id`` rather than this context's own unit.
+
+        The unit ID travels in the request rather than being baked into the
+        worker, so a single persistent worker serves every unit of an
+        application - which is what the model-level layer relies on to keep one
+        process per application rather than one per unit.
+
+        :private:
+        """
+        request = self._build_request(event, state, unit_id=unit_id)
         if self._spawn_per_event:
-            return _dispatch_spawn(self._env, self._child_env, request, self.dispatch_timeout)
-        if self._worker is None:
-            self._worker = _PersistentWorker(
-                self._env, self._child_env, self._idle_timeout, self.dispatch_timeout
+            response = _dispatch_spawn(self._env, self._child_env, request, self.dispatch_timeout)
+        else:
+            if self._worker is None:
+                self._worker = _PersistentWorker(
+                    self._env, self._child_env, self._idle_timeout, self.dispatch_timeout
+                )
+            response = self._worker.dispatch(request)
+
+        self.action_logs = json.loads(response.get('action_logs') or 'null') or []
+        self.action_results = json.loads(response.get('action_results') or 'null')
+        state_out = State._from_json(response['state_out'])
+        if 'action_failure' in response:
+            raise ActionFailed(
+                response['action_failure'],
+                state=state_out,  # type: ignore
             )
-        return self._worker.dispatch(request)
+        return state_out
 
     def close(self) -> None:
         """Tear down the persistent worker, if one is running.

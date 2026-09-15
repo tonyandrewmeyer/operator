@@ -90,6 +90,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.ActionFailed
 .. autoclass:: ops.testing.ActiveStatus
 .. autoclass:: ops.testing.Address
+.. autoclass:: ops.testing.App
 .. autoclass:: ops.testing.BindAddress
 .. autoclass:: ops.testing.BlockedStatus
 .. autoclass:: ops.testing.CharmEvents
@@ -100,10 +101,12 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.Context
    :special-members: __call__
 .. autoclass:: ops.testing.DeferredEvent
+.. autoclass:: ops.testing.Dispatch
 .. autoclass:: ops.testing.ErrorStatus
 .. autoclass:: ops.testing.Exec
 .. autoclass:: ops.testing.ICMPPort
 .. autoclass:: ops.testing.IsolatedContext
+.. autoclass:: ops.testing.Juju
 .. autoclass:: ops.testing.JujuLogLine
 .. autoclass:: ops.testing.MaintenanceStatus
 .. autoclass:: ops.testing.Manager
@@ -112,6 +115,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.Network
 .. autoclass:: ops.testing.Notice
 .. autoclass:: ops.testing.PeerRelation
+.. autoclass:: ops.testing.QueuedAction
 .. autoclass:: ops.testing.Port
 .. autoclass:: ops.testing.Relation
 .. autoclass:: ops.testing.RelationBase
@@ -123,6 +127,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.SubordinateRelation
 .. autoclass:: ops.testing.TCPPort
 .. autoclass:: ops.testing.UDPPort
+.. autoclass:: ops.testing.Unit
 .. autoclass:: ops.testing.UnknownStatus
 .. autoclass:: ops.testing.WaitingStatus
 .. autoclass:: ops.testing.errors.ContextSetupError
@@ -131,6 +136,7 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.errors.UncaughtCharmError
 .. autoclass:: ops.testing.errors.InconsistentScenarioError
 .. autoclass:: ops.testing.errors.IsolationError
+.. autoclass:: ops.testing.errors.JujuError
 .. autoclass:: ops.testing.errors.StateVersionMismatchError
 .. autoclass:: ops.testing.errors.StateValidationError
 .. autoclass:: ops.testing.errors.MetadataNotFoundError

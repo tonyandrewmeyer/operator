@@ -71,3 +71,13 @@ class IsolationError(RuntimeError):
 
     The original traceback from the worker is included in the message.
     """
+
+
+class StateVersionMismatchError(RuntimeError):
+    """Raised when a payload's producing ``ops.testing`` version differs from this process's.
+
+    Every per-charm venv is required to carry the same ``ops.testing`` version
+    as the parent test process; there is no cross-version negotiation. Install
+    a matching ``ops.testing`` (part of the ``ops[testing]`` extra) in the
+    charm's venv.
+    """

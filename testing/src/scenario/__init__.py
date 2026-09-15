@@ -68,6 +68,7 @@ from __future__ import annotations
 
 from ops._private.harness import ActionFailed  # For backwards compatibility.
 
+from ._isolation import IsolatedContext
 from .context import CharmEvents, Context, Manager
 from .errors import StateValidationError  # For backwards compatibility.
 from .state import (
@@ -129,6 +130,7 @@ __all__ = [
     'ErrorStatus',
     'Exec',
     'ICMPPort',
+    'IsolatedContext',
     'JujuLogLine',
     'MaintenanceStatus',
     'Manager',

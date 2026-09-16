@@ -215,12 +215,12 @@ class TestFile:
     `commands[]` in.
     """
 
+    path: str
+    body: str
+
     # Not a pytest test class, despite the name; pytest collects `Test*` by
     # default and the repository's unit run turns that warning into an error.
     __test__ = False
-
-    path: str
-    body: str
 
     @classmethod
     def from_dict(cls, d: dict) -> "TestFile":
@@ -319,6 +319,22 @@ class RunResult:
     # never touch a juju substrate (`none`) and for fixtures recorded before
     # this field existed -- optional so they keep loading unchanged.
     observed_juju_version: str | None = None
+    # The `ops` the reproduction was actually built against, parsed out of
+    # `charmcraft pack`'s own log by `seams/runner.py:_packed_ops_version()`.
+    # Exactly the disclosure `observed_juju_version` above makes for juju,
+    # applied to the library the issue is about. `spike-step-5/first-dispatch/
+    # RESULT.md` §6.1: the scratch charm pins `ops~=3.8` and charmcraft
+    # resolves that from PyPI inside its own managed LXD instance, so the
+    # checked-out tree is never under test -- a bug already fixed on `main`
+    # but unreleased still reproduces and the comment calls it live, an
+    # unreleased regression cannot reproduce at all, and `~=3.8` is a range,
+    # so two runs a week apart can silently test different `ops`. None of
+    # that is inferable from `repo=` in the composed comment, which carries
+    # what the *extraction* pinned. `None` for branches that never pack a
+    # charm (`none`, `k8s-clone`), when the pack log carries nothing that
+    # parses, and for fixtures recorded before this field existed --
+    # optional so they keep loading unchanged.
+    observed_ops_version: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "RunResult":
@@ -330,6 +346,7 @@ class RunResult:
             aborted_at_step=d.get("aborted_at_step"),
             skipped_steps=list(d.get("skipped_steps") or []),
             observed_juju_version=d.get("observed_juju_version"),
+            observed_ops_version=d.get("observed_ops_version"),
         )
 
 

@@ -101,3 +101,19 @@ def test_run_result_observed_juju_version_is_optional():
     not raise a KeyError."""
     run = RunResult.from_dict(_run_result_dict())
     assert run.observed_juju_version is None
+
+
+def test_run_result_records_the_packed_ops_version():
+    """`spike-step-5/first-dispatch/RESULT.md` §6.1: the scratch charm is
+    packed against released `ops` from PyPI, never the checked-out tree, and
+    which `ops` that was survived only as a line of charmcraft's stderr."""
+    run = RunResult.from_dict(_run_result_dict(observed_ops_version="3.8.2"))
+    assert run.observed_ops_version == "3.8.2"
+
+
+def test_run_result_observed_ops_version_is_optional():
+    """Same as `observed_juju_version` above: every fixture recorded before
+    this field existed has no `observed_ops_version` key, and must still
+    load as `None` rather than raising."""
+    run = RunResult.from_dict(_run_result_dict())
+    assert run.observed_ops_version is None

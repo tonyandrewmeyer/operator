@@ -247,16 +247,33 @@ def classify(
     if surface is not None and surface.expected_signal:
         main_text = "\n".join(_command_text(c) for c in commands)
         if surface.expected_signal not in main_text:
-            if run_result.control is not None and surface.expected_signal in _command_text(run_result.control):
+            control = run_result.control
+            # The control has to have *succeeded*, not merely have been run.
+            # Since 2026-09-16 its `juju status` read is a bounded poll for
+            # the signal (`seams/runner.py:_control_signal_command()`), so a
+            # control that exits non-zero is one whose signal never appeared
+            # inside the budget -- a control that did not fire. That command
+            # is built so the two agree (it greps the text it just printed),
+            # but the exit code is also the only signal available when the
+            # runner itself killed the step at `STEP_TIMEOUTS_S["control"]`
+            # and recorded exit 124 with no output at all.
+            if control is not None and control.exit_code == 0 and surface.expected_signal in _command_text(control):
                 return (
                     Outcome.REPRODUCED_POSITIVE_SIGNAL_ABSENT,
                     f"expected signal {surface.expected_signal!r} absent from the main run but "
                     "present in the control run -- confirms a broken observer isn't the explanation",
                 )
+            if control is None:
+                detail = "no control was run"
+            elif control.exit_code != 0:
+                detail = f"the control exited {control.exit_code} without ever showing the signal"
+            else:
+                detail = "the control ran but did not produce the signal either"
             return (
                 Outcome.DID_NOT_REPRODUCE,
-                f"expected signal {surface.expected_signal!r} absent, but no control confirmed the "
-                "observer works at all -- can't distinguish a reproduced bug from a broken observer",
+                f"expected signal {surface.expected_signal!r} absent, and {detail} -- nothing "
+                "confirmed the observer works at all, so a reproduced bug can't be distinguished "
+                "from a broken observer",
             )
 
     # Rung 6: reproduced (weaker) -- non-zero exit on the last command,

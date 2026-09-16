@@ -83,6 +83,18 @@ def _versions_line(hypothesis: Hypothesis, run_result: RunResult) -> str:
     # pinned/unpinned distinction to fall back on.
     if run_result.observed_juju_version:
         parts.append(f"observed_juju={run_result.observed_juju_version}")
+    # The same disclosure, for the library the issue is actually about.
+    # `spike-step-5/first-dispatch/RESULT.md` §6.1: the scratch charm is
+    # packed against released `ops` from PyPI (`ops~=3.8`, resolved inside
+    # charmcraft's own managed LXD instance), never the checked-out tree, so
+    # a reader cannot infer which `ops` produced this verdict from the repo,
+    # from the workflow's checkout ref, or from `repo=` above -- that last
+    # one is what the *extraction* pinned, which is usually nothing. Omitted
+    # rather than rendered as "observed_ops=unknown" for the same reason as
+    # `observed_juju` above: it has no pinned/unpinned distinction to fall
+    # back on, so silence is the honest form of "not measured".
+    if run_result.observed_ops_version:
+        parts.append(f"observed_ops={run_result.observed_ops_version}")
     return ", ".join(parts)
 
 

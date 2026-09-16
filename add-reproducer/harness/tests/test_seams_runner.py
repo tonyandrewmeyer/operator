@@ -17,15 +17,24 @@ silently).
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
 import runner_stage
+import seams.runner
 from models import CommandResult, Hypothesis, MovingParts, RunResult, SurfaceInference
 from seams.runner import (
+    CONTROL_SIGNAL_POLL_INTERVAL_S,
+    CONTROL_SIGNAL_POLLS,
+    CONTROL_SIGNAL_TIMEOUT_S,
     PER_COMMAND_TIMEOUT_S,
+    STEP_TIMEOUTS_S,
     SubprocessRunnerSeam,
+    _control_signal_command,
     _juju_track,
+    _packed_ops_version,
+    _unit_expr,
     _wait_command,
     as_user_in_container_command,
     build_plan,
@@ -224,7 +233,18 @@ def test_run_lxd_scratch_runs_control_when_expected_signal_and_pebble_info_set(m
     assert result.control is not None
     assert "root" in result.control.command
     assert "_daemon_" not in result.control.command  # control reruns as root, not the suspect user
-    assert result.control.command.endswith(f"; juju status -m concierge-lxd:testing {_UNIT}")
+    # The notify, then a poll for its effect -- not the notify and a bare
+    # status read joined by `;`, which is what this was until 2026-09-16.
+    poll = _control_signal_command("concierge-lxd:testing", _UNIT, "observed notice:")
+    assert result.control.command.endswith(f"; {poll}")
+    assert result.control.command[: -len(f"; {poll}")] == as_user_in_container_command(
+        unit=_UNIT,
+        container=None,
+        user="root",
+        juju_track="4",
+        pebble_command="pebble notify canonical.com/repro/notice key=value",
+        model="concierge-lxd:testing",
+    )
 
 
 @pytest.mark.parametrize(
@@ -706,3 +726,349 @@ def test_run_none_does_not_record_an_observed_juju_version(monkeypatch):
     result = SubprocessRunnerSeam().run(branch="none", hypothesis=hyp, surface=None, context={})
 
     assert result.observed_juju_version is None
+
+
+# --- the control's status read: a poll, not a race ---
+#
+# `spike-step-5/first-dispatch/RESULT.md` §6.5. The control was
+# `pebble notify ...; juju status <unit>` -- one shell command, 0.960s for
+# both halves -- against a measured notify-to-visible latency of under a
+# second. Every other step in the sequence that needs the cluster to catch up
+# polls for it; this one read straight away. Nothing had ever lost the race,
+# and nothing could have: rung 5 reads the control only when
+# `expected_signal` is *absent* from the main run, and it was present on
+# every run to date. The path where it is load-bearing is a genuine
+# `REPRODUCED_POSITIVE_SIGNAL_ABSENT`, and there an early read turns a
+# comment-worthy outcome into a silent `DID_NOT_REPRODUCE` reported as "no
+# control confirmed the observer works at all".
+
+
+def test_control_signal_command_polls_with_the_modules_one_idiom():
+    """The poll is `_wait_command()`'s shape -- a bounded `for _ in $(seq 1
+    N)` loop with a `sleep`, then a check that `echo`es and `exit 1`s -- and
+    not a second polling idiom invented for this step."""
+    cmd = _control_signal_command("c:testing", "app/0", "observed notice:")
+
+    assert cmd.startswith(f"for _ in $(seq 1 {CONTROL_SIGNAL_POLLS}); do ")
+    assert f"sleep {CONTROL_SIGNAL_POLL_INTERVAL_S}; done; " in cmd
+    assert cmd.endswith(">&2; exit 1; }")
+    assert str(CONTROL_SIGNAL_TIMEOUT_S) in cmd
+
+
+def test_control_signal_command_greps_the_signal_as_a_fixed_string():
+    """`expected_signal` is free text an LLM wrote, so it is data in this
+    command and never shell or regex: `shlex.quote`d, and matched with
+    `grep -F` so a `.` or a `*` in a signal cannot widen the match past what
+    `classifier.classify()`'s rung 5 substring-matches."""
+    cmd = _control_signal_command("c:testing", "app/0", "it's a *signal*")
+
+    assert "grep -qF -- 'it'\"'\"'s a *signal*'" in cmd
+
+
+def test_control_step_is_the_notify_then_the_poll(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(subprocess, "run", _fake_run(calls))
+    surface = SurfaceInference(
+        charm_name="repro-i9999-x",
+        pebble_service={
+            "container": "workload",
+            "service": "workload",
+            "command": "pebble notify canonical.com/repro/notice key=value",
+            "user": "_daemon_",
+        },
+        expected_signal="observed notice:",
+    )
+
+    plan = build_plan(
+        branch="k8s-scratch", hypothesis=_hypothesis("k8s"), surface=surface, context={"charm_dir": "charm-9999"}
+    )
+
+    control = plan[-1]
+    assert control.step == "control"
+    unit = _unit_expr("repro-i9999", "concierge-k8s:testing")
+    assert control.command.endswith(
+        "; " + _control_signal_command("concierge-k8s:testing", unit, "observed notice:")
+    )
+    # The old shape, pinned as gone: the notify's own `;` used to be followed
+    # by nothing but a single status read.
+    assert not control.command.endswith(f"; juju status -m concierge-k8s:testing {unit}")
+
+
+def test_control_step_budget_outlasts_its_own_poll():
+    """Same rule `wait` is in `STEP_TIMEOUTS_S` for: the subprocess budget
+    has to outlast the timeout embedded in the command, or the inner one is
+    dead code and a slow-but-working control comes back as
+    `'control' failed (timed out)` instead of as a verdict."""
+    assert STEP_TIMEOUTS_S["control"] > CONTROL_SIGNAL_TIMEOUT_S
+    assert STEP_TIMEOUTS_S["control"] > PER_COMMAND_TIMEOUT_S - 1  # not silently smaller than the default
+
+
+def _juju_stub(tmp_path, appear_at: int) -> dict:
+    """A `juju` on PATH that answers `--format=json` with a unit listing and
+    every other call with a `juju status` table -- carrying the signal from
+    its `appear_at`-th call onwards. `appear_at` larger than the poll count
+    is a signal that never arrives."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    stub = bin_dir / "juju"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "--format=json" ]; then\n'
+        """    echo '{"applications":{"repro-i9999":{"units":{"repro-i9999/0":{}}}}}'\n"""
+        "    exit 0\n"
+        "  fi\n"
+        "done\n"
+        "n=0\n"
+        '[ -f "$COUNT_FILE" ] && n=$(cat "$COUNT_FILE")\n'
+        'n=$((n+1)); echo "$n" > "$COUNT_FILE"\n'
+        "echo 'Unit             Workload  Agent  Address    Ports  Message'\n"
+        f'if [ "$n" -ge {appear_at} ]; then\n'
+        "  echo 'repro-i9999/0*   active    idle   10.1.0.72         "
+        "observed notice: canonical.com/repro/notice in workload'\n"
+        "else\n"
+        "  echo 'repro-i9999/0*   active    idle   10.1.0.72         ready'\n"
+        "fi\n"
+    )
+    stub.chmod(0o755)
+    return {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "COUNT_FILE": str(tmp_path / "count"),
+    }
+
+
+def _run_poll_for_real(tmp_path, monkeypatch, *, appear_at: int, polls: int = 3):
+    """Build the control's poll and actually execute it in a shell, against a
+    `juju` stub. Everything else in this file mocks `subprocess.run`, which
+    pins the *decision* and not the shell -- and this step's whole point is a
+    loop, a `sleep`, a `grep` and an exit code, none of which a mocked
+    `subprocess.run` can be wrong about. The module constants are patched
+    down so a real timeout costs no wall clock: they are read when the string
+    is built, not when it runs."""
+    monkeypatch.setattr(seams.runner, "CONTROL_SIGNAL_POLLS", polls)
+    monkeypatch.setattr(seams.runner, "CONTROL_SIGNAL_POLL_INTERVAL_S", 0)
+    env = dict(os.environ, **_juju_stub(tmp_path, appear_at))
+    command = seams.runner._control_signal_command(
+        "c:testing", _unit_expr("repro-i9999", "c:testing"), "observed notice:"
+    )
+    return subprocess.run(["bash", "-c", command], capture_output=True, text=True, env=env)
+
+
+def test_control_poll_waits_for_a_signal_that_arrives_late(tmp_path, monkeypatch):
+    """The whole point: a status read that would have missed the signal on
+    its first attempt now waits for it."""
+    proc = _run_poll_for_real(tmp_path, monkeypatch, appear_at=3)
+
+    assert proc.returncode == 0
+    # Not just the matched line -- the full status table, because
+    # `composer._control_output()` renders this text as the evidence for the
+    # outcome's claim, and a reader is being asked to check it.
+    assert "observed notice: canonical.com/repro/notice in workload" in proc.stdout
+    assert "Workload  Agent  Address" in proc.stdout
+
+
+def test_control_poll_that_times_out_fails_loudly(tmp_path, monkeypatch):
+    """A poll that times out is a control that did not fire. It has to exit
+    non-zero and say so, because rung 5 reads a control's success as "the
+    observer demonstrably works" -- exiting 0 on a signal that never arrived
+    would hand that conclusion to a run that earned the opposite one."""
+    proc = _run_poll_for_real(tmp_path, monkeypatch, appear_at=99)
+
+    assert proc.returncode != 0
+    assert "timed out" in proc.stderr
+    assert "observed notice:" in proc.stderr  # says which signal it waited for
+    # Still prints what it did see, so the failure is diagnosable.
+    assert "Workload  Agent  Address" in proc.stdout
+    assert "observed notice: canonical.com/repro/notice in workload" not in proc.stdout
+
+
+def test_control_poll_exit_code_and_printed_text_cannot_disagree(tmp_path, monkeypatch):
+    """`exit 0` and "the printed text contains the signal" are one fact, not
+    two: the tail greps the text it just printed rather than re-reading. Rung
+    5 checks both, so a command where they could differ would make the two
+    checks answer different questions about the same control."""
+    for appear_at, expected_exit in ((2, 0), (99, 1)):
+        proc = _run_poll_for_real(tmp_path / str(appear_at), monkeypatch, appear_at=appear_at)
+        assert (proc.returncode == 0) is ("observed notice:" in proc.stdout)
+        assert proc.returncode == expected_exit
+
+
+def test_a_failed_control_is_recorded_and_aborts_nothing(monkeypatch):
+    """`control` is deliberately not in `PREREQUISITE_STEPS`: a control that
+    failed is evidence the classifier needs, not a reason to throw the run
+    away. It is the last step in the sequence anyway, so there is nothing
+    after it to protect -- what matters is that the non-zero exit reaches
+    `RunResult.control` rather than being swallowed."""
+    surface = SurfaceInference(
+        charm_name="repro-i9999-x",
+        pebble_service={
+            "container": "workload",
+            "service": "workload",
+            "command": "pebble notify canonical.com/repro/notice key=value",
+            "user": "_daemon_",
+        },
+        expected_signal="observed notice:",
+    )
+
+    def fake(args, **kwargs):
+        if args[:2] != ["bash", "-c"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        failed = "waiting for the control signal" in args[2]
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=1 if failed else 0,
+            stdout="",
+            stderr="timed out after 120s waiting for the control signal" if failed else "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    result = SubprocessRunnerSeam().run(
+        branch="k8s-scratch", hypothesis=_hypothesis("k8s"), surface=surface, context={"charm_dir": "charm-9999"}
+    )
+
+    assert result.control is not None
+    assert result.control.exit_code == 1
+    assert result.control.step == "control"
+    assert result.aborted_at_step is None
+    assert result.skipped_steps == []
+
+
+# --- RunResult.observed_ops_version: which ops was actually packed ---
+#
+# `spike-step-5/first-dispatch/RESULT.md` §6.1. The scratch charm pins
+# `ops~=3.8` and `charmcraft pack` resolves that from PyPI inside its own
+# managed LXD instance, so the `ops` in the checked-out tree is never under
+# test. The first dispatch packed `ops==3.8.2`; the fact survived only as one
+# line of charmcraft's stderr that no code read.
+
+# The shape §6.1 quotes, in the surrounding noise a real pack log carries.
+_PACK_LOG = """\
+Packing charm
+:: Installed 34 packages in 96ms
+:: + ops==3.8.2
+:: + ops-scenario==8.8.0
+:: + pyyaml==6.0.3
+Packed repro-i9999_amd64.charm
+"""
+
+
+def test_packed_ops_version_reads_the_charmcraft_pack_log():
+    commands = [
+        CommandResult(command="sudo concierge prepare ...", exit_code=0, step="prepare"),
+        CommandResult(command="charmcraft pack ...", exit_code=0, stderr=_PACK_LOG, step="pack"),
+    ]
+    assert _packed_ops_version(commands) == "3.8.2"
+
+
+def test_packed_ops_version_is_not_fooled_by_a_neighbouring_package():
+    """Two different near-misses. `ops-scenario==`/`ops-testing==` are the
+    lines that actually sit next to it in a real pack log, and requiring the
+    literal `ops==` is enough for those. `charmops==` is the one that needs
+    the lookbehind: it contains `ops==` as a substring, so without it the
+    wrong package's version is reported as the packed `ops`."""
+    log = ":: + charmops==1.2.3\n:: + ops-scenario==8.8.0\n:: + ops-testing==3.8.2\n"
+    commands = [CommandResult(command="charmcraft pack", exit_code=0, stderr=log, step="pack")]
+    assert _packed_ops_version(commands) is None
+
+
+def test_packed_ops_version_takes_the_installed_version_not_the_replaced_one():
+    """uv prints a package's removal before its addition, so the last `ops==`
+    in the log is the one that ended up in the charm."""
+    log = ":: - ops==3.8.1\n:: + ops==3.8.2\n"
+    commands = [CommandResult(command="charmcraft pack", exit_code=0, stdout=log, step="pack")]
+    assert _packed_ops_version(commands) == "3.8.2"
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        pytest.param([], id="no commands at all"),
+        pytest.param(
+            [CommandResult(command="git clone ...", exit_code=0, stdout="x", step="clone")],
+            id="a branch with no pack step",
+        ),
+        pytest.param(
+            [CommandResult(command="charmcraft pack", exit_code=0, stdout="", stderr="", step="pack")],
+            id="a pack step that captured nothing",
+        ),
+        pytest.param(
+            [CommandResult(command="charmcraft pack", exit_code=1, stderr="Failed to pack.", step="pack")],
+            id="a pack that failed",
+        ),
+    ],
+)
+def test_packed_ops_version_fails_soft(commands):
+    """Every way of not finding a version gives `None`, never an exception:
+    same discipline as `_observed_juju_version()`, and for the same reason --
+    a version string nobody could read must not take down a run that
+    otherwise completed."""
+    assert _packed_ops_version(commands) is None
+
+
+def test_run_k8s_scratch_records_the_packed_ops_version(monkeypatch):
+    def fake(args, **kwargs):
+        if args[:2] != ["bash", "-c"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="3.6.27-ubuntu-amd64\n", stderr="")
+        stderr = _PACK_LOG if "charmcraft pack" in args[2] else ""
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    result = SubprocessRunnerSeam().run(
+        branch="k8s-scratch", hypothesis=_hypothesis("k8s"), surface=None, context={"charm_dir": "charm-9999"}
+    )
+
+    assert result.observed_ops_version == "3.8.2"
+
+
+def test_run_lxd_scratch_records_the_packed_ops_version(monkeypatch):
+    def fake(args, **kwargs):
+        if args[:2] != ["bash", "-c"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="3.6.27-ubuntu-amd64\n", stderr="")
+        stderr = _PACK_LOG if "charmcraft pack" in args[2] else ""
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    result = SubprocessRunnerSeam().run(
+        branch="lxd-scratch", hypothesis=_hypothesis("lxd"), surface=None, context={"charm_dir": "charm-9999"}
+    )
+
+    assert result.observed_ops_version == "3.8.2"
+
+
+def test_run_k8s_scratch_ops_version_absent_is_none_not_raised(monkeypatch):
+    """A pack log with nothing resolvable in it -- charmcraft's output format
+    changing, or a cached build that prints no venv listing -- is `None`, the
+    same way a missing `juju version` is."""
+    calls: list[str] = []
+    monkeypatch.setattr(subprocess, "run", _fake_run(calls))
+
+    result = SubprocessRunnerSeam().run(
+        branch="k8s-scratch", hypothesis=_hypothesis("k8s"), surface=None, context={"charm_dir": "charm-9999"}
+    )
+
+    assert result.observed_ops_version is None
+
+
+def test_run_k8s_clone_does_not_record_a_packed_ops_version(monkeypatch):
+    """`k8s-clone` runs the reporter's own commands against a checkout and
+    packs no scratch charm, so there is no pack log to read -- same scoping
+    as `observed_juju_version`, which that branch also leaves unset."""
+    hyp = Hypothesis(
+        issue_number=9999,
+        in_scope=True,
+        moving_parts=MovingParts(substrate="k8s", ci_run_url="https://github.com/canonical/operator/actions/runs/1"),
+        commands=["git clone x", "charmcraft pack"],
+        expected="expected",
+        observed="observed",
+        confidence="medium",
+    )
+
+    def fake(args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=_PACK_LOG, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    result = SubprocessRunnerSeam().run(
+        branch="k8s-clone", hypothesis=hyp, surface=None, context={"repo": "canonical/operator"}
+    )
+
+    assert result.observed_ops_version is None

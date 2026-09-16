@@ -317,3 +317,96 @@ def test_positive_signal_absent_no_control_stays_silent():
     outcome, reason = classify(hypothesis, surface, run)
     assert outcome == Outcome.DID_NOT_REPRODUCE
     assert "broken observer" in reason
+
+
+# --- rung 5: a control that did not fire is not a control ---
+#
+# `spike-step-5/first-dispatch/RESULT.md` §6.5. The control's `juju status`
+# read now polls for the signal
+# (`seams/runner.py:_control_signal_command()`), so "the control exited
+# non-zero" means "the signal never appeared inside the budget". Rung 5's
+# whole job is telling a reproduced bug apart from a broken observer, and a
+# control that did not fire is evidence for neither -- it must not be read as
+# the confirmation this outcome's entire claim rests on.
+
+
+def _absent_signal_case(control: CommandResult | None) -> tuple[Hypothesis, SurfaceInference, RunResult]:
+    """#2639's real hypothesis and surface, with a main run whose output does
+    not carry `expected_signal` -- the only state in which rung 5 reads the
+    control at all."""
+    return (
+        _load_hypothesis(2639),
+        _load_surface(2639),
+        RunResult(
+            hypothesis_number=2639,
+            branch="k8s-scratch",
+            commands=[CommandResult(command="juju status repro-i2639/0", exit_code=0, stdout="Workload: unknown")],
+            control=control,
+        ),
+    )
+
+
+def test_positive_signal_absent_with_a_timed_out_control_stays_silent():
+    hypothesis, surface, run = _absent_signal_case(
+        CommandResult(
+            command="juju ssh ...; for _ in $(seq 1 24); do ... done; ...",
+            exit_code=1,
+            stdout="Unit  Workload  Agent  Address  Ports  Message\nrepro-i2639/0*  active  idle  10.1.0.72",
+            stderr="timed out after 120s waiting for the control signal 'observed notice:' to appear in the unit status",
+        )
+    )
+
+    outcome, reason = classify(hypothesis, surface, run)
+
+    assert outcome == Outcome.DID_NOT_REPRODUCE
+    assert outcome not in COMMENT_OUTCOMES
+    assert "exited 1" in reason
+    assert "broken observer" in reason
+
+
+def test_positive_signal_absent_with_a_control_killed_by_its_step_budget_stays_silent():
+    """`_execute_sequence` records a subprocess timeout as exit 124 with no
+    captured output at all, so the exit code is the only thing left to read.
+    Same verdict, reached without any text to match against."""
+    hypothesis, surface, run = _absent_signal_case(
+        CommandResult(command="juju ssh ...; ...", exit_code=124, stderr="timed out after 300s")
+    )
+
+    outcome, reason = classify(hypothesis, surface, run)
+
+    assert outcome == Outcome.DID_NOT_REPRODUCE
+    assert "exited 124" in reason
+
+
+def test_positive_signal_absent_with_a_silent_control_stays_silent():
+    """A control that exited 0 and still shows no signal. Distinct from the
+    timeout above only in how it is described -- the verdict is the same,
+    because in both cases nothing demonstrated that the observer works."""
+    hypothesis, surface, run = _absent_signal_case(
+        CommandResult(command="juju ssh ...; ...", exit_code=0, stdout="Unit  Workload  Agent\nrepro-i2639/0*  active")
+    )
+
+    outcome, reason = classify(hypothesis, surface, run)
+
+    assert outcome == Outcome.DID_NOT_REPRODUCE
+    assert "did not produce the signal" in reason
+
+
+def test_positive_signal_absent_with_a_control_that_fired_still_reproduces():
+    """The rung still reaches its comment-worthy outcome when the control
+    genuinely succeeded -- the exit-code check tightens what counts as a
+    confirmation, it does not remove the rung."""
+    hypothesis, surface, run = _absent_signal_case(
+        CommandResult(
+            command="juju ssh ...; ...",
+            exit_code=0,
+            stdout="Unit  Workload  Agent  Address  Ports  Message\n"
+            "repro-i2639/0*  active  idle  10.1.0.72  observed notice: canonical.com/repro/notice-1 in workload",
+        )
+    )
+
+    outcome, reason = classify(hypothesis, surface, run)
+
+    assert outcome == Outcome.REPRODUCED_POSITIVE_SIGNAL_ABSENT
+    assert outcome in COMMENT_OUTCOMES
+    assert "control" in reason

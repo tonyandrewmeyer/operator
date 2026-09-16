@@ -654,3 +654,52 @@ def test_fallback_to_template_prefixes_exactly_once():
     got = Composer(llm).compose(hyp, issue, run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
     assert got.count(AUTOMATION_PREFIX) == 1
     assert got.startswith(AUTOMATION_PREFIX + "\n\n")
+
+
+def test_template_versions_line_includes_observed_ops_version_when_present():
+    """`spike-step-5/first-dispatch/RESULT.md` §6.1: `charmcraft pack`
+    resolves `ops~=3.8` from PyPI inside its own managed LXD instance, so the
+    `ops` a verdict was produced on is not the checked-out tree and is not
+    what `repo=` names either -- `repo=` is the extraction's pin, usually
+    nothing. Disclosed for the same reason `observed_juju` is."""
+    hyp = Hypothesis(
+        issue_number=3,
+        in_scope=True,
+        moving_parts=MovingParts(substrate="k8s", base="ubuntu@24.04"),
+        commands=["true"],
+        expected="passes",
+        observed="fails",
+        confidence="medium",
+    )
+    run = RunResult(
+        hypothesis_number=3,
+        branch="k8s-scratch",
+        commands=[CommandResult(command="true", exit_code=0)],
+        observed_juju_version="4.0.14-genericlinux-amd64",
+        observed_ops_version="3.8.2",
+    )
+    issue = Issue(number=3, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator")
+    body = compose_template(hyp, issue, run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
+    assert (
+        "Versions: repo=unpinned, juju=unpinned, base=ubuntu@24.04, substrate=k8s, "
+        "observed_juju=4.0.14-genericlinux-amd64, observed_ops=3.8.2" in body
+    )
+
+
+def test_template_versions_line_omits_observed_ops_version_when_absent():
+    """A branch that packs no charm has no pack log to read, and an
+    unparseable one gives `None` -- either way the line must not claim an
+    "observed_ops=" value nobody measured."""
+    hyp = Hypothesis(
+        issue_number=3,
+        in_scope=True,
+        moving_parts=MovingParts(substrate="none", base="ubuntu@24.04"),
+        commands=["uv venv"],
+        expected="passes",
+        observed="fails",
+        confidence="medium",
+    )
+    run = RunResult(hypothesis_number=3, branch="none", commands=[CommandResult(command="uv venv", exit_code=0)])
+    issue = Issue(number=3, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator")
+    body = compose_template(hyp, issue, run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
+    assert "observed_ops=" not in body

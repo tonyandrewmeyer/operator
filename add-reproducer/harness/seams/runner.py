@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -43,6 +44,37 @@ UNIT_READY_POLLS = UNIT_READY_TIMEOUT_S // UNIT_READY_POLL_INTERVAL_S
 # `juju deploy` will collide with an application still tearing down.
 APP_REMOVAL_POLLS = 60
 APP_REMOVAL_POLL_INTERVAL_S = 5
+
+# Bounded poll for the control's own signal to become visible in `juju status`.
+#
+# The control is a `pebble notify` and a `juju status` read, and until
+# 2026-09-16 they were joined by a bare `;` with nothing in between -- the one
+# step in the sequence that needs the cluster to catch up and did not wait for
+# it. `spike-step-5/first-dispatch/RESULT.md` §6.5 measured the latency that
+# races: the stimulus's `juju ssh` returned at ~22:06:15.76, the charm logged
+# the surface firing at 22:06:15, the hook operation completed at 22:06:16 and
+# `juju status` read the new message at ~22:06:16.20. So notify-to-visible is
+# under a second and the control's read began roughly half a second after its
+# own notify -- the same order of magnitude, which is a race rather than a
+# margin.
+#
+# No run has ever lost it, and none could have: rung 5 reads the control only
+# when `expected_signal` is *absent* from the main run, and on every run to
+# date it was present. That is also what makes losing it expensive. The only
+# path where the control is load-bearing is
+# `REPRODUCED_POSITIVE_SIGNAL_ABSENT`, and a read that lands too early there
+# turns a comment-worthy outcome into a silent `DID_NOT_REPRODUCE` whose
+# stated reason -- "no control confirmed the observer works at all" -- is the
+# exact opposite of what happened.
+#
+# Two minutes against a sub-second measured latency, which is the posture the
+# other polls in this module already take (`UNIT_READY_TIMEOUT` is 15m against
+# a 20.5s observation): the control is the last step in the sequence, so the
+# cost of waiting is wall-clock nothing else is queued behind, and the cost of
+# not waiting is a wrong verdict.
+CONTROL_SIGNAL_TIMEOUT_S = 2 * 60
+CONTROL_SIGNAL_POLL_INTERVAL_S = 5
+CONTROL_SIGNAL_POLLS = CONTROL_SIGNAL_TIMEOUT_S // CONTROL_SIGNAL_POLL_INTERVAL_S
 
 # Every juju command in a scratch sequence names its controller and model
 # explicitly. Nothing did before, so each ran against whatever `juju switch`
@@ -85,6 +117,15 @@ STEP_TIMEOUTS_S = {
     "cleanup": APP_REMOVAL_POLLS * APP_REMOVAL_POLL_INTERVAL_S + 60,
     "deploy": 15 * 60,
     "wait": UNIT_READY_TIMEOUT_S + 60,
+    # `control` polls for its own signal, so the rule `wait` is listed here
+    # for applies to it too: this budget has to outlast the timeout embedded
+    # in the command, or the inner one is dead code and a slow-but-working
+    # control comes back as `timed out after 300s` instead. Doubled rather
+    # than given a flat margin because each iteration of the poll spends two
+    # `juju status` calls of its own -- one resolving the unit name, one
+    # reading it -- so the loop's real wall clock runs ahead of the sleep
+    # budget it is written to, and by a factor rather than a constant.
+    "control": 2 * CONTROL_SIGNAL_TIMEOUT_S + 60,
 }
 
 # Steps that have to succeed before anything after them means anything.
@@ -184,6 +225,54 @@ def _observed_juju_version() -> str | None:
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+# The `ops` version `charmcraft pack` actually resolved into the scratch
+# charm, read out of the pack step's own log.
+#
+# `spike-step-5/first-dispatch/RESULT.md` §6.1: the scratch charm's
+# `pyproject.toml` pins `ops~=3.8`, and `charmcraft pack` resolves that from
+# PyPI inside its own managed LXD instance, so the `ops` in the checked-out
+# tree is never under test. The first dispatch packed `ops==3.8.2` and that
+# fact survived only as one line of charmcraft's stderr --
+#
+#     :: + ops==3.8.2
+#
+# -- which nothing read. `_DEFAULT_JUJU_CHANNEL`'s comment states the
+# principle for juju: "a reproduction on a version the reporter did not
+# mention is disclosed rather than hidden", honoured by
+# `RunResult.observed_juju_version`. The library the issue is actually *about*
+# had no equivalent; this is it.
+#
+# Requiring the literal `ops==` is already enough to ignore the
+# `ops-scenario==8.8.0` and `ops-testing==...` lines that sit next to it in
+# the same log. The preceding `(?<![\w.-])` covers the case that requirement
+# does not: a package whose *name ends in* `ops` (`charmops==1.2.3`) has
+# `ops==` as a substring, and without the lookbehind its version would be
+# reported as the packed `ops`.
+_PACKED_OPS_VERSION_RE = re.compile(r"(?<![\w.\-])ops==(?P<version>[A-Za-z0-9][\w.!+\-]*)")
+
+
+def _packed_ops_version(commands: list[CommandResult]) -> str | None:
+    """Best-effort `ops` version from the `pack` step's captured output
+    (`RunResult.observed_ops_version` -- see that field's docstring for why it
+    exists).
+
+    Fails soft in every direction `_observed_juju_version()` does, and for the
+    same reason: no `pack` step in this branch, no captured output, or nothing
+    in the log that parses, all give `None` rather than raising. A version
+    string nobody could read must not abort a run that otherwise completed.
+
+    The **last** match wins. uv prints a package's removal before its addition
+    (`- ops==3.8.1` then `+ ops==3.8.2`) when it replaces one, so the last
+    `ops==` in the log is the one that ended up in the charm; the first would
+    name the version that was thrown away.
+    """
+    pack = next((c for c in commands if c.step == "pack"), None)
+    if pack is None:
+        return None
+    matches = _PACKED_OPS_VERSION_RE.findall(f"{pack.stdout or ''}\n{pack.stderr or ''}")
+    return matches[-1] if matches else None
 
 
 class RunnerSeam(Protocol):
@@ -454,6 +543,69 @@ def _wait_command(target: str, app: str, unit: str = "", container: str | None =
     )
 
 
+def _control_signal_command(target: str, unit: str, expected_signal: str) -> str:
+    """Poll `juju status` until `expected_signal` is visible, print the status
+    the classifier will read, and fail loudly if it never turns up.
+
+    Appended to the control's `pebble notify` so the control waits for its own
+    effect instead of racing it -- see `CONTROL_SIGNAL_TIMEOUT_S` for the
+    measurement that motivated this and for what losing the race costs.
+
+    Same shape as `_wait_command()`, deliberately: a bounded `for _ in
+    $(seq 1 N)` loop that breaks on the condition, then a re-check that
+    `echo`es to stderr and `exit 1`s when the condition never held. This is
+    the module's one polling idiom and the control now uses it rather than a
+    second one of its own.
+
+    Three things it has to do at once, which is why the tail is not simply the
+    loop's own check:
+
+    - **Print the status.** `classifier.classify()`'s rung 5 matches
+      `expected_signal` against the control's captured stdout/stderr, and
+      `composer._control_output()` renders that same text into the comment as
+      the evidence for the claim. A `grep -q` alone would poll correctly and
+      hand both of them an empty control.
+    - **Fail when it times out.** A control that never fired is not a control,
+      and rung 5's whole job is telling "the bug is real" apart from "the
+      observer is broken". Exiting 0 on a timed-out poll would report the
+      second as the first. `control` is not in `PREREQUISITE_STEPS`, so the
+      non-zero exit records itself and stops nothing -- it is the last step in
+      the sequence anyway.
+    - **Agree with the classifier about what "the signal appeared" means.**
+      The poll greps for the same literal string rung 5 substring-matches, so
+      a poll that passes and a classifier that matches cannot disagree.
+      `grep -F` (fixed string, never a pattern) and `shlex.quote` for the same
+      reason: `expected_signal` is free text an LLM wrote, so it is data here
+      and not shell or regex.
+
+    The final read is captured once into `$status`, printed, and then grepped
+    from that same variable rather than re-read. So `exit 0` and "the printed
+    text contains the signal" are one fact and not two, and the classifier's
+    exit-code check and its substring check cannot reach opposite conclusions
+    about the same control. It also keeps `_unit_expr()`'s inline `$(juju
+    status --format=json | python3 ...)` substitution to two occurrences in
+    the step instead of three, on a command string that is already long
+    enough to be read carefully rather than skimmed.
+    """
+    signal = shlex.quote(expected_signal)
+    read = f"juju status -m {target} {unit}"
+    # The timeout message says "the unit status", not "juju status":
+    # `test_scratch_run_isolation.py` splits a planned command on `;` and
+    # asserts every fragment mentioning `juju ` also names the controller and
+    # model, and prose in an `echo` is indistinguishable from a command to
+    # that check. Nothing subtle is being worked around -- the phrasing just
+    # has to stay out of the way of a test that is guarding something else.
+    return (
+        f"for _ in $(seq 1 {CONTROL_SIGNAL_POLLS}); do "
+        f"{read} 2>/dev/null | grep -qF -- {signal} && break; "
+        f"sleep {CONTROL_SIGNAL_POLL_INTERVAL_S}; done; "
+        f"status=$({read} 2>&1); printf '%s\\n' \"$status\"; "
+        f"printf '%s\\n' \"$status\" | grep -qF -- {signal} || "
+        f"{{ echo 'timed out after {CONTROL_SIGNAL_TIMEOUT_S}s waiting for the control signal' {signal} "
+        f"'to appear in the unit status' >&2; exit 1; }}"
+    )
+
+
 def _scratch_sequence(
     hypothesis: Hypothesis, surface: SurfaceInference | None, context: dict, *, prepare_flag: str
 ) -> list[PlannedCommand]:
@@ -603,7 +755,15 @@ def _scratch_sequence(
             pebble_command=stimulus_pebble_command,
             model=target,
         )
-        steps.append(PlannedCommand("control", f"{control_command}; juju status -m {target} {unit}"))
+        # The status read polls for the signal rather than following the
+        # notify immediately -- see `_control_signal_command()` and
+        # `CONTROL_SIGNAL_TIMEOUT_S` for the race this closes.
+        steps.append(
+            PlannedCommand(
+                "control",
+                f"{control_command}; {_control_signal_command(target, unit, surface.expected_signal)}",
+            )
+        )
 
     return steps
 
@@ -851,6 +1011,13 @@ class SubprocessRunnerSeam:
             # recording a host-wide `juju version` there would attribute a
             # substrate to a run that didn't ask for one.
             observed_juju_version=_observed_juju_version(),
+            # Same scoping as `observed_juju_version` above, for the same
+            # reason: only the scratch branches pack a charm, so only they
+            # have a pack log to read a version out of. `k8s-clone` runs the
+            # reporter's own commands against a checkout and `none` never
+            # packs at all, and attributing an `ops` version to either would
+            # name a library neither of them resolved.
+            observed_ops_version=_packed_ops_version(commands),
         )
 
     @staticmethod

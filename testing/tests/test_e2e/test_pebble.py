@@ -3317,3 +3317,141 @@ def test_charm_notify_reaches_the_output_state():
     assert [notice.key for notice in state_out.get_container('foo').notices] == [
         'example.com/charm-said'
     ]
+
+
+def _ordering_cycle_layer() -> ops.pebble.Layer:
+    """ant/bee ordered after each other (Real-Pebble probe #12,
+    WORKLOAD-MOCK-DESIGN.md §39.1; the shape the daemon rejected with
+    `400 Bad Request: services in before/after loop: ant, bee`).
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'bee': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'before': ['ant'],
+            },
+            'ant': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'before': ['bee'],
+            },
+        },
+    })
+
+
+def _self_edge_layer() -> ops.pebble.Layer:
+    """solo declares itself in its own `after` (probe #12 §39.2).
+
+    Real Pebble accepts this and starts the service normally, which is why
+    it is a separate fixture from `_ordering_cycle_layer` rather than
+    another case of it.
+    """
+    return ops.pebble.Layer({
+        'services': {
+            'solo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'after': ['solo'],
+            },
+        },
+    })
+
+
+def test_add_layer_rejects_an_ordering_cycle():
+    """`add_layer` refuses a layer that puts the plan in a before/after loop.
+
+    Status and message are the daemon's own, read off the unix socket in
+    Real-Pebble probe #12 (WORKLOAD-MOCK-DESIGN.md §39.1).
+    """
+    container = Container('foo', can_connect=True)
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(RuntimeError) as excinfo:
+            workload.pebble.add_layer('cyc', _ordering_cycle_layer())
+        assert '400 Bad Request: services in before/after loop: ant, bee' in str(excinfo.value)
+
+
+def test_add_layer_rejecting_a_cycle_leaves_the_plan_alone():
+    """A refused layer does not land, matching `pebble plan` after a rejection.
+
+    Probe #12 §39.1: the three rejected layers never appeared in the plan.
+    """
+    container = Container('foo', can_connect=True)
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(RuntimeError):
+            workload.pebble.add_layer('cyc', _ordering_cycle_layer())
+        assert workload.pebble.get_plan().services == {}
+        # And the container is still usable afterwards, rather than wedged.
+        workload.pebble.add_layer('ok', _self_edge_layer())
+        assert set(workload.pebble.get_plan().services) == {'solo'}
+
+
+def test_ordering_cycle_in_a_hand_written_plan_is_rejected():
+    """A cyclic `Container(layers=...)` is refused too, not just `add_layer`.
+
+    Real Pebble checks at plan load as well as at layer-add time
+    (WORKLOAD-MOCK-DESIGN.md §28.3), and a plan written straight into state
+    never goes through `add_layer`.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _ordering_cycle_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(RuntimeError) as excinfo:
+            workload.pebble.start_services(['ant'])
+        assert 'services in before/after loop: ant, bee' in str(excinfo.value)
+
+
+def test_self_edge_is_not_an_ordering_cycle():
+    """A service in its own `after` is accepted and starts (probe #12 §39.2).
+
+    The one place this mock's cycle check differs from a textbook one, and
+    it differs because Pebble does.
+    """
+    container = Container('foo', can_connect=True, layers={'base': _self_edge_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        workload.pebble.start_services(['solo'])
+        assert workload.get_service('solo').current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def test_ordering_cycle_names_only_the_cycle_members():
+    """Free services either side of a cycle are not named in the error.
+
+    Probe #12 §39.1 added `free1`/`free2` beside a `bravo`/`zulu` loop and
+    the daemon reported only `bravo, zulu`.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'free1': {'override': 'replace', 'command': '/bin/sleep 1000'},
+            'zulu': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['bravo'],
+            },
+            'bravo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['zulu'],
+            },
+            'free2': {'override': 'replace', 'command': '/bin/sleep 1000'},
+        },
+    })
+    container = Container('foo', can_connect=True)
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(RuntimeError) as excinfo:
+            workload.pebble.add_layer('cyc', layer)
+        message = str(excinfo.value)
+        assert 'services in before/after loop: bravo, zulu' in message
+        assert 'free1' not in message
+        assert 'free2' not in message

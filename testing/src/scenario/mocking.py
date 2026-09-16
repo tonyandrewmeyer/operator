@@ -1358,6 +1358,78 @@ class _MockPebbleClient(_TestingPebbleClient):
         lanes.sort(key=lambda lane: order_index[lane[0]])
         return lanes
 
+    @staticmethod
+    def _ordering_cycle(known_services: dict[str, pebble.Service]) -> list[str]:
+        """Return the services caught in a ``before``/``after`` cycle, sorted.
+
+        Empty when the plan is acyclic. Real Pebble refuses a plan whose
+        layers combine into an ordering cycle -- at ``add_layer`` time
+        (HTTP 400, Real-Pebble probe #12, WORKLOAD-MOCK-DESIGN.md §39) and
+        again at plan load when the daemon starts (probe #8, §28.3). It
+        names only the services actually in the cycle, alphabetically, and
+        leaves the plan unchanged.
+
+        **A self-edge is not a cycle here**, because it is not one for
+        Pebble either: a service declaring itself in its own ``after`` is
+        accepted and starts normally (§39.2). That is the one shape this
+        differs from a textbook cycle check on, and it is measured rather
+        than assumed.
+
+        This is ordering only. A ``requires`` cycle is legal and works
+        (§28.3) -- membership is a set closure, which is order-free -- and
+        is handled by ``_service_requires_closure``'s visited-set walk, not
+        here.
+        """
+        # Kahn again, over the whole plan rather than one request's names.
+        # Whatever cannot be drained is exactly the cycle members plus
+        # anything downstream of them, which is what Pebble reports too.
+        names = set(known_services)
+        in_degree: dict[str, int] = dict.fromkeys(names, 0)
+        successors: dict[str, set[str]] = {name: set() for name in names}
+
+        def add_edge(first: str, second: str) -> None:
+            if second not in successors[first]:
+                successors[first].add(second)
+                in_degree[second] += 1
+
+        for name in names:
+            service = known_services[name]
+            for other in service.before:
+                if other in names and other != name:
+                    add_edge(name, other)
+            for other in service.after:
+                if other in names and other != name:
+                    add_edge(other, name)
+
+        ready = [name for name, degree in in_degree.items() if degree == 0]
+        drained = 0
+        while ready:
+            name = ready.pop()
+            drained += 1
+            for successor in successors[name]:
+                in_degree[successor] -= 1
+                if in_degree[successor] == 0:
+                    ready.append(successor)
+
+        if drained == len(names):
+            return []
+        return sorted(name for name, degree in in_degree.items() if degree > 0)
+
+    def _check_ordering_cycle(self, known_services: dict[str, pebble.Service]) -> None:
+        """Raise if ``known_services`` contains a ``before``/``after`` cycle.
+
+        The message and status are the daemon's own, measured over the unix
+        socket in probe #12 (§39.1): ``400 Bad Request`` with
+        ``services in before/after loop: <names>``. Raised as ``RuntimeError``
+        with the status prefixed, which is how every other add_layer-time
+        rejection in this mock is reported.
+        """
+        cycle = self._ordering_cycle(known_services)
+        if cycle:
+            raise RuntimeError(
+                f'400 Bad Request: services in before/after loop: {", ".join(cycle)}',
+            )
+
     def _service_dependency_order(
         self,
         names: Iterable[str],
@@ -1402,11 +1474,11 @@ class _MockPebbleClient(_TestingPebbleClient):
         for name in pending:
             service = known_services[name]
             for other in service.before:
-                if other not in pending:
+                if other not in pending or other == name:
                     continue
                 add_edge(other, name) if reverse else add_edge(name, other)
             for other in service.after:
-                if other not in pending:
+                if other not in pending or other == name:
                     continue
                 add_edge(name, other) if reverse else add_edge(other, name)
 
@@ -1422,12 +1494,16 @@ class _MockPebbleClient(_TestingPebbleClient):
                     heapq.heappush(ready, successor)
 
         if len(ordered) < len(pending):
-            # A dependency cycle among the requested services. Real Pebble
-            # rejects a plan whose layers combine into one of these, so
-            # nothing in this mock should be able to construct this shape
-            # today -- fall back to alphabetical for whatever's left rather
-            # than hang, in case that changes.
-            ordered.extend(sorted(pending.difference(ordered)))
+            # Unreachable: `_check_ordering_cycle` rejects a cyclic plan
+            # before any of this runs, on the same two paths real Pebble
+            # rejects one (Real-Pebble probe #12, WORKLOAD-MOCK-DESIGN.md
+            # §39). Self-edges, which Pebble accepts, are skipped when the
+            # graph is built above rather than left to land here.
+            raise AssertionError(
+                'ordering cycle reached _service_dependency_order: '
+                f'{sorted(pending.difference(ordered))}. This should have been '
+                'rejected at plan load; _check_ordering_cycle has a gap.',
+            )
         return ordered
 
     def _start_with_behaviours(self, services: list[str], kind: str = 'start') -> pebble.ChangeID:
@@ -1756,7 +1832,36 @@ class _MockPebbleClient(_TestingPebbleClient):
         combine: bool = False,
     ):
         super().add_layer(label, layer, combine=combine)
+        try:
+            self._check_ordering_cycle(self._render_services())
+        except RuntimeError:
+            # Pebble leaves the plan untouched when it refuses a layer
+            # (probe #12 §39.1: the rejected services never appear in
+            # `pebble plan`), so undo the parent's mutation before the
+            # caller sees the error. `super().add_layer` either inserts
+            # `label` or merges into an existing one; only the insert case
+            # can introduce an edge here, because a merge that created a
+            # cycle would have to add `before`/`after` to a layer that is
+            # already in `self._layers`, which is the same insert from this
+            # dict's point of view.
+            self._layers.pop(label, None)
+            raise
         self._update_state_check_infos()
+
+    def _render_services(self) -> dict[str, pebble.Service]:
+        """The combined plan, refusing to render one with an ordering cycle.
+
+        This is the mock's plan load. Real Pebble checks twice -- once when
+        a layer is added and once when the daemon reads the layer directory
+        at startup (§28.3) -- and only the first has an `add_layer` call
+        behind it. A `Container(layers=...)` built directly in a test never
+        goes through `add_layer`, so without this the second check would
+        have no counterpart and a hand-written cyclic plan would reach
+        `_service_dependency_order`.
+        """
+        services = super()._render_services()
+        self._check_ordering_cycle(services)
+        return services
 
     def start_checks(self, names: list[str]) -> list[str]:
         started = super().start_checks(names)

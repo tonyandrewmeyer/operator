@@ -65,8 +65,10 @@ jobs:
           MATRIX_TEST: ${{ matrix.test }}
         # A backstop for Juju 4 getting stuck while destroying the model. The
         # tracing tests each deploy the tempo stack into their own fresh
-        # model, so that file needs longer than the others.
-        timeout-minutes: ${{ matrix.test == 'test/integration/test_tracing.py' && 40 || 20 }}
+        # model, so that file needs longer than the others. test_secrets.py
+        # also timed out at the default 20 minutes on both 3/stable and
+        # 4.0/stable in #2484, so give it the same longer budget.
+        timeout-minutes: ${{ contains(fromJson('["test/integration/test_tracing.py","test/integration/test_secrets.py"]'), matrix.test) && 40 || 20 }}
 
   open-issue-on-failure-if-scheduled:
     if: ${{ failure() && github.event_name == 'schedule' }}

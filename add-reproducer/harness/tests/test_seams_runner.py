@@ -1072,3 +1072,140 @@ def test_run_k8s_clone_does_not_record_a_packed_ops_version(monkeypatch):
     )
 
     assert result.observed_ops_version is None
+
+
+# --- _KNOWN_JUJU_TRACKS: every entry has to be buildable into a channel ---
+#
+# `spike-step-5/first-dispatch/RESULT.md` §3 measured the store and found that
+# `4.1`, alone of the five entries the tuple then carried, publishes no
+# `stable` risk -- so `_juju_channel()` built `4.1/stable` for any `4.1*` pin
+# and `prepare` failed on a channel that has never existed. The tuple's own
+# docstring claims the opposite property, and nothing asserted it.
+
+
+def test_every_known_juju_track_has_a_populated_stable_risk():
+    """The invariant the tuple is *for*. `_juju_channel()` only ever appends
+    `/stable`, so an entry whose `stable` risk is empty is worse than an
+    absent one: absent falls back safely, present is built into a 404."""
+    assert set(seams.runner._KNOWN_JUJU_TRACKS) == set(seams.runner._KNOWN_JUJU_TRACK_STABLE_VERSIONS)
+    for track, version in seams.runner._KNOWN_JUJU_TRACK_STABLE_VERSIONS.items():
+        assert version, f"{track} is listed with no stable version behind it"
+
+
+@pytest.mark.parametrize("pin", ["4.1", "4.1.0", "4.1-beta1"])
+def test_prepare_channel_falls_back_for_a_track_with_no_stable_risk(pin):
+    """`4.1` exists as a snap track and publishes `beta` and `edge` only
+    (store, 2026-09-17). Falling back to the default costs one version
+    segment; `4.1/stable` costs the whole runner slot and says nothing about
+    the bug -- `prepare` is `commands[0]`, so a non-zero exit lands on rung 0
+    (`INFRASTRUCTURE_FAILED`), which composes nothing."""
+    assert _prepare_command(pin) == "sudo concierge prepare --juju-channel 4.0/stable -p k8s"
+
+
+def test_a_four_one_pin_gets_the_socket_of_the_juju_it_actually_installs():
+    """The other half of `test_pin_on_a_retired_track_...`: dropping `4.1`
+    from the tuple moves the *socket* lookup too, because it is keyed on the
+    resolved track rather than on the pin. Both halves now say `4.0`."""
+    hyp = _hypothesis("k8s", juju_version="4.1")
+    assert _juju_track(hyp) == "4.0"
+    assert (
+        as_user_in_container_command(
+            pebble_command="pebble notify canonical.com/x/y",
+            user="_daemon_",
+            unit="i2639/0",
+            container="workload",
+            juju_track=_juju_track(hyp),
+        ).count("/charm/container/pebble.socket")
+        == 1
+    )
+
+
+# --- resolve_symbol: absence of evidence is not evidence of absence ---
+#
+# `runner_stage.is_stale()`'s second trigger skips a hypothesis outright and
+# composes nothing, with no downstream appeal, so a `False` here has to mean
+# "this API surface is gone". It used to also mean "nothing here imports",
+# which on a GHA runner is true of every `ops.*` anchor -- the workflow runs
+# the harness under `uv run` in a venv holding pyyaml and pytest and no `ops`.
+# These run the real probe in a real subprocess: the whole behaviour is an
+# interpreter's import machinery and an exit code, and a mocked
+# `subprocess.run` can say nothing about either.
+
+
+def test_resolve_symbol_resolves_a_real_dotted_path():
+    """A module prefix plus attribute segments, which is the shape every
+    anchor has. `os.path` imports, `join` is on it."""
+    assert SubprocessRunnerSeam().resolve_symbol("os.path.join", {})
+
+
+def test_resolve_symbol_reports_a_symbol_that_is_gone():
+    """The one case that legitimately trips the gate: the package is right
+    here and the attribute path is not on it."""
+    assert not SubprocessRunnerSeam().resolve_symbol("os.path.no_such_function_here", {})
+
+
+def test_resolve_symbol_abstains_when_no_prefix_imports_at_all():
+    """Nothing importable means nothing was asked, not that the symbol has
+    gone away. This is the GHA case: `ops` is not in the harness's venv, so
+    reported as absence it skipped every anchor-carrying hypothesis before it
+    could reach a runner."""
+    assert SubprocessRunnerSeam().resolve_symbol("not_a_real_package_2f9c1a.mod.Thing", {})
+
+
+def test_resolve_symbol_abstains_on_a_partially_importable_prefix():
+    """`os` imports and `os.not_a_module` does not, so no prefix longer than
+    `os` is importable -- but `os` itself is, and `not_a_module` is not an
+    attribute of it. That is a real absence, not an abstention: the
+    distinction is about whether anything answered, not about how many
+    segments matched."""
+    assert not SubprocessRunnerSeam().resolve_symbol("os.not_a_module_or_attribute", {})
+
+
+def test_resolve_symbol_abstains_when_the_probe_cannot_run(monkeypatch):
+    """No interpreter on PATH, or one that hung. Treated as data rather than
+    as a crash, the same way `_observed_juju_version()` treats a missing
+    `juju` -- and abstaining rather than skipping, because a gate that cannot
+    look has learned nothing."""
+
+    def boom(args, **kwargs):
+        raise OSError("no python3 here")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert SubprocessRunnerSeam().resolve_symbol("ops.model.Model.get_relation", {})
+
+    def hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=30)
+
+    monkeypatch.setattr(subprocess, "run", hang)
+    assert SubprocessRunnerSeam().resolve_symbol("ops.model.Model.get_relation", {})
+
+
+def test_resolve_symbol_reads_only_the_absent_exit_code():
+    """`SystemExit(2)` from the probe is "could not tell", and the wrapper has
+    to read the code rather than `returncode == 0`. Pinned separately from the
+    probe itself because the two halves are what got out of step: the old
+    probe collapsed both non-resolving cases onto exit 1."""
+    seam = SubprocessRunnerSeam()
+    codes = {seam._SYMBOL_RESOLVED, seam._SYMBOL_ABSENT, seam._SYMBOL_UNKNOWABLE}
+    assert len(codes) == 3
+
+    for code in codes:
+
+        def fake(args, _code=code, **kwargs):
+            return subprocess.CompletedProcess(args=args, returncode=_code, stdout=b"", stderr=b"")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(subprocess, "run", fake)
+            assert SubprocessRunnerSeam().resolve_symbol("a.b.C", {}) is (code != seam._SYMBOL_ABSENT)
+
+
+def test_resolve_symbol_abstains_when_the_package_raises_on_import(tmp_path, monkeypatch):
+    """A package whose import blows up (a missing transitive dependency is the
+    common one -- `import ops` from the repo root dies on `import websocket`)
+    has told us nothing about the symbol. It matters that the probe catches
+    it: an unhandled exception in `python3 -c` exits 1, which is the code that
+    means "gone"."""
+    (tmp_path / "explodes_on_import_4b7e.py").write_text("raise RuntimeError('nope')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+
+    assert SubprocessRunnerSeam().resolve_symbol("explodes_on_import_4b7e.Thing", {})

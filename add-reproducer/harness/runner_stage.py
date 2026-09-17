@@ -38,6 +38,14 @@ def is_stale(hypothesis: Hypothesis, issue: Issue, runner_seam: RunnerSeam, cont
     Both triggers yield the same `skipped_stale` verdict -- distinct from
     `did_not_reproduce` so Approach §6 never composes a "could not
     reproduce" comment for either case.
+
+    "Almost certainly" is the whole of the second trigger's licence. It is a
+    silent skip with no downstream appeal, so `resolve_symbol()` returning
+    `False` has to be a positive finding that the symbol is gone; a seam that
+    could not look answers `True` and the hypothesis goes to the runner. See
+    `SubprocessRunnerSeam.resolve_symbol()` for the case where that
+    distinction was not made and cost every anchor-carrying hypothesis on
+    GHA.
     """
     mp = hypothesis.moving_parts
     if mp.repo_version is None and issue.state == "CLOSED":

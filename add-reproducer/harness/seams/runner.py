@@ -200,8 +200,13 @@ _PEBBLE_SOCKET_BY_JUJU_TRACK = {
 def _pebble_socket_path(juju_track: str) -> str:
     """Look up `juju_track` (a `_juju_track()` result, e.g. `"3.6"` or
     `"4.0"`) against `_PEBBLE_SOCKET_BY_JUJU_TRACK`, falling back to the
-    major alone (so an unlisted `"4.1"` still hits the `"4"` entry) and then
-    to `_PEBBLE_SOCKET_LEGACY` for anything unmeasured."""
+    major alone (so an unlisted `"4.2"` still hits the `"4"` entry) and then
+    to `_PEBBLE_SOCKET_LEGACY` for anything unmeasured.
+
+    The major fallback is not dead code even though `_juju_track()` can only
+    return a `_KNOWN_JUJU_TRACKS` entry or the default: this is also called
+    with a track a caller chose, and `as_user_in_container_command()` takes
+    one as a plain argument."""
     if juju_track in _PEBBLE_SOCKET_BY_JUJU_TRACK:
         return _PEBBLE_SOCKET_BY_JUJU_TRACK[juju_track]
     major = juju_track.split(".", 1)[0]
@@ -277,9 +282,16 @@ def _packed_ops_version(commands: list[CommandResult]) -> str | None:
 
 class RunnerSeam(Protocol):
     def resolve_symbol(self, symbol_anchor: str, context: dict) -> bool:
-        """True iff `symbol_anchor` (e.g. "ops.model.Model.get_relation")
-        resolves against the target repo's checked-out `main` — the
-        Approach §4 skip-when-stale gate's second trigger."""
+        """False only when `symbol_anchor` (e.g.
+        "ops.model.Model.get_relation") is positively *absent* from the
+        target repo's checked-out `main` — the Approach §4 skip-when-stale
+        gate's second trigger, and the only thing that trips it.
+
+        True when the symbol resolves, and also true when the implementation
+        cannot tell (nothing importable to ask, no interpreter, a probe that
+        hung). A `False` here skips the hypothesis outright and composes
+        nothing, so it has to mean "this API surface is gone", never "I did
+        not look"."""
         ...
 
     def run(
@@ -358,15 +370,48 @@ def _juju_version_key(hypothesis: Hypothesis, default: str = "4") -> str:
     return f"{major}.{minor}" if minor else major
 
 
-# Snap tracks the juju snap actually publishes, so a pin can only ever select
-# a channel that exists. Source: `canonical/operator`'s own CI, which drives
-# concierge with `--juju-channel` across `3/stable`, `4.0/stable`, `4.0/edge`
-# and `4.1/edge` (`.github/workflows/integration.yaml`) plus `2.9/stable` and
-# `3/stable` in `smoke.yaml`. Same discipline as
-# `_PEBBLE_SOCKET_BY_JUJU_VERSION` above: only entries with evidence behind
-# them, and an unlisted track falls back rather than being guessed into a
-# `prepare` that fails on a channel the snap has never had.
-_KNOWN_JUJU_TRACKS = ("2.9", "3", "3.6", "4.0", "4.1")
+# Snap tracks the juju snap actually publishes **at the `stable` risk**, so a
+# pin can only ever select a channel that exists. `_juju_channel()` appends
+# `/stable` and nothing else, so a track is only usable here if it has a
+# populated `stable`; listing one that does not is worse than not listing it,
+# because an unlisted track falls back safely and a listed one is built into
+# a channel that 404s.
+#
+# Source: the snap store itself, `curl -sH 'Snap-Device-Series: 16'
+# https://api.snapcraft.io/v2/snaps/info/juju`, checked 2026-09-17 (69
+# channel-map entries, `default-track: 3`). Tracks with a populated `stable`,
+# in aggregate and on `amd64` specifically: `2.9` (2.9.60), `3` (3.6.28),
+# `3.6` (3.6.28), `4` (4.0.14) and `4.0` (4.0.14). `4.1` publishes `beta`
+# (4.1-beta1) and `edge` (4.1-beta3) only; `4.2` and `latest` publish `edge`
+# only.
+#
+# `4.1` was listed here until 2026-09-17 and was the one entry of the five
+# that could not be built into a channel that exists -- so every `4.1*` pin
+# produced `--juju-channel 4.1/stable`, `prepare` exited non-zero on
+# `commands[0]`, and the run ended at rung 0 (`INFRASTRUCTURE_FAILED`, not in
+# `COMMENT_OUTCOMES`): a whole runner slot spent, and silence.
+# `spike-step-5/first-dispatch/RESULT.md` §3 measured that, and it is exactly
+# the failure the fallback already prevents for `4.2` and `latest` *because*
+# they are absent from this tuple. `canonical/operator`'s own CI does drive
+# concierge with `4.1/edge` (`.github/workflows/integration.yaml`), which is
+# why the track looked well-attested -- but `edge` is not the risk this
+# constant feeds.
+#
+# Same discipline as `_PEBBLE_SOCKET_BY_JUJU_VERSION` above: only entries with
+# evidence behind them, and an unlisted track falls back rather than being
+# guessed into a `prepare` that fails on a channel the snap has never had.
+_KNOWN_JUJU_TRACKS = ("2.9", "3", "3.6", "4.0")
+
+# The tracks above, as the store reported them on 2026-09-17, paired with the
+# version each one's `stable` risk carried. Kept beside the tuple so
+# `test_every_known_juju_track_has_a_populated_stable_risk` can assert the two
+# agree: the check that `4.1` failed, and that nothing asserted before it.
+_KNOWN_JUJU_TRACK_STABLE_VERSIONS = {
+    "2.9": "2.9.60",
+    "3": "3.6.28",
+    "3.6": "3.6.28",
+    "4.0": "4.0.14",
+}
 
 # What `prepare` uses when the extraction pins nothing -- the common case per
 # PLAN.md Approach §3's step-2 finding.
@@ -820,34 +865,76 @@ class SubprocessRunnerSeam:
     sandbox -- see `tests/test_seams_runner.py` for what *is* covered
     (command sequencing with `subprocess.run` mocked)."""
 
+    #: `resolve_symbol()`'s probe exits with one of these. Three states, not
+    #: two, because "the symbol is gone" and "there is nothing here to ask"
+    #: are different facts and only the first one is evidence.
+    _SYMBOL_RESOLVED = 0
+    _SYMBOL_ABSENT = 1
+    _SYMBOL_UNKNOWABLE = 2
+
     def resolve_symbol(self, symbol_anchor: str, context: dict) -> bool:
         # Try progressively shorter module prefixes (import the longest
         # importable dotted prefix, then getattr() the remaining parts) --
         # `symbol_anchor` mixes module and attribute segments
         # ("ops.model.Model.get_relation") with no marker for where one
         # ends and the other begins.
+        #
+        # The probe distinguishes "no prefix imports at all" from "a prefix
+        # imports and the rest of the path is not on it", and only the second
+        # is reported as a symbol that has gone away. On a GHA runner the
+        # first is the *normal* case and says nothing about the target repo:
+        # the workflow runs this under `uv run` in `add-reproducer/harness`,
+        # whose venv holds pyyaml and pytest and no `ops` at all, so
+        # `import ops` fails there for every anchor any extraction can carry
+        # (measured directly, 2026-09-17,
+        # `spike-step-5/second-dispatch/RESULT.md` §2). Reported as absence,
+        # that turned `runner_stage.is_stale()`'s second trigger into "is
+        # `ops` importable here", which is always no -- so every
+        # anchor-carrying hypothesis was skipped as `skipped_stale` before
+        # reaching a runner, silently, whether or not its API surface still
+        # existed. The gate fires on evidence of absence; absence of evidence
+        # is not it.
+        #
+        # Both `except` clauses are broad on purpose. An unhandled exception
+        # in `python3 -c` exits **1**, which is the code that means "gone", so
+        # anything this script lets escape is read as a positive finding the
+        # script never made. A package that raises on import (a missing
+        # transitive dependency, an import-time side effect) says nothing
+        # about whether the symbol exists, and neither does a descriptor that
+        # raises from `getattr`.
         script = (
             "import importlib\n"
             f"parts = {symbol_anchor!r}.split('.')\n"
-            "resolved = False\n"
+            f"status = {self._SYMBOL_UNKNOWABLE}\n"
             "for i in range(len(parts), 0, -1):\n"
             "    try:\n"
             "        obj = importlib.import_module('.'.join(parts[:i]))\n"
-            "    except ImportError:\n"
+            "    except Exception:\n"
             "        continue\n"
             "    try:\n"
             "        for part in parts[i:]:\n"
             "            obj = getattr(obj, part)\n"
-            "        resolved = True\n"
+            f"        status = {self._SYMBOL_RESOLVED}\n"
             "    except AttributeError:\n"
-            "        resolved = False\n"
+            f"        status = {self._SYMBOL_ABSENT}\n"
+            "    except Exception:\n"
+            f"        status = {self._SYMBOL_UNKNOWABLE}\n"
             "    break\n"
-            "raise SystemExit(0 if resolved else 1)\n"
+            "raise SystemExit(status)\n"
         )
-        result = subprocess.run(
-            ["python3", "-c", script], capture_output=True, timeout=30, cwd=context.get("cwd")
-        )
-        return result.returncode == 0
+        try:
+            result = subprocess.run(
+                ["python3", "-c", script], capture_output=True, timeout=30, cwd=context.get("cwd")
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # No usable interpreter, or one that hung: the same "cannot tell"
+            # as an unimportable package, and treated the same way. Every
+            # other seam in this module treats infrastructure absence as data
+            # rather than as a crash (`_observed_juju_version()`), and this
+            # one used to be the exception -- it let the exception out of a
+            # gate whose whole job is to decide whether to skip.
+            return True
+        return result.returncode != self._SYMBOL_ABSENT
 
     def run(
         self,

@@ -184,3 +184,57 @@ def test_run_hypothesis_full_flow_2341_stops_at_gate():
     result = runner_stage.run_hypothesis(hyp, issue, None, _runner(), None, {})
     assert result.skipped_stale
     assert result.run_result is None
+
+
+def _anchored_hypothesis(anchor: str) -> Hypothesis:
+    return Hypothesis.from_dict(
+        1,
+        {
+            "in_scope": True,
+            "moving_parts": {"substrate": "none", "symbol_anchor": anchor},
+            "commands": [],
+            "expected": "",
+            "observed": "",
+            "confidence": "medium",
+        },
+    )
+
+
+def _open_issue() -> Issue:
+    return Issue(
+        number=1, title="t", body="", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator"
+    )
+
+
+class _AbstainingRunnerSeam:
+    """A seam that cannot answer -- what `SubprocessRunnerSeam` is on a GHA
+    runner for every `ops.*` anchor, because the harness's venv has no `ops`
+    in it. `resolve_symbol()`'s contract says that answers `True`."""
+
+    def resolve_symbol(self, symbol_anchor: str, context: dict) -> bool:
+        return True
+
+    def run(self, **kwargs):  # pragma: no cover - never reached in these tests
+        raise AssertionError("not called")
+
+
+def test_a_seam_that_cannot_resolve_the_anchor_does_not_skip():
+    """The gate is a silent skip with no appeal, so it fires on a positive
+    finding that the symbol is gone and on nothing else. Reported as absence,
+    "I could not look" skipped every anchor-carrying hypothesis on GHA before
+    it reached a runner -- `spike-step-5/second-dispatch/RESULT.md` §2."""
+    stale, reason = runner_stage.is_stale(
+        _anchored_hypothesis("ops.testing._runtime"), _open_issue(), _AbstainingRunnerSeam(), {}
+    )
+    assert not stale
+    assert reason is None
+
+
+def test_a_seam_that_finds_the_anchor_absent_still_skips():
+    """The other direction, so the fix above cannot be read as having removed
+    the trigger. `fixtures/symbols.json` records this anchor as absent."""
+    stale, reason = runner_stage.is_stale(
+        _anchored_hypothesis("ops.testing.scenario.Relation.relation_id"), _open_issue(), _runner(), {}
+    )
+    assert stale
+    assert "symbol_anchor" in reason

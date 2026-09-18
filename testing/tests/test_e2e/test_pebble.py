@@ -3455,3 +3455,207 @@ def test_ordering_cycle_names_only_the_cycle_members():
         assert 'services in before/after loop: bravo, zulu' in message
         assert 'free1' not in message
         assert 'free2' not in message
+
+
+def _add_layer_cycle_message(layer: ops.pebble.Layer) -> str:
+    """The rejection message `add_layer` gives for `layer`, or '' if accepted.
+
+    The seven shapes below are Real-Pebble probe #13's fresh-shape check
+    (WORKLOAD-MOCK-DESIGN.md §40.4/§40.5), and five of the seven ask the
+    same question of `add_layer` -- what, if anything, it names -- so the
+    scaffolding is shared and each test carries only its shape and its
+    measured answer.
+    """
+    container = Container('foo', can_connect=True)
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        try:
+            workload.pebble.add_layer('probe', layer)
+        except RuntimeError as exc:
+            return str(exc)
+        return ''
+
+
+def test_ordering_cycle_of_four_services_is_named_in_full():
+    """A four-service loop names all four, sorted (probe #13 §40.4, `007`).
+
+    Longer than anything probe #12 measured, which did two and three, and
+    declared in neither alphabetical nor graph order so the sorted answer
+    has something to disagree with: bolt after quad after zap after noel
+    after bolt.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'quad': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zap']},
+            'noel': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bolt']},
+            'zap': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['noel']},
+            'bolt': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['quad']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: bolt, noel, quad, zap'
+    )
+
+
+def test_self_edge_written_with_before_is_not_an_ordering_cycle():
+    """`before: [ouro]` is accepted too, not just `after` (probe #13 §40.5, `008`).
+
+    Probe #12 measured the self-edge only as `after` (§39.2) and measured
+    separately that `before` and `after` are one constraint for a
+    two-service cycle (§39.1); this is the two together, so the
+    skip-self-edges rule is not written against half the syntax.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'ouro': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'before': ['ouro'],
+            },
+        },
+    })
+    assert _add_layer_cycle_message(layer) == ''
+
+
+def test_self_edge_on_a_service_with_real_edges_leaves_the_chain_ordered():
+    """A self-edge is dropped without disturbing the edges around it.
+
+    Probe #13 §40.5, `009`: `selfmid` is `after` itself *and* requires
+    `selfbase`, with `selftop` on top, and a real daemon starts the chain
+    `selfbase, selfmid, selftop`. Probe #12's isolated `solo` could not
+    have shown this -- an implementation that let the self-edge poison
+    `selfmid`'s in-degree loses the whole chain, not just the one service.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'selfbase': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+            },
+            'selfmid': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['selfbase'],
+                'after': ['selfmid', 'selfbase'],
+            },
+            'selftop': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'startup': 'disabled',
+                'requires': ['selfmid'],
+                'after': ['selfmid'],
+            },
+        },
+    })
+    container = Container('foo', can_connect=True, layers={'base': layer})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        change_id = workload.pebble.start_services(['selftop'])
+        change = workload.pebble.get_change(change_id)
+        assert [t.summary for t in change.tasks] == [
+            'Start service "selfbase"',
+            'Start service "selfmid"',
+            'Start service "selftop"',
+        ]
+        for name in ('selfbase', 'selfmid', 'selftop'):
+            assert workload.get_service(name).current == ops.pebble.ServiceStatus.ACTIVE
+
+
+def test_self_edge_beside_a_real_cycle_is_not_named_with_it():
+    """Another cycle forcing the check down the reporting path does not drag
+    a self-edge in with it (probe #13 §40.5, `010`).
+
+    `lonewolf` is `after` itself; `ring1`/`ring2` loop. Real Pebble reports
+    `ring1, ring2`, although `lonewolf` sorts between them -- so a report
+    that includes it is unmistakable rather than a detail at the end of a
+    list.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'ring2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['ring1']},
+            'lonewolf': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['lonewolf'],
+            },
+            'ring1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['ring2']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: ring1, ring2'
+    )
+
+
+def test_two_disjoint_cycles_name_the_members_of_only_one():
+    """With two loops in one plan, Pebble names one of them (probe #13 §40.4, `006`).
+
+    `apple`/`mango` and `fig`/`pear` loop, `kiwi` is free, and the daemon
+    reported `apple, mango` -- saying nothing about `fig`/`pear` at all.
+    The names are chosen so that one sorted list of every cycle member
+    would interleave the two loops, which is what this mock used to emit.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'mango': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['apple']},
+            'kiwi': {'override': 'replace', 'command': '/bin/sleep 1000'},
+            'apple': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mango']},
+            'pear': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['fig']},
+            'fig': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['pear']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: apple, mango'
+    )
+
+
+def test_which_of_two_disjoint_cycles_is_named_is_alphabetical_not_declared():
+    """The cycle named is the one holding the alphabetically-first member.
+
+    Probe #13 §40.4, `012`: the tie-break twin of `006`, which cannot say
+    *which* cycle because its first-declared service (`mango`) and its
+    alphabetically-first (`apple`) are in the same one. Here they disagree
+    -- first-declared is `zebra`, alphabetically-first is `alpha` -- and
+    the daemon reported `alpha, beta`.
+
+    §40.7 records what this rests on: two agreeing shapes, which do not
+    rule out the rule being an artefact of the order the daemon's own SCC
+    pass discovers components in. So this test pins a measured behaviour
+    and not a derivation.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'zebra': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['yak']},
+            'yak': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zebra']},
+            'alpha': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['beta']},
+            'beta': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['alpha']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: alpha, beta'
+    )
+
+
+def test_a_service_ordered_after_a_cycle_member_is_not_named():
+    """Downstream of a cycle is not in the cycle (probe #13 §40.4, `011`).
+
+    `dsring1`/`dsring2` loop and `dsafter` is `after dsring1`, so `dsafter`
+    can never start either -- but the daemon reported `dsring1, dsring2`
+    and left it out. It sorts first, so a report that includes it leads
+    with it. This is the shape that rules out reporting whatever a
+    topological drain cannot drain.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'dsring2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['dsring1']},
+            'dsring1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['dsring2']},
+            'dsafter': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['dsring1']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: dsring1, dsring2'
+    )

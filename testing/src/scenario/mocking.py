@@ -1359,61 +1359,108 @@ class _MockPebbleClient(_TestingPebbleClient):
         return lanes
 
     @staticmethod
-    def _ordering_cycle(known_services: dict[str, pebble.Service]) -> list[str]:
-        """Return the services caught in a ``before``/``after`` cycle, sorted.
+    def _ordering_cycles(known_services: dict[str, pebble.Service]) -> list[list[str]]:
+        """Return every ``before``/``after`` cycle in the plan, each sorted.
 
-        Empty when the plan is acyclic. Real Pebble refuses a plan whose
-        layers combine into an ordering cycle -- at ``add_layer`` time
-        (HTTP 400, Real-Pebble probe #12, WORKLOAD-MOCK-DESIGN.md §39) and
-        again at plan load when the daemon starts (probe #8, §28.3). It
-        names only the services actually in the cycle, alphabetically, and
-        leaves the plan unchanged.
+        A cycle is a maximal set of services that can all reach each other
+        along ``before``/``after`` edges -- a strongly connected component
+        of more than one service. A plan can hold several disjoint ones, so
+        this returns a list; the returned order carries no meaning and
+        ``_ordering_cycle`` does the picking.
+
+        Mutual reachability by brute force, rather than the Tarjan pass
+        Pebble itself uses (``tarjanSort``): a plan holds a handful of
+        services, and the definition-shaped version is the one worth
+        reading here.
 
         **A self-edge is not a cycle here**, because it is not one for
         Pebble either: a service declaring itself in its own ``after`` is
-        accepted and starts normally (§39.2). That is the one shape this
-        differs from a textbook cycle check on, and it is measured rather
-        than assumed.
+        accepted and starts normally (Real-Pebble probe #12,
+        WORKLOAD-MOCK-DESIGN.md §39.2, and three more shapes in probe #13
+        §40.5). Self-edges are dropped as the graph is built below, so a
+        service on no cycle cannot reach itself and no single-service
+        component is ever cyclic.
 
         This is ordering only. A ``requires`` cycle is legal and works
         (§28.3) -- membership is a set closure, which is order-free -- and
         is handled by ``_service_requires_closure``'s visited-set walk, not
         here.
         """
-        # Kahn again, over the whole plan rather than one request's names.
-        # Whatever cannot be drained is exactly the cycle members plus
-        # anything downstream of them, which is what Pebble reports too.
         names = set(known_services)
-        in_degree: dict[str, int] = dict.fromkeys(names, 0)
         successors: dict[str, set[str]] = {name: set() for name in names}
-
-        def add_edge(first: str, second: str) -> None:
-            if second not in successors[first]:
-                successors[first].add(second)
-                in_degree[second] += 1
-
         for name in names:
             service = known_services[name]
             for other in service.before:
                 if other in names and other != name:
-                    add_edge(name, other)
+                    successors[name].add(other)
             for other in service.after:
                 if other in names and other != name:
-                    add_edge(other, name)
+                    successors[other].add(name)
 
-        ready = [name for name, degree in in_degree.items() if degree == 0]
-        drained = 0
-        while ready:
-            name = ready.pop()
-            drained += 1
-            for successor in successors[name]:
-                in_degree[successor] -= 1
-                if in_degree[successor] == 0:
-                    ready.append(successor)
+        reachable: dict[str, set[str]] = {}
+        for name in names:
+            seen: set[str] = set()
+            queue = [name]
+            while queue:
+                for successor in successors[queue.pop()]:
+                    if successor not in seen:
+                        seen.add(successor)
+                        queue.append(successor)
+            reachable[name] = seen
 
-        if drained == len(names):
+        cycles: list[list[str]] = []
+        grouped: set[str] = set()
+        for name in sorted(names):
+            if name in grouped or name not in reachable[name]:
+                continue
+            members = {other for other in reachable[name] if name in reachable[other]}
+            members.add(name)
+            grouped.update(members)
+            cycles.append(sorted(members))
+        return cycles
+
+    def _ordering_cycle(self, known_services: dict[str, pebble.Service]) -> list[str]:
+        """Return the cycle Pebble would name for this plan, sorted.
+
+        Empty when the plan is acyclic. Real Pebble refuses a plan whose
+        layers combine into an ordering cycle -- at ``add_layer`` time
+        (HTTP 400, Real-Pebble probe #12, WORKLOAD-MOCK-DESIGN.md §39.1,
+        and by the ``combine=True`` merge path too, probe #13 §40.3) and
+        again at plan load when the daemon starts (probe #8, §28.3). It
+        names only the services actually in one cycle, alphabetically, and
+        leaves the plan unchanged.
+
+        Two things that sound like details and are not, both measured on
+        fresh shapes in probe #13 (§40.4) after the first cut of this check
+        got both wrong:
+
+        - When the plan holds more than one cycle, Pebble names the members
+          of **one** of them, not of all of them. `006`'s two disjoint
+          loops gave ``apple, mango`` with nothing said about ``fig``/
+          ``pear``.
+        - A service ordered **after** a cycle member is not named, although
+          it can never start either. `011`'s ``dsafter`` was left out of
+          ``dsring1, dsring2``.
+
+        So this cannot be a topological drain reporting whatever is left
+        over -- that remainder is every cycle plus everything downstream of
+        one, which is what §40.4 measured the old code over-reporting in
+        exactly those two ways. It has to be the cycles themselves.
+        """
+        cycles = self._ordering_cycles(known_services)
+        if not cycles:
             return []
-        return sorted(name for name, degree in in_degree.items() if degree > 0)
+        # Which cycle, when there are several: the one holding the
+        # alphabetically-first cyclic service. Measured on two shapes
+        # (§40.4) -- `012` is the tie-break twin that rules out declaration
+        # order, reporting `alpha, beta` where the first-declared loop is
+        # `yak`/`zebra`. Two agreeing shapes is what this is worth: §40.7
+        # notes they do not rule out the rule being an artefact of the
+        # order the daemon's own SCC pass discovers components in, which
+        # could coincide with alphabetical for reasons that do not hold in
+        # general. A shape whose alphabetically-first cyclic service sits
+        # in the component discovered last would firm it up.
+        return min(cycles, key=lambda cycle: cycle[0])
 
     def _check_ordering_cycle(self, known_services: dict[str, pebble.Service]) -> None:
         """Raise if ``known_services`` contains a ``before``/``after`` cycle.

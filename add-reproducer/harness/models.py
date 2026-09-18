@@ -227,6 +227,36 @@ class TestFile:
         return cls(path=d["path"], body=d["body"])
 
 
+# `spike-step-5/maintainer-review/FOLLOWUPS.md` §1: a `substrate: none`
+# extraction can embed the test file it needs directly in `commands[]` as a
+# shell heredoc (`cat > <path> << 'EOF' ... EOF`, the `#2341` shape --
+# `surface_inference._heredoc_writes()` already recognises this exact form
+# to decide `needs_test_file()` is False for it). Matches whatever
+# `cat`/`tee` heredoc `_heredoc_writes()` accepts, so the two never drift on
+# what counts as "the file is really there".
+#
+# Lives here rather than in `composer.py` (where it started) because it now
+# has two consumers that must agree: the composer, which renders the file,
+# and `classifier.classify()`'s rung 1c, which asks whether the test that
+# failed was one a model wrote (`spike-step-5/second-dispatch/RESULT.md`
+# §7). A second copy of the pattern in the classifier is precisely the drift
+# this comment warns about.
+_HEREDOC_RE = re.compile(
+    r"(?:cat|tee)\s*>\s*(?P<path>\S+)\s*<<\s*'?(?P<delim>\w+)'?\n(?P<body>.*?)\n(?P=delim)",
+    re.DOTALL,
+)
+
+
+def embedded_test_file(commands: list[str]) -> "TestFile | None":
+    """A test file written by a heredoc already present in `commands[]`, or
+    `None` if no command matches. See `_HEREDOC_RE`'s comment above."""
+    for command in commands:
+        match = _HEREDOC_RE.search(command)
+        if match:
+            return TestFile(path=match.group("path"), body=match.group("body"))
+    return None
+
+
 @dataclass
 class SurfaceInference:
     """Approach §3's "distinct surface inference pass" output.

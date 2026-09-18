@@ -67,9 +67,11 @@ class _StaticLLM:
         self._response = response
         self._error = error
         self.calls = 0
+        self.prompts: list[str] = []
 
     def complete_json(self, *, purpose: str, prompt: str, context: dict) -> dict:
         self.calls += 1
+        self.prompts.append(prompt)
         if self._error is not None:
             raise self._error
         return self._response
@@ -703,3 +705,200 @@ def test_template_versions_line_omits_observed_ops_version_when_absent():
     issue = Issue(number=3, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator")
     body = compose_template(hyp, issue, run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
     assert "observed_ops=" not in body
+
+
+# --- The `<summary>` contradiction (spike-step-5/second-dispatch/RESULT.md
+# §5.2) ----------------------------------------------------------------
+#
+# The first comment this project ever composed on GitHub Actions
+# (`tonyandrewmeyer/operator` run 35219949266, 2026-09-17) rendered `#2045`'s
+# fourteen-line test file twice: once inside a `<details>` block whose
+# `<summary>` said it was "not shown in the commands actually run below", and
+# again four lines later as the `cat > test_cwd.py << 'PYEOF'` heredoc that
+# wrote it. The commands and the file body below are transcribed from that
+# comment, which `second-dispatch/RESULT.md` §5.1 quotes verbatim and
+# complete; the run artefact itself was not committed, and the live
+# extraction's `expected`/`observed` prose was never recorded anywhere, so
+# those two fields are left empty here rather than guessed at. Nothing the
+# assertions below check reads them.
+
+_DISPATCH_TEST_FILE_BODY = """\
+import os
+import pytest
+import ops
+from ops import testing
+
+class MyCharm(ops.CharmBase):
+    def __init__(self, *args):
+        super().__init__(*args)
+        assert os.getcwd() == self.framework.charm_dir
+
+
+def test_cwd_in_scenario():
+    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})
+    with ctx(ctx.on.update_status(), testing.State()) as mgr:
+        pass"""
+
+_DISPATCH_HEREDOC = f"cat > test_cwd.py << 'PYEOF'\n{_DISPATCH_TEST_FILE_BODY}\nPYEOF"
+
+_DISPATCH_COMMANDS = [
+    "uv init --bare .",
+    "uv add 'ops[testing]'",
+    _DISPATCH_HEREDOC,
+    "uv run pytest test_cwd.py -v",
+]
+
+_DISPATCH_PYTEST_OUTPUT = """\
+test_cwd.py::test_cwd_in_scenario FAILED                                 [100%]
+
+=================================== FAILURES ===================================
+_____________________________ test_cwd_in_scenario _____________________________
+
+    def __init__(self, *args):
+        super().__init__(*args)
+>       assert os.getcwd() == self.framework.charm_dir
+E       AssertionError: assert '/home/runner/work/operator/operator' == PosixPath('/tmp/tmph5kel9et')
+"""
+
+
+def _dispatch_hypothesis() -> Hypothesis:
+    return Hypothesis(
+        issue_number=2045,
+        in_scope=True,
+        moving_parts=MovingParts(substrate="none"),
+        commands=list(_DISPATCH_COMMANDS),
+        expected="",
+        observed="",
+        confidence="medium",
+    )
+
+
+def _dispatch_run() -> RunResult:
+    """The `none` branch runs `commands[]` one `bash -c` at a time, so the
+    heredoc that writes the file is itself one of the executed commands --
+    which is exactly why the comment showed the body twice."""
+    return RunResult(
+        hypothesis_number=2045,
+        branch="none",
+        commands=[
+            CommandResult(command=_DISPATCH_COMMANDS[0], exit_code=0),
+            CommandResult(command=_DISPATCH_COMMANDS[1], exit_code=0),
+            CommandResult(command=_DISPATCH_COMMANDS[2], exit_code=0),
+            CommandResult(command=_DISPATCH_COMMANDS[3], exit_code=1, stdout=_DISPATCH_PYTEST_OUTPUT),
+        ],
+    )
+
+
+def _dispatch_issue() -> Issue:
+    return Issue(
+        number=2045,
+        title="os.getcwd() is not the charm root in ops[testing]",
+        body="b",
+        labels=[],
+        state="OPEN",
+        created_at="",
+        author="a",
+        repo="canonical/operator",
+    )
+
+
+def test_composed_comment_does_not_render_the_heredoc_body_twice():
+    """The defect itself, against the real composed text: the body appeared
+    once in the `<details>` block and once in the commands block."""
+    body = compose_template(
+        _dispatch_hypothesis(),
+        _dispatch_issue(),
+        _dispatch_run(),
+        Outcome.REPRODUCED_WEAKER,
+        "'uv run pytest test_cwd.py -v' (last command) exited non-zero, no substring match",
+        run_id="35219949266",
+        timestamp="2026-09-17T12:14:36.483167+00:00",
+    )
+    assert body.count("def test_cwd_in_scenario():") == 1
+
+
+def test_composed_comment_does_not_deny_showing_a_file_it_shows():
+    """The reader-visible half: the `<summary>` said the file was "not shown
+    in the commands actually run below" directly above the commands that
+    show it."""
+    body = compose_template(
+        _dispatch_hypothesis(),
+        _dispatch_issue(),
+        _dispatch_run(),
+        Outcome.REPRODUCED_WEAKER,
+        "reason",
+        run_id="r1",
+        timestamp="t",
+    )
+    assert "not shown in the commands actually run below" not in body
+    assert "<details>" not in body
+
+
+def test_the_heredoc_body_survives_in_the_commands_block():
+    """Dropping the duplicate must not drop the file. The reader still sees
+    every line of it, in the `cat` heredoc that writes it."""
+    body = compose_template(
+        _dispatch_hypothesis(),
+        _dispatch_issue(),
+        _dispatch_run(),
+        Outcome.REPRODUCED_WEAKER,
+        "reason",
+        run_id="r1",
+        timestamp="t",
+    )
+    commands_section = body[body.index("Commands run:") :]
+    for line in _DISPATCH_TEST_FILE_BODY.splitlines():
+        assert line in commands_section
+
+
+def test_a_heredoc_the_executed_commands_drop_is_still_rendered():
+    """The other side of the same question, and the reason it is asked about
+    visibility rather than provenance: `#2341`'s extraction embeds its test
+    file the same way, but its run replays only the final `pytest`
+    invocation, so the body really is absent from the commands block and the
+    `<details>` section -- and its "not shown" wording -- are correct."""
+    hyp = _load_hypothesis(2341)
+    run = RunResult(
+        hypothesis_number=2341,
+        branch="none",
+        commands=[CommandResult(command="uv run pytest repro_test.py -v", exit_code=0, stdout="1 passed")],
+    )
+    body = compose_template(hyp, _load_issue(2341), run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
+    assert "<summary>Test file: repro_test.py" in body
+    assert "not shown in the commands actually run below" in body
+
+
+def test_a_synthesized_file_is_always_rendered():
+    """Synthesis writes the file straight to disk, so no command ever shows
+    it -- this path is untouched by the visibility question."""
+    hyp = _dispatch_hypothesis()
+    hyp.commands = ["uv run pytest test_x.py -v"]
+    hyp.synthesized_test_file = TestFile(path="test_x.py", body="def test_x():\n    assert False\n")
+    run = RunResult(
+        hypothesis_number=2045,
+        branch="none",
+        commands=[CommandResult(command="uv run pytest test_x.py -v", exit_code=1, stdout="E assert False")],
+    )
+    body = compose_template(hyp, _dispatch_issue(), run, Outcome.REPRODUCED_WEAKER, "r", run_id="r1", timestamp="t")
+    assert "<summary>Synthesized test file: test_x.py" in body
+
+
+def test_the_llm_path_is_not_asked_for_a_file_the_commands_already_show():
+    """`_build_prompt()` and `_validate()` have to agree with the renderer:
+    asking the model to include a `<details>` block whose heading says the
+    commands do not show the file would reintroduce the contradiction one
+    layer up, and demanding the path back would reject a correct comment."""
+    llm = _StaticLLM(response={"comment_body": "The bug reproduced in this automated attempt."})
+    composer = Composer(llm)
+    got = composer.compose(
+        _dispatch_hypothesis(),
+        _dispatch_issue(),
+        _dispatch_run(),
+        Outcome.REPRODUCED_WEAKER,
+        "reason",
+        run_id="r1",
+        timestamp="t",
+    )
+    assert after_prefix(got).startswith("The bug reproduced in this automated attempt.")
+    assert "<details>" not in got
+    assert "not shown in the commands actually run below" not in llm.prompts[0]

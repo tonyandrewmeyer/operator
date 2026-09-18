@@ -38,7 +38,15 @@ from __future__ import annotations
 
 import re
 
-from models import COMMENT_OUTCOMES, Hypothesis, Issue, Outcome, RunResult, TestFile
+from models import (
+    COMMENT_OUTCOMES,
+    Hypothesis,
+    Issue,
+    Outcome,
+    RunResult,
+    TestFile,
+    embedded_test_file,
+)
 from seams.llm import LLMError, LLMSeam
 
 _TRIM_CHARS = 1500
@@ -126,31 +134,6 @@ def _log_output(run_result: RunResult) -> str | None:
     return _trim("\n".join(lines))
 
 
-# `spike-step-5/maintainer-review/FOLLOWUPS.md` §1: `hypothesis.synthesized_test_file`
-# (below) is the ONLY source `_resolved_test_file()` used to check -- but a
-# `substrate: none` extraction can also embed the file it needs directly in
-# `commands[]` as a shell heredoc (`cat > <path> << 'EOF' ... EOF`, the
-# `#2341` shape -- `surface_inference._heredoc_writes()` already recognises
-# this exact form to decide `needs_test_file()` is False for it). That body
-# is real data already sitting in the hypothesis; the composer just never
-# read it. Matches whatever `cat`/`tee` heredoc `_heredoc_writes()` accepts,
-# so the two never drift on what counts as "the file is really there".
-_HEREDOC_RE = re.compile(
-    r"(?:cat|tee)\s*>\s*(?P<path>\S+)\s*<<\s*'?(?P<delim>\w+)'?\n(?P<body>.*?)\n(?P=delim)",
-    re.DOTALL,
-)
-
-
-def _embedded_test_file(commands: list[str]) -> TestFile | None:
-    """A test file written by a heredoc already present in `commands[]`,
-    or `None` if no command matches. See `_HEREDOC_RE`'s comment above."""
-    for command in commands:
-        match = _HEREDOC_RE.search(command)
-        if match:
-            return TestFile(path=match.group("path"), body=match.group("body"))
-    return None
-
-
 def _resolved_test_file(hypothesis: Hypothesis) -> TestFile | None:
     """The test file this hypothesis's commands depend on, from whichever of
     the two sources produced it -- LLM synthesis
@@ -166,7 +149,48 @@ def _resolved_test_file(hypothesis: Hypothesis) -> TestFile | None:
     with no rendered file at all -- three of `maintainer-review/RESULT.md`
     §7's five passing ratings were conditional on seeing this content.
     """
-    return hypothesis.synthesized_test_file or _embedded_test_file(hypothesis.commands)
+    return hypothesis.synthesized_test_file or embedded_test_file(hypothesis.commands)
+
+
+def _test_file_to_render(hypothesis: Hypothesis, run_result: RunResult) -> TestFile | None:
+    """The test file this comment has to show for itself, or `None` when it
+    does not have to show one -- either because there is no test file at all,
+    or because the commands this run actually executed already show it.
+
+    `spike-step-5/second-dispatch/RESULT.md` §5.2: the first composed comment
+    anywhere rendered `#2045`'s fourteen-line test file twice -- once in a
+    `<details>` block whose `<summary>` said it was "not shown in the commands
+    actually run below", and again, four lines later, as the `cat > ... <<
+    'PYEOF'` heredoc that wrote it. Both halves came from
+    `_resolved_test_file()` alone, which asks where the file *came from* and
+    never asks whether the reader can already see it.
+
+    Provenance is the wrong question, and `#2341` and `#2045` are the two
+    answers that prove it. Both embed their test file as a heredoc in the
+    extraction's `commands[]`, so provenance cannot tell them apart -- but
+    `#2341`'s executed run replays only the final `pytest` invocation, so the
+    heredoc never reaches the "Commands run" block and the file genuinely has
+    to be shown separately, while `#2045`'s `substrate: none` run executes the
+    heredoc itself, so the block shows the file in full. The question that
+    separates them is visibility, which is what this asks.
+
+    Not a reword of `_test_file_heading()`, which was the other available fix:
+    that heading's claim is the *reason* the section exists, so a heading that
+    had to hedge about whether the body appears below would be describing a
+    section that should not have been rendered. Deciding not to render it
+    keeps the existing wording true by construction on every path, and drops
+    the duplicated body rather than annotating it.
+    """
+    test_file = _resolved_test_file(hypothesis)
+    if test_file is None:
+        return None
+    # `CommandResult.command` is the whole command string, heredoc body and
+    # all, and it is what the "Commands run" block renders verbatim -- so a
+    # substring test against it is exactly the question "will the reader see
+    # this body below?", not an approximation of it.
+    if any(test_file.body in c.command for c in run_result.commands):
+        return None
+    return test_file
 
 
 def _test_file_heading(hypothesis: Hypothesis, test_file: TestFile) -> str:
@@ -251,7 +275,7 @@ def compose_template(
     lines.append(f"Versions: {_versions_line(hypothesis, run_result)}")
     lines.append(f"Outcome: `{outcome.value}` -- {reason}")
     lines.append("")
-    test_file = _resolved_test_file(hypothesis)
+    test_file = _test_file_to_render(hypothesis, run_result)
     if test_file is not None:
         # Collapsed <details> block, not a bare fenced code block --
         # `maintainer-review/RESULT.md` §7's cross-cutting note: these bodies
@@ -477,7 +501,7 @@ class Composer:
     ) -> str | None:
         if outcome not in COMMENT_OUTCOMES:
             return None
-        test_file = _resolved_test_file(hypothesis)
+        test_file = _test_file_to_render(hypothesis, run_result)
         try:
             prompt = self._build_prompt(hypothesis, issue, run_result, outcome, reason, timestamp)
             raw = self.llm.complete_json(
@@ -522,7 +546,7 @@ class Composer:
             if log_output is not None
             else ""
         )
-        test_file = _resolved_test_file(hypothesis)
+        test_file = _test_file_to_render(hypothesis, run_result)
         test_file_prompt_section = (
             f"{_test_file_heading(hypothesis, test_file)} (heading must appear verbatim as an "
             f"HTML <details> <summary>, BEFORE the commands section -- see the instructions "

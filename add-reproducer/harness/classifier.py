@@ -13,7 +13,14 @@ from __future__ import annotations
 
 import re
 
-from models import CommandResult, Hypothesis, Outcome, RunResult, SurfaceInference
+from models import (
+    CommandResult,
+    Hypothesis,
+    Outcome,
+    RunResult,
+    SurfaceInference,
+    embedded_test_file,
+)
 from surface_inference import SYNTHESIS_INCOMPLETE_MARKER
 
 _QUOTED_SNIPPET_RE = re.compile(r'"([^"]{8,})"')
@@ -178,7 +185,7 @@ def classify(
                 "-- not a reproduction, not runnable",
             )
 
-    # Rung 1c: the synthesised test is broken rather than failing. Only an
+    # Rung 1c: the model-written test is broken rather than failing. Only an
     # *assertion* failure is evidence about the bug: the assertion is the
     # thing that encodes the hypothesis's expected-vs-observed claim. Any
     # other exception out of a test this project generated means synthesis
@@ -195,21 +202,48 @@ def classify(
     # different failure: that one is a stub with no assertion, this one is
     # a real attempt at a test that is not valid `ops.testing` code.
     #
-    # Scoped to `synthesized_test_file` deliberately -- a repro script the
-    # *reporter* supplied is allowed to fail with any exception it likes,
-    # since that exception may well be the bug.
-    if hypothesis.synthesized_test_file is not None:
+    # This was scoped to `synthesized_test_file` alone until 2026-09-18, on
+    # the reasoning that a repro script the *reporter* supplied is allowed to
+    # fail with any exception it likes, since that exception may well be the
+    # bug. `spike-step-5/second-dispatch/RESULT.md` §7 found that scoping puts
+    # model-written tests on the reporter's side of the guard, because the
+    # dominant modern extraction shape does not synthesise a test file at all:
+    # it writes one as a `cat > ... << 'EOF'` heredoc inside the extraction's
+    # own `commands[]`, where `synthesized_test_file` stays `None`. Both of
+    # that round's live runs produced exactly that, and one of them produced
+    # an *invalid* `ops.testing` test (`ctx(ctx.on.update_status, ...)` --
+    # the event function where the event is expected). It stayed silent only
+    # because `AttributeError` happens to be in rung 4's regex; a heredoc test
+    # dying with `FrozenInstanceError`, `KeyError` or `RuntimeError` would
+    # have fallen through to rung 6 and composed "The bug reproduced."
+    #
+    # So the guard asks the question it always meant to ask: was this test
+    # written by a model? Both sources are -- the synthesiser writes one and
+    # the extractor writes the other -- and `models.embedded_test_file()` is
+    # the same heredoc reader the composer uses to decide it has a file to
+    # render, so the two cannot disagree about whether there is one.
+    #
+    # The reporter's exception is still allowed to be the bug; it is now
+    # checked rather than assumed. When the failing output carries a
+    # substring the reporter themselves quoted in `observed`, rung 2 below
+    # would call it a reproduction, and that evidence does not stop being
+    # evidence because a model retyped the script into a heredoc. Without
+    # this clause the widening would silence those runs, since this rung is
+    # checked first.
+    if hypothesis.synthesized_test_file is not None or embedded_test_file(hypothesis.commands):
         for c in commands:
             if c.exit_code == 0:
                 continue
             text = _command_text(c)
             if _ASSERTION_FAILURE_RE.search(text):
                 break
+            if _contains_any(text, observed_snippets):
+                break
             raised = _RAISED_EXCEPTION_RE.search(text)
             if raised:
                 return (
                     Outcome.UNRUNNABLE_SYNTHESIS_INVALID,
-                    f"the synthesised test raised {raised.group('exc')} rather than failing an "
+                    f"the model-written test raised {raised.group('exc')} rather than failing an "
                     "assertion -- the generated test is not valid, so its failure is evidence "
                     "about the generator and not about the reported bug",
                 )

@@ -16,6 +16,8 @@ a live k8s substrate (2026-08-18, multipass `repro-2639` + concierge/juju
   run "reproduced nothing" without ever poking the charm.
 """
 
+import pytest
+
 import runner_stage
 from classifier import classify
 from models import (
@@ -369,3 +371,168 @@ def test_a_clean_setup_does_not_trip_the_env_rung():
     )
     outcome, _ = classify(_hypothesis(), None, run)
     assert outcome is not Outcome.INFRASTRUCTURE_FAILED
+
+
+# -- rung 1c covers the test file the *extraction* wrote, too ------------
+#
+# `spike-step-5/second-dispatch/RESULT.md` §7. Both of that round's live
+# GitHub Actions extractions wrote their test file as a `cat > ... <<
+# 'PYEOF'` heredoc inside the extraction's own `commands[]`, where
+# `synthesized_test_file` stays `None` -- so rung 1c, scoped to that field,
+# treated a model-written test as if the reporter had written it. Run
+# 35219780335's test was invalid `ops.testing` code and stayed silent only
+# because `AttributeError` happens to be in rung 4's regex. The cases below
+# are the ones that regex does not cover.
+
+
+_HEREDOC_TEST = (
+    "cat > repro_test.py << 'PYEOF'\n"
+    "import ops\n"
+    "from ops import testing\n"
+    "\n"
+    "def test_repro():\n"
+    "    state = testing.State()\n"
+    "    state.pebble = {}\n"
+    "PYEOF"
+)
+
+
+def _heredoc_hypothesis(observed='Custom notice from "_daemon_" never reaches the charm'):
+    """The dominant modern extraction shape: a `substrate: none` hypothesis
+    that writes its own test file as a heredoc command."""
+    hyp = _hypothesis()
+    hyp.moving_parts = MovingParts(substrate="none")
+    hyp.observed = observed
+    hyp.commands = ["uv init --bare .", "uv add 'ops[testing]'", _HEREDOC_TEST, "uv run pytest repro_test.py -v"]
+    return hyp
+
+
+def _heredoc_run(stdout):
+    """The `none` branch runs `commands[]` one at a time, so the heredoc is
+    itself an executed command and the pytest invocation is the last one."""
+    return RunResult(
+        hypothesis_number=2639,
+        branch="none",
+        commands=[
+            CommandResult(command="uv init --bare .", exit_code=0),
+            CommandResult(command="uv add 'ops[testing]'", exit_code=0),
+            CommandResult(command=_HEREDOC_TEST, exit_code=0),
+            CommandResult(command="uv run pytest repro_test.py -v", exit_code=1, stdout=stdout),
+        ],
+    )
+
+
+def test_a_broken_heredoc_test_would_have_composed_a_false_reproduction():
+    """The failure §7 argued from the code, run. With the heredoc removed
+    from `commands[]` the hypothesis carries no model-written test file by
+    either measure, which is exactly what rung 1c used to see on every one
+    of these runs -- and the ladder falls through to rung 6, whose outcome
+    composes a comment opening "Reproduced"."""
+    from composer import compose_template
+    from models import Issue
+
+    hyp = _heredoc_hypothesis()
+    hyp.commands = [c for c in hyp.commands if not c.startswith("cat >")]
+    outcome, _ = classify(hyp, None, _heredoc_run(_FROZEN_STATE_FAILURE))
+    assert outcome is Outcome.REPRODUCED_WEAKER
+    assert outcome in COMMENT_OUTCOMES
+    issue = Issue(
+        number=2639, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator"
+    )
+    body = compose_template(hyp, issue, _heredoc_run(_FROZEN_STATE_FAILURE), outcome, "r", run_id="r1", timestamp="t")
+    assert body is not None
+    assert "**Reproduced**" in body
+
+
+def test_a_broken_heredoc_test_is_now_caught():
+    """Same run, same output, with the heredoc where the live extractions
+    actually put it: rung 1c fires and the pipeline stays silent."""
+    hyp = _heredoc_hypothesis()
+    outcome, reason = classify(hyp, None, _heredoc_run(_FROZEN_STATE_FAILURE))
+    assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+    assert "FrozenInstanceError" in reason
+    assert outcome not in COMMENT_OUTCOMES
+
+
+def test_a_broken_heredoc_test_composes_nothing():
+    from composer import compose_template
+    from models import Issue
+
+    hyp = _heredoc_hypothesis()
+    run = _heredoc_run(_FROZEN_STATE_FAILURE)
+    outcome, reason = classify(hyp, None, run)
+    issue = Issue(
+        number=2639, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator"
+    )
+    assert compose_template(hyp, issue, run, outcome, reason, run_id="r1", timestamp="t") is None
+
+
+_KEY_ERROR_FAILURE = """\
+    def test_repro():
+        state = testing.State()
+>       relation = state.get_relation(7)
+E   KeyError: 7
+"""
+
+_RUNTIME_ERROR_FAILURE = """\
+    def test_repro():
+>       ctx.run(ctx.on.start(), testing.State())
+E   RuntimeError: no ops.main() call found
+"""
+
+
+@pytest.mark.parametrize("stdout", [_FROZEN_STATE_FAILURE, _KEY_ERROR_FAILURE, _RUNTIME_ERROR_FAILURE])
+def test_the_exceptions_rung_4_does_not_match_are_all_caught(stdout):
+    """`FrozenInstanceError`, `KeyError` and `RuntimeError` are none of them
+    in `_API_SHAPE_ERROR_RE`, so before this widening each of them reached
+    rung 6 and composed."""
+    outcome, _ = classify(_heredoc_hypothesis(), None, _heredoc_run(stdout))
+    assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+
+
+_ATTRIBUTE_ERROR_FAILURE = """\
+    def test_cwd_in_scenario():
+        ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})
+>       with ctx(ctx.on.update_status, testing.State()) as mgr:
+E       AttributeError: 'function' object has no attribute 'action'
+"""
+
+
+def test_run_35219780335s_near_miss_is_now_caught_on_purpose():
+    """The measured case from `second-dispatch/RESULT.md` §7: invalid
+    `ops.testing` code (the event *function* where the event is expected).
+    It was silent before, via rung 4, because `AttributeError` is in that
+    regex -- the right answer for an accidental reason. It is still silent,
+    now via the rung built for it, and the reason names the generator rather
+    than claiming the extraction is pinned to an older API surface."""
+    outcome, reason = classify(_heredoc_hypothesis(), None, _heredoc_run(_ATTRIBUTE_ERROR_FAILURE))
+    assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+    assert "AttributeError" in reason
+    assert outcome not in COMMENT_OUTCOMES
+
+
+def test_a_heredoc_test_failing_its_assertion_is_still_a_reproduction():
+    """The widening must not swallow the thing the rung exists to let
+    through: an assertion failure is the hypothesis's claim, whoever typed
+    the test."""
+    outcome, _ = classify(_heredoc_hypothesis(), None, _heredoc_run(_REAL_ASSERTION_FAILURE))
+    assert outcome is not Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+
+
+def test_an_exception_the_reporter_quoted_is_still_evidence():
+    """"That exception may well be the bug" was the original scoping's
+    reason, and it survives -- checked now rather than assumed. When the
+    exception carries a substring the reporter quoted in `observed`, rung 2
+    still gets to call it a reproduction."""
+    hyp = _heredoc_hypothesis(observed='the call dies with "KeyError: 7" instead of returning None')
+    outcome, _ = classify(hyp, None, _heredoc_run(_KEY_ERROR_FAILURE))
+    assert outcome is Outcome.REPRODUCED
+
+
+def test_a_hypothesis_with_no_test_file_at_all_is_untouched():
+    """No synthesised file, no heredoc: nothing this project wrote, so the
+    rung must not fire."""
+    hyp = _heredoc_hypothesis()
+    hyp.commands = ["uv run pytest -v"]
+    outcome, _ = classify(hyp, None, _heredoc_run(_FROZEN_STATE_FAILURE))
+    assert outcome is not Outcome.UNRUNNABLE_SYNTHESIS_INVALID

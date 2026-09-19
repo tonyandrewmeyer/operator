@@ -34,6 +34,7 @@ from seams.runner import (
     _control_signal_command,
     _juju_track,
     _packed_ops_version,
+    _resolved_ops_version,
     _unit_expr,
     _wait_command,
     as_user_in_container_command,
@@ -1209,3 +1210,142 @@ def test_resolve_symbol_abstains_when_the_package_raises_on_import(tmp_path, mon
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
 
     assert SubprocessRunnerSeam().resolve_symbol("explodes_on_import_4b7e.Thing", {})
+
+
+# --- RunResult.observed_ops_version on the `none` branch ---
+#
+# `spike-step-5/second-dispatch/RESULT.md` §6.2, closed in
+# `fourth-dispatch/RESULT.md` §1. The field was scoped to the branches that
+# `charmcraft pack`, on the reasoning that only they resolve an `ops`. The
+# `none` branch resolves one too -- from PyPI, via the extraction's own `uv
+# add 'ops[testing]'` -- and prints the version into output the harness was
+# already capturing and already rendering into the composed comment. So a
+# comment quoted the answer four lines above a versions line that declined to
+# state it.
+
+# Verbatim from run 35219949266's composed comment (`second-dispatch/
+# RESULT.md` §5.1), which is the only recording of this branch's real output.
+_UV_ADD_LOG = """\
+Resolved 16 packages in 2ms
+Installed 5 packages in 2ms
+ + opentelemetry-api==1.44.0
+ + ops==3.8.2
+ + ops-scenario==8.8.2
+ + typing-extensions==4.16.0
+ + websocket-client==1.9.2
+"""
+
+_2045_COMMANDS = [
+    CommandResult(command="uv init --bare .", exit_code=0, stdout="Initialized project `issue-2045`"),
+    CommandResult(command="uv add 'ops[testing]'", exit_code=0, stdout=_UV_ADD_LOG),
+    CommandResult(command="cat > test_cwd.py << 'PYEOF'\nimport ops\nPYEOF", exit_code=0),
+    CommandResult(command="uv run pytest test_cwd.py -v", exit_code=1, stdout="1 failed"),
+]
+
+
+def test_the_pack_reader_cannot_see_the_none_branchs_ops_and_that_is_the_defect():
+    """The measured shape, through the reader that was wired up for it: the
+    `none` branch labels no steps at all, so `step == "pack"` matches nothing
+    and the version in the log two commands earlier is invisible. This is
+    `second-dispatch` §6.2's `null` reproduced, not described."""
+    assert all(c.step is None for c in _2045_COMMANDS)
+    assert _packed_ops_version(_2045_COMMANDS) is None
+
+
+def test_resolved_ops_version_reads_the_none_branchs_own_install_log():
+    assert _resolved_ops_version(_2045_COMMANDS) == "3.8.2"
+
+
+def test_run_none_records_the_ops_it_resolved(monkeypatch):
+    """End to end through the seam, on the four commands `#2045` really ran."""
+    hyp = Hypothesis(
+        issue_number=2045,
+        in_scope=True,
+        moving_parts=MovingParts(substrate="none"),
+        commands=[c.command for c in _2045_COMMANDS],
+        expected="expected",
+        observed="observed",
+        confidence="medium",
+    )
+
+    def fake(args, **kwargs):
+        stdout = _UV_ADD_LOG if "uv add" in args[2] else "ok"
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    result = SubprocessRunnerSeam().run(branch="none", hypothesis=hyp, surface=None, context={})
+
+    assert result.observed_ops_version == "3.8.2"
+    # Unchanged, and the reason the two fields are not symmetric: this branch
+    # resolves a library but never provisions a substrate.
+    assert result.observed_juju_version is None
+
+
+def test_resolved_ops_version_only_reads_install_commands():
+    """A pytest failure dump can quote a requirements line or a traceback
+    frame carrying `ops==`. Reading that as the resolved version would
+    disclose a number nothing installed, so only an installer's own output
+    counts as evidence about what is importable."""
+    commands = [
+        CommandResult(command="uv run pytest test_cwd.py -v", exit_code=1, stdout="E   assert 'ops==9.9.9' in reqs"),
+    ]
+    assert _resolved_ops_version(commands) is None
+
+
+def test_resolved_ops_version_prefers_the_installed_version_over_the_replaced_one():
+    log = "Uninstalled 1 package\n - ops==3.8.1\nInstalled 1 package\n + ops==3.8.2\n"
+    commands = [CommandResult(command="uv pip install 'ops[testing]'", exit_code=0, stdout=log)]
+    assert _resolved_ops_version(commands) == "3.8.2"
+
+
+def test_resolved_ops_version_is_not_fooled_by_a_neighbouring_package():
+    """The same lookbehind `_packed_ops_version()` needs, on the other
+    reader: `charmops==` contains `ops==` as a substring."""
+    log = " + charmops==1.2.3\n + ops-scenario==8.8.2\n + ops-testing==3.8.2\n"
+    commands = [CommandResult(command="uv add 'ops[testing]'", exit_code=0, stdout=log)]
+    assert _resolved_ops_version(commands) is None
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        pytest.param([], id="no commands at all"),
+        pytest.param(
+            [CommandResult(command="uv run pytest -v", exit_code=0, stdout="1 passed")],
+            id="commands that install nothing",
+        ),
+        pytest.param(
+            [CommandResult(command="uv add 'ops[testing]'", exit_code=0, stdout="", stderr="")],
+            id="an install that captured nothing",
+        ),
+        pytest.param(
+            [CommandResult(command="uv add 'ops[testing]'", exit_code=1, stderr="No solution found")],
+            id="an install that failed",
+        ),
+    ],
+)
+def test_resolved_ops_version_fails_soft(commands):
+    """Same discipline as `_packed_ops_version()`: every way of not finding a
+    version is `None`, never an exception."""
+    assert _resolved_ops_version(commands) is None
+
+
+def test_run_k8s_clone_records_no_ops_version(monkeypatch):
+    """`k8s-clone` runs the reporter's own commands against a checkout and
+    resolves nothing of its own, so it keeps the `None` the widening does not
+    touch."""
+    hyp = Hypothesis(
+        issue_number=2484,
+        in_scope=True,
+        moving_parts=MovingParts(substrate="k8s"),
+        commands=["uv add 'ops[testing]'"],
+        expected="expected",
+        observed="observed",
+        confidence="medium",
+    )
+    monkeypatch.setattr(subprocess, "run", _fake_run([], stdout=_UV_ADD_LOG))
+
+    result = SubprocessRunnerSeam().run(branch="k8s-clone", hypothesis=hyp, surface=None, context={})
+
+    assert result.observed_ops_version is None

@@ -902,3 +902,31 @@ def test_the_llm_path_is_not_asked_for_a_file_the_commands_already_show():
     assert after_prefix(got).startswith("The bug reproduced in this automated attempt.")
     assert "<details>" not in got
     assert "not shown in the commands actually run below" not in llm.prompts[0]
+
+
+def test_a_none_branch_comment_now_discloses_the_ops_it_resolved():
+    """`spike-step-5/second-dispatch/RESULT.md` §6.2, closed in
+    `fourth-dispatch/RESULT.md` §1.
+
+    The second dispatch's comment rendered ` + ops==3.8.2` in its observed
+    output and `Versions: ... substrate=none` with no `observed_ops=` four
+    lines above it. Same commands, same branch, with the version the seam now
+    captures: the versions line states what the observed output already
+    showed, and the two halves of the comment stop disagreeing."""
+    run = _dispatch_run()
+    run.observed_ops_version = "3.8.2"
+
+    body = compose_template(
+        _dispatch_hypothesis(),
+        _dispatch_issue(),
+        run,
+        Outcome.REPRODUCED_WEAKER,
+        "'uv run pytest test_cwd.py -v' (last command) exited non-zero, no substring match",
+        run_id="35219949266",
+        timestamp="2026-09-17T12:14:36.483167+00:00",
+    )
+
+    assert "Versions: repo=unpinned, juju=unpinned, base=unpinned, substrate=none, observed_ops=3.8.2" in body
+    # Still no juju: this branch provisions no substrate, and the asymmetry
+    # between the two fields is the point, not an oversight.
+    assert "observed_juju=" not in body

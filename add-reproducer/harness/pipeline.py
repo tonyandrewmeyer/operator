@@ -57,6 +57,65 @@ class PipelineResult:
     surface: SurfaceInference | None = None
 
 
+def _enclosing_python_project(path: Path) -> Path | None:
+    """The nearest ancestor of `path` holding a `pyproject.toml`, or `None`.
+
+    `path` itself is included: a scratch root that *is* a project root is as
+    contaminating as one nested inside it."""
+    for candidate in (path, *path.parents):
+        if (candidate / "pyproject.toml").is_file():
+            return candidate
+    return None
+
+
+def _scratch_root(work_dir: Path) -> Path:
+    """`work_dir`, unless it sits inside a Python project -- in which case a
+    fresh directory that does not.
+
+    `spike-step-5/second-dispatch/RESULT.md` §6.4, measured in
+    `fourth-dispatch/RESULT.md` §2. The `none` branch's first command is the
+    extraction's own `uv init --bare .`, run with `cwd` set to the issue's
+    scratch directory. uv walks *up* from that directory looking for a
+    workspace root, and the shipped layout gives it one: the workflow passes
+    `--out-dir "$PWD/out"` from `add-reproducer/harness`, so the scratch
+    directory is `add-reproducer/harness/out/work/issue-N` -- inside the
+    harness's own project. uv therefore
+
+      - appends `out/work/issue-N` to the harness's tracked `pyproject.toml`
+        as a workspace member,
+      - installs the issue's `ops` into the harness's own `.venv` rather than
+        a venv of its own, and
+      - runs the issue's `pytest` under the harness's `[tool.pytest.
+        ini_options]`, whose `pythonpath = ["."]` puts the harness's own
+        modules on the reproducer's `sys.path`.
+
+    The third is a change to what the reproducer executes, and the second
+    makes two issues in one batch share a dependency resolution: an issue
+    pinning an older `ops` than a member already resolved fails to install at
+    all ("your workspace's requirements are unsatisfiable", exit 1), which is
+    exactly the shape of a regression report.
+
+    Relocating is preferred to rewriting the command, because `uv init --bare
+    .` is the *extraction's* string -- `classifier.py`'s rung 0c keys on it,
+    and it is what the composed comment tells a reader to paste. Changing
+    where it runs changes neither.
+
+    Deliberately scoped to the scratch directory and not to `charm_dir`, which
+    stays under `work_dir`: no `uv init` ever runs there, and `charm_dir` is
+    embedded verbatim into the juju commands the scratch branches build, a
+    path this project has no way to re-measure from here."""
+    if _enclosing_python_project(work_dir) is None:
+        return work_dir
+    relocated = Path(tempfile.mkdtemp(prefix="add-reproducer-scratch-")).resolve()
+    if _enclosing_python_project(relocated) is not None:
+        # A `TMPDIR` inside a project would put us straight back where we
+        # started. Nothing can be done about it here, and failing the run over
+        # a scratch path would be worse than the contamination, so keep the
+        # caller's directory and let the run proceed.
+        return work_dir
+    return relocated
+
+
 class Pipeline:
     def __init__(self, llm: LLMSeam, runner: RunnerSeam, *, work_dir: Path | None = None):
         self.llm = llm
@@ -76,12 +135,24 @@ class Pipeline:
         # RESULT.md §3).
         self.work_dir = (Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="add-reproducer-"))).resolve()
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        # Where per-issue scratch directories go: usually `work_dir` itself,
+        # and somewhere outside every Python project when `work_dir` is inside
+        # one. Resolved on first use rather than here, so constructing a
+        # pipeline that never reaches the `none` branch creates no directory.
+        # See `_scratch_root()`.
+        self._scratch_root: Path | None = None
         # PLAN.md Approach §3 delta, `spike-step-5/inscope-instrument/
         # RESULT.md`: a second, narrower-question pass on every first-pass
         # drop, measured to hold the corpus-v2 precision/recall floor.
         self.extractor = TwoPassExtractor(llm)
         self.surface_inferrer = SurfaceInferrer(llm)
         self.composer = Composer(llm)
+
+    @property
+    def scratch_root(self) -> Path:
+        if self._scratch_root is None:
+            self._scratch_root = _scratch_root(self.work_dir)
+        return self._scratch_root
 
     def run_for_issue(
         self,
@@ -143,9 +214,30 @@ class Pipeline:
         # reproduction off a setup collision, for issues whose test then
         # passed. It also put every synthesised test file in one pytest
         # rootdir, so unrelated issues' tests shared a collection.
-        issue_dir = self.work_dir / f"issue-{issue.number}"
-        issue_dir.mkdir(parents=True, exist_ok=True)
+        # `scratch_root`, not `work_dir`: the commands that run in here are
+        # `uv init`/`uv add`, and uv walks up out of any directory that sits
+        # inside a Python project. See `_scratch_root()`.
+        issue_dir = self.scratch_root / f"issue-{issue.number}"
+        if branch == "none":
+            # The only branch whose commands are run with `cwd` set here, and
+            # so the only one uv's workspace discovery can reach out of. It
+            # gets a private workspace root one level up from where it runs.
+            # Scoped rather than applied to every branch on purpose: a
+            # `k8s-clone` run clones a repository into this directory, and
+            # giving that checkout an enclosing workspace root is a change
+            # this project has no live run to check.
+            scratch_environment = runner_stage.scratch_environment(issue_dir)
+            issue_dir = runner_stage.prepare_scratch_project(issue_dir)
+        else:
+            scratch_environment = None
+            issue_dir.mkdir(parents=True, exist_ok=True)
         context = {"issue_number": issue.number, "repo": issue.repo, "workdir": str(issue_dir)}
+        if scratch_environment is not None:
+            # Which virtualenv this issue's uv commands write to, named rather
+            # than left to whatever `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT` the
+            # harness itself was started with. See
+            # `seams/runner.py:scratch_command_env()`.
+            context["uv_project_environment"] = str(scratch_environment)
 
         # Skip-when-stale gate first (Approach §4): cheapest possible
         # drop, before spending any time on surface inference or a

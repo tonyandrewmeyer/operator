@@ -349,8 +349,10 @@ class RunResult:
     # never touch a juju substrate (`none`) and for fixtures recorded before
     # this field existed -- optional so they keep loading unchanged.
     observed_juju_version: str | None = None
-    # The `ops` the reproduction was actually built against, parsed out of
-    # `charmcraft pack`'s own log by `seams/runner.py:_packed_ops_version()`.
+    # The `ops` the reproduction was actually built against. Read out of
+    # `charmcraft pack`'s own log on the scratch branches
+    # (`seams/runner.py:_packed_ops_version()`), and out of the install
+    # commands' own log on `none` (`_resolved_ops_version()`).
     # Exactly the disclosure `observed_juju_version` above makes for juju,
     # applied to the library the issue is about. `spike-step-5/first-dispatch/
     # RESULT.md` §6.1: the scratch charm pins `ops~=3.8` and charmcraft
@@ -360,10 +362,14 @@ class RunResult:
     # unreleased regression cannot reproduce at all, and `~=3.8` is a range,
     # so two runs a week apart can silently test different `ops`. None of
     # that is inferable from `repo=` in the composed comment, which carries
-    # what the *extraction* pinned. `None` for branches that never pack a
-    # charm (`none`, `k8s-clone`), when the pack log carries nothing that
-    # parses, and for fixtures recorded before this field existed --
-    # optional so they keep loading unchanged.
+    # what the *extraction* pinned. The `none` branch resolves its `ops` from
+    # PyPI too -- `uv add 'ops[testing]'`, whose own output names the version
+    # -- so it carries this field as well; that it does not *pack* a charm was
+    # never the point (`spike-step-5/fourth-dispatch/RESULT.md` §1). `None` for
+    # `k8s-clone`, which runs the reporter's own commands against a checkout
+    # and resolves nothing of its own; `None` when no log carries a version
+    # that parses; and `None` for fixtures recorded before this field existed
+    # -- optional so they keep loading unchanged.
     observed_ops_version: str | None = None
 
     @classmethod

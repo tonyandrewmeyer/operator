@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import subprocess
 from pathlib import Path
 
 import runnability
 from models import Hypothesis, Issue, RunResult, SurfaceInference
 from seams.llm import LLMSeam
-from seams.runner import RunnerSeam
+from seams.runner import RunnerSeam, scratch_command_env
 from surface_inference import TestFileSynthesizer, is_pytest_invocation, needs_test_file
 
 _SNIPPET_MARKERS = ("import ops", "import scenario")
@@ -125,6 +126,93 @@ def check_runnable(hypothesis: Hypothesis, branch: str) -> tuple[bool, str | Non
 # Branches that build their command sequence from `surface`, not from
 # `hypothesis.commands`, and whose whole point is the stimulus.
 SCRATCH_BRANCHES = frozenset({"k8s-scratch", "lxd-scratch"})
+
+# The private uv workspace root each `none`-branch issue gets, written one
+# directory above the directory its commands run in.
+#
+# Why it exists: `spike-step-5/second-dispatch/RESULT.md` §6.4, measured in
+# `fourth-dispatch/RESULT.md` §2. The branch's first command is the
+# extraction's own `uv init --bare .`, and uv walks *up* from the working
+# directory looking for a workspace root. Given no root of its own it finds
+# whichever project happens to enclose the scratch tree -- in the shipped
+# layout, the harness itself -- and then installs the issue's `ops` into the
+# harness's venv, runs the issue's pytest under the harness's
+# `[tool.pytest.ini_options]`, and appends the scratch directory to the
+# harness's tracked `pyproject.toml`. Handing it a root of its own stops all
+# three at the source, without touching a single command string: `uv init
+# --bare .` stays exactly what the extraction wrote, which matters because
+# `classifier.py`'s rung 0c keys on it and the composed comment tells a
+# reader to paste it.
+#
+# Why it carries pytest, which is the part that is not obvious. The dominant
+# extraction shape writes a pytest test and installs `ops[testing]` -- and
+# nothing else. `#2045`'s four commands are the measured example: no pytest
+# anywhere in them. Under the old layout that worked only because the
+# harness's own dev group had already put pytest in the venv uv chose, so the
+# contamination was load-bearing, and isolating the scratch project without
+# replacing what it supplied turns a reproduction into `ModuleNotFoundError:
+# No module named 'ops'` at collection (`fourth-dispatch/RESULT.md` §2.3).
+# One dev dependency, deliberately: this replaces what the harness was
+# supplying by accident, and nothing more.
+_SCRATCH_PROJECT_PYPROJECT = """\
+[project]
+name = "add-reproducer-scratch"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+"""
+
+# Where an issue's commands run, relative to its private workspace root.
+SCRATCH_WORK_SUBDIR = "repro"
+
+
+def prepare_scratch_project(issue_dir: Path) -> Path:
+    """Lay out `issue_dir` as a private uv workspace root and return the
+    directory the issue's commands should run in.
+
+    `issue_dir/pyproject.toml` is the root, `issue_dir/repro` is the working
+    directory, and the root's environment is synced ahead of the run so the
+    dev `pytest` is there before the extraction's own `uv add` populates the
+    same venv alongside it. Sync order matters: `uv add` from a member syncs
+    that member only, so a pytest that is not already present when it runs
+    never arrives.
+
+    Best-effort by design, like every other environment probe in this
+    harness. No uv on PATH, no network, a sync that fails or hangs -- all
+    leave the working directory in place and let the run proceed to say
+    something true about what happened, rather than aborting over scratch
+    setup. The run then behaves as it did before this existed, minus the
+    contamination."""
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    workdir = issue_dir / SCRATCH_WORK_SUBDIR
+    workdir.mkdir(parents=True, exist_ok=True)
+    pyproject = issue_dir / "pyproject.toml"
+    if not pyproject.exists():
+        pyproject.write_text(_SCRATCH_PROJECT_PYPROJECT)
+    try:
+        subprocess.run(
+            ["uv", "sync"],
+            cwd=str(issue_dir),
+            capture_output=True,
+            timeout=300,
+            text=True,
+            env=scratch_command_env(str(scratch_environment(issue_dir))),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return workdir
+
+
+def scratch_environment(issue_dir: Path) -> Path:
+    """The virtualenv an issue's scratch project owns.
+
+    Named rather than left to uv's directory walk, and passed to every uv
+    command this branch runs, because the walk is not the only thing that
+    decides the answer -- see `seams/runner.py:scratch_command_env()`."""
+    return issue_dir / ".venv"
 
 # Does a setup command actually establish a Python environment to run in?
 # `uv init`/`uv venv` create one; `uv add`/`uv pip install` populate one.

@@ -94,8 +94,10 @@ def _versions_line(hypothesis: Hypothesis, run_result: RunResult) -> str:
     # The same disclosure, for the library the issue is actually about.
     # `spike-step-5/first-dispatch/RESULT.md` §6.1: the scratch charm is
     # packed against released `ops` from PyPI (`ops~=3.8`, resolved inside
-    # charmcraft's own managed LXD instance), never the checked-out tree, so
-    # a reader cannot infer which `ops` produced this verdict from the repo,
+    # charmcraft's own managed LXD instance), never the checked-out tree --
+    # and the `none` branch resolves a released `ops` of its own, also from
+    # PyPI, also never the checked-out tree. So on every branch that resolves
+    # anything, a reader cannot infer which `ops` produced this verdict from the repo,
     # from the workflow's checkout ref, or from `repo=` above -- that last
     # one is what the *extraction* pinned, which is usually nothing. Omitted
     # rather than rendered as "observed_ops=unknown" for the same reason as

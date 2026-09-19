@@ -17,6 +17,7 @@ Two implementations:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -213,6 +214,39 @@ def _pebble_socket_path(juju_track: str) -> str:
     return _PEBBLE_SOCKET_BY_JUJU_TRACK.get(major, _PEBBLE_SOCKET_LEGACY)
 
 
+# The two environment variables that decide which virtualenv a `uv` command
+# writes to, regardless of which directory it is run in.
+#
+# `VIRTUAL_ENV` is set by any activated venv, and `UV_PROJECT_ENVIRONMENT`
+# by, among others, `tox-uv` -- which points it at the tox environment for
+# the whole test run. Inheriting either sends the scratch project's `uv
+# add`/`uv sync` into somebody else's environment, which is the same
+# contamination `runner_stage.prepare_scratch_project()` exists to stop,
+# arriving by a route no amount of workspace layout can close. Measured
+# while building that fix (`spike-step-5/fourth-dispatch/RESULT.md` §2.4):
+# with `UV_PROJECT_ENVIRONMENT` inherited, a scratch sync emptied this
+# repository's own `.tox/unit` down to the scratch project's four packages
+# and 66 of `ops`'s tests stopped being able to import `websocket`.
+_UV_ENVIRONMENT_VARS = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
+
+
+def scratch_command_env(project_environment: str | None = None) -> dict[str, str]:
+    """`os.environ` with uv's environment-selection variables neutralised, and
+    `UV_PROJECT_ENVIRONMENT` pinned to `project_environment` when one is
+    given.
+
+    Pinning rather than only clearing, because clearing leaves the answer to
+    uv's directory walk -- which is right when the scratch project has a root
+    of its own and wrong the moment it does not. Naming the environment makes
+    the scratch commands hermetic either way."""
+    env = dict(os.environ)
+    for name in _UV_ENVIRONMENT_VARS:
+        env.pop(name, None)
+    if project_environment is not None:
+        env["UV_PROJECT_ENVIRONMENT"] = project_environment
+    return env
+
+
 def _observed_juju_version() -> str | None:
     """Best-effort `juju version` on this substrate (`RunResult.
     observed_juju_version` -- see that field's docstring for why it exists).
@@ -258,6 +292,19 @@ def _observed_juju_version() -> str | None:
 _PACKED_OPS_VERSION_RE = re.compile(r"(?<![\w.\-])ops==(?P<version>[A-Za-z0-9][\w.!+\-]*)")
 
 
+def _ops_version_in(commands: list[CommandResult]) -> str | None:
+    """Last `ops==<version>` in these commands' captured output, or `None`.
+
+    The **last** match wins. uv prints a package's removal before its addition
+    (`- ops==3.8.1` then `+ ops==3.8.2`) when it replaces one, so the last
+    `ops==` in the log is the one that ended up installed; the first would name
+    the version that was thrown away.
+    """
+    text = "\n".join(f"{c.stdout or ''}\n{c.stderr or ''}" for c in commands)
+    matches = _PACKED_OPS_VERSION_RE.findall(text)
+    return matches[-1] if matches else None
+
+
 def _packed_ops_version(commands: list[CommandResult]) -> str | None:
     """Best-effort `ops` version from the `pack` step's captured output
     (`RunResult.observed_ops_version` -- see that field's docstring for why it
@@ -267,17 +314,53 @@ def _packed_ops_version(commands: list[CommandResult]) -> str | None:
     same reason: no `pack` step in this branch, no captured output, or nothing
     in the log that parses, all give `None` rather than raising. A version
     string nobody could read must not abort a run that otherwise completed.
-
-    The **last** match wins. uv prints a package's removal before its addition
-    (`- ops==3.8.1` then `+ ops==3.8.2`) when it replaces one, so the last
-    `ops==` in the log is the one that ended up in the charm; the first would
-    name the version that was thrown away.
     """
     pack = next((c for c in commands if c.step == "pack"), None)
     if pack is None:
         return None
-    matches = _PACKED_OPS_VERSION_RE.findall(f"{pack.stdout or ''}\n{pack.stderr or ''}")
-    return matches[-1] if matches else None
+    return _ops_version_in([pack])
+
+
+# The commands that can put an `ops` on the `none` branch's PATH, matched
+# against the command *string* because that branch labels no steps at all
+# (`CommandResult.step` is `None` on every one of them -- they are the
+# reporter's or the extractor's own commands, not a sequence this seam
+# planned). This is the `none`-branch analogue of `_packed_ops_version()`'s
+# `step == "pack"` key: both name the one command in the run whose output
+# says which `ops` was resolved.
+#
+# Deliberately not "scan every command's output". A `pytest` failure dump can
+# quote a requirements line or a traceback frame containing `ops==`, and
+# reading that as the resolved version would disclose a number nothing
+# installed. Only an installer's own output is evidence of what is importable.
+_OPS_RESOLVING_COMMAND_RE = re.compile(r"(?:\buv\s+(?:add|sync|pip\s+install)|\bpip3?\s+install)\b")
+
+
+def _resolved_ops_version(commands: list[CommandResult]) -> str | None:
+    """Best-effort `ops` version the `none` branch resolved, read out of its
+    own install commands' captured output.
+
+    `spike-step-5/second-dispatch/RESULT.md` §6.2 is the defect this closes.
+    `observed_ops_version` was scoped to the branches that `charmcraft pack`,
+    on the reasoning that only they resolve an `ops` -- but the `none` branch
+    resolves one too, from PyPI via `uv add 'ops[testing]'`, and prints it:
+
+        + ops==3.8.2
+
+    That line was already being captured, already rendered into the composed
+    comment's "Observed output" block, and still left `observed_ops=` unset --
+    so a comment quoted the answer four lines above a versions line that
+    declined to state it. The scoping argument was "`none` never packs at
+    all", which is true and led to the wrong place: packing was never what
+    mattered, resolving was.
+
+    Fails soft in every direction `_packed_ops_version()` does: no install
+    command, no captured output, or nothing that parses, all give `None`.
+    """
+    installs = [c for c in commands if _OPS_RESOLVING_COMMAND_RE.search(c.command or "")]
+    if not installs:
+        return None
+    return _ops_version_in(installs)
 
 
 class RunnerSeam(Protocol):
@@ -962,6 +1045,13 @@ class SubprocessRunnerSeam:
 
     def _run_none(self, hypothesis: Hypothesis, context: dict) -> RunResult:
         workdir = context.get("workdir", ".")
+        # These commands are `uv init`/`uv add`/`uv run`, and uv decides which
+        # environment to write to from `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT`
+        # before it ever looks at the working directory. The harness runs
+        # under `uv run` itself, so both can be set to the harness's own
+        # environment when we get here. See `scratch_command_env()`, and
+        # `runner_stage.prepare_scratch_project()` for the other half.
+        env = scratch_command_env(context.get("uv_project_environment"))
         commands = []
         for command in hypothesis.commands:
             started = time.monotonic()
@@ -972,6 +1062,7 @@ class SubprocessRunnerSeam:
                     capture_output=True,
                     timeout=PER_COMMAND_TIMEOUT_S,
                     text=True,
+                    env=env,
                 )
                 commands.append(
                     CommandResult(
@@ -991,7 +1082,18 @@ class SubprocessRunnerSeam:
                         elapsed_s=round(time.monotonic() - started, 3),
                     )
                 )
-        return RunResult(hypothesis_number=hypothesis.issue_number, branch="none", commands=commands)
+        return RunResult(
+            hypothesis_number=hypothesis.issue_number,
+            branch="none",
+            commands=commands,
+            # No `observed_juju_version`: this branch never touches a juju
+            # substrate, so there is nothing to ask and a host-wide `juju
+            # version` would attribute one to a run that didn't want it.
+            # `observed_ops_version` is a different matter -- this branch does
+            # resolve an `ops`, and it is the one the test actually imported.
+            # See `_resolved_ops_version()`.
+            observed_ops_version=_resolved_ops_version(commands),
+        )
 
     def _run_k8s_scratch(
         self, hypothesis: Hypothesis, surface: SurfaceInference | None, context: dict

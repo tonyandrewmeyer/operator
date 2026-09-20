@@ -112,7 +112,7 @@ def _on_db_relation_created(self, event: ops.RelationCreatedEvent):
         return
     credentials = self.create_database(event.app.name)
     data = DatabaseProviderAppData(credentials=credentials)
-    relation.save(data, event.app)
+    event.relation.save(data, event.app)
 ```
 
 See more: [](ops.Relation.save)
@@ -141,7 +141,7 @@ Now, in the body of the charm definition, define the event handler. In this exam
 def _on_smtp_relation_joined(self, event: ops.RelationJoinedEvent):
     smtp_credentials_secret_id = self.create_smtp_user(event.unit.name)
     data = SMTPProviderUnitData(smtp_credentials=smtp_credentials_secret_id)
-    relation.save(data, event.unit)
+    event.relation.save(data, event.unit)
 ```
 
 See more: [](ops.RelationJoinedEvent)
@@ -180,7 +180,7 @@ Once your charm has the relation object, it can be used in exactly the same way 
 Now, in the body of the charm definition, define the holistic event handler. In this example, we check if the relation exists yet, and for a provided secret using the ID provided in the relation data, and if we have both of those then we push that into a workload configuration:
 
 ```python
-def _update_configuration(self, _: ops.Eventbase):
+def _update_configuration(self, _: ops.EventBase):
     # This handles secret-changed and relation-changed.
     db_relation = self.model.get_relation('db')
     if not db_relation:
@@ -195,8 +195,8 @@ def _update_configuration(self, _: ops.Eventbase):
         refresh=True
     )
     self.push_configuration(
-        username=secret['username'],
-        password=secret['password'],
+        username=secret_contents['username'],
+        password=secret_contents['password'],
     )
 ```
 

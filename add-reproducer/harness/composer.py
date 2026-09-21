@@ -341,7 +341,7 @@ class ComposerInvalid(ValueError):
     `compose_template()` -- it never propagates to a caller."""
 
 
-_SCHEMA_INSTRUCTIONS = """\
+_SCHEMA_INSTRUCTIONS_HEAD = """\
 Given the reproduction run below, write a short, readable GitHub issue
 comment as JSON matching exactly this shape (PLAN.md Approach §6):
 
@@ -369,9 +369,15 @@ comment_body is markdown. It MUST include, in this order:
    on <base>/<substrate> at <timestamp>.": a partial attempt did not
    reproduce the bug, and saying "Reproduced" on that trailing line would
    contradict line 1's own "diverged" wording and overclaim what happened.
+"""
 
-If a "Synthesized test file" or "Test file" section is given below (exactly
-one of the two, matching its own heading verbatim), the commands section
+#: Emitted only when `_test_file_to_render()` actually supplied a test-file
+#: section. Unchanged text, moved out of the standing instructions so that
+#: its precondition is enforced by the prompt builder rather than asserted
+#: inside a paragraph the model reads either way.
+_TEST_FILE_INSTRUCTIONS_GIVEN = """\
+A "Synthesized test file" or "Test file" section is given below (exactly
+one of the two, matching its own heading verbatim). The commands section
 alone does not show it -- either it was written directly to disk rather than
 run as a shell command, or it was embedded in the extraction's own commands
 but is not part of the commands this run actually executed -- so a reader
@@ -383,7 +389,48 @@ block whose `<summary>` is the given heading text verbatim, with a blank
 line after the `<summary>` line, then the file's contents in their own
 fenced python code block, then `</details>`. Do not paraphrase, summarise,
 or truncate the file's contents.
+"""
 
+#: Emitted in place of the paragraph above when `_test_file_to_render()`
+#: returned `None`.
+#:
+#: `spike-step-5/fourth-dispatch/RESULT.md` §3.3: on both of that round's
+#: live runs the prompt carried no test-file section -- verified by exact
+#: reconstruction -- and `deepseek/deepseek-chat` rendered one anyway, both
+#: times, with different damage each time (a commands block missing the
+#: heredoc that writes the file, exit 4 when pasted; and the file body
+#: printed twice under a malformed `<Synthesized test file>` tag). Omitting
+#: the paragraph is evidently not the same as forbidding the section: the
+#: standing text described at length how to render one and then left the
+#: model to notice that its own precondition was absent. This says the
+#: quiet part out loud instead.
+_TEST_FILE_INSTRUCTIONS_WITHHELD = """\
+No "Synthesized test file" or "Test file" section is given below, and that
+is deliberate -- either this reproduction has no separate test file at all,
+or the commands section already shows the file in full, because the
+`cat > ... << 'PYEOF'` heredoc that writes it is itself one of the commands
+you are copying verbatim. Either way there is nothing a separate section
+could add.
+
+So do NOT write one. No `<details>` block and no `<summary>` anywhere in the
+comment; no "Synthesized test file" heading, no "Test file" heading, and no
+heading of your own invention that serves the same purpose; and no second
+copy of any file's contents. Do not reconstruct a file from the heredoc in
+the commands and show it above them. If you want the reader to see the test
+file, you show it by reproducing the commands below verbatim, which is the
+only place it belongs.
+
+A section here would be wrong twice over. It would repeat lines the reader
+meets again a few lines later, which is the duplication this comment format
+was changed to remove; and it would label them with a provenance
+("synthesized") that is not what happened, since nothing synthesised this
+file. Worse, inventing the section has in practice gone together with
+quietly dropping the heredoc from the commands block to avoid the
+repetition -- which leaves a reader pasting commands that reference a file
+nothing creates. The commands block is not yours to adjust for any reason.
+"""
+
+_SCHEMA_INSTRUCTIONS_TAIL = """\
 If a "Captured log records" section is given below, include it too,
 immediately after the "Observed output" block, under its own "Captured log
 records (not part of stdout/stderr):" heading, in a fenced code block,
@@ -420,6 +467,65 @@ comment at all, because the reader trusts it and skips verifying.
 """
 
 
+def _schema_instructions(*, test_file_given: bool) -> str:
+    """The composition instructions, with the test-file paragraph chosen to
+    match what the prompt below it actually supplies.
+
+    Before `fifth-dispatch`, the two branches were one standing paragraph
+    opening "If a ... section is given below", emitted whether or not one
+    was -- so on the withheld path the model read a detailed description of a
+    section it had not been given, and its only cue not to render one was the
+    absence it had to notice for itself. It did not notice, twice out of two
+    (`fourth-dispatch/RESULT.md` §3.3).
+    """
+    test_file_instructions = (
+        _TEST_FILE_INSTRUCTIONS_GIVEN if test_file_given else _TEST_FILE_INSTRUCTIONS_WITHHELD
+    )
+    return f"{_SCHEMA_INSTRUCTIONS_HEAD}\n{test_file_instructions}\n{_SCHEMA_INSTRUCTIONS_TAIL}"
+
+
+#: Fenced code block, tolerant of either fence character and of any info
+#: string (the prompt asks for ```shell; `fourth-dispatch`'s run 1 used it,
+#: but nothing makes a model do so and a block tagged `sh`, `bash`, `console`
+#: or nothing at all is the same block to a reader).
+_FENCE = re.compile(
+    r"^(?P<fence>```+|~~~+)[^\n]*\n(?P<content>.*?)^(?P=fence)[ \t]*$", re.MULTILINE | re.DOTALL
+)
+
+
+def _commands_in_block(content: str) -> list[str]:
+    """The `$ `-prefixed command sequence inside one fenced block.
+
+    A command is everything from its `$ ` line up to the next one, because
+    the heredoc that writes a test file is a single command spanning twenty
+    lines and `CommandResult.command` holds it that way. Splitting on lines
+    instead would make every heredoc look like a mismatch.
+    """
+    commands: list[str] = []
+    for line in content.split("\n"):
+        if line.startswith("$ "):
+            commands.append(line[2:])
+        elif commands:
+            commands[-1] += f"\n{line}"
+    return [c.rstrip("\n") for c in commands]
+
+
+def _rendered_command_sequences(body: str) -> list[list[str]]:
+    """Every fenced block in `body` that renders commands, as command lists.
+
+    More than one block can qualify: `_control_output()`'s section renders
+    its own `$ ` line, so "the commands block" is not simply "the block with
+    dollar signs in it". The caller asks whether *any* of them is the
+    sequence that ran rather than guessing which one was meant.
+    """
+    sequences = []
+    for match in _FENCE.finditer(body):
+        commands = _commands_in_block(match.group("content"))
+        if commands:
+            sequences.append(commands)
+    return sequences
+
+
 _DISCLAIMER_LINE = re.compile(r"^\s*>?\s*\**\s*(automated|generated)\b.*", re.IGNORECASE)
 
 
@@ -441,7 +547,13 @@ def _strip_leading_disclaimer(body: str) -> str:
 
 
 def _validate(
-    raw: dict, *, control_output: str | None, test_file_path: str | None, log_output: str | None
+    raw: dict,
+    *,
+    control_output: str | None,
+    test_file_path: str | None,
+    log_output: str | None,
+    commands: list[str],
+    withheld_test_file: TestFile | None,
 ) -> None:
     if not isinstance(raw, dict) or "comment_body" not in raw:
         raise ComposerInvalid(f"missing 'comment_body' key, got {raw!r}")
@@ -476,6 +588,58 @@ def _validate(
         raise ComposerInvalid(
             f"comment_body omits the test file {test_file_path!r} its commands reference"
         )
+    if commands and not any(seq == commands for seq in _rendered_command_sequences(body)):
+        # `fourth-dispatch/RESULT.md` §3.4, measured: run 1's comment printed
+        # three of the four commands that ran, dropping the `cat > test_cwd.py
+        # << 'PYEOF'` heredoc, and the three it printed give "ERROR: file or
+        # directory not found: test_cwd.py", exit 4, when pasted into a clean
+        # directory. Nothing else in `_validate()` could see that, because the
+        # dropped command is not a test-file *path* and the outcome, versions
+        # and observed output were all faithfully rendered.
+        #
+        # Equality of the whole sequence, not set membership and not
+        # subsequence. Subsequence is ruled out by the artefact that motivated
+        # the check: run 1's three commands ARE a subsequence of the four that
+        # ran, in order, so a subsequence test accepts the one comment this
+        # check exists to reject. Set equality does reject run 1, but accepts a
+        # reordering -- and "install, then write the file, then run it",
+        # reordered, fails for a reader exactly as an omission does, with the
+        # same "but the bot said it worked" cost. The prompt has always asked
+        # for the stronger thing in so many words ("do not add, remove,
+        # reorder, or 'clean up' any command"), so equality enforces the
+        # instruction that was already given rather than inventing a weaker
+        # one to be satisfiable.
+        raise ComposerInvalid(
+            f"comment_body's commands block is not the {len(commands)} commands that ran"
+        )
+    if withheld_test_file is not None:
+        # The path `fourth-dispatch` §3 found: `_test_file_to_render()`
+        # returned `None` because the commands already show the file, so the
+        # prompt supplied no test-file section -- and the model rendered one
+        # regardless, on both runs. `test_file_path` is `None` here by
+        # construction, which is why the check above it cannot see this.
+        #
+        # Two signals, because the two observed failures are not the same
+        # failure. Run 2 repeated the body verbatim, so counting it catches
+        # that one; run 1 dropped the heredoc, so its body appears once and
+        # only the structural signal catches it.
+        if body.count(withheld_test_file.body) > 1:
+            raise ComposerInvalid(
+                f"comment_body renders the body of {withheld_test_file.path!r} more than once"
+            )
+        if "<details>" in body.lower():
+            # The only `<details>` block either render path has ever emitted,
+            # and the only one `_schema_instructions()` ever asks for, is the
+            # test-file section -- so on the path where that section was
+            # withheld, a collapsed block is by construction one the prompt
+            # did not ask for. This does reject a model that collapsed
+            # something else of its own accord (a long observed-output block,
+            # say); that costs a fallback to a correct template comment,
+            # which is the side to be wrong on.
+            raise ComposerInvalid(
+                "comment_body renders a collapsed section where none was supplied "
+                f"(the commands already show {withheld_test_file.path!r})"
+            )
 
 
 class Composer:
@@ -490,6 +654,10 @@ class Composer:
     def __init__(self, llm: LLMSeam):
         self.llm = llm
 
+    # `_validate()` rejects a response whose commands block is not the
+    # commands that ran, which means every stub response a test hands this
+    # class has to carry one. `tests/test_composer.py::_commands_block()` is
+    # the test-side counterpart of this renderer.
     def compose(
         self,
         hypothesis: Hypothesis,
@@ -514,6 +682,15 @@ class Composer:
                 control_output=_control_output(run_result),
                 test_file_path=test_file.path if test_file is not None else None,
                 log_output=_log_output(run_result),
+                commands=[c.command for c in run_result.commands],
+                # Only when there *is* a test file and this comment
+                # deliberately declines to render it separately. With no test
+                # file anywhere, a `<details>` block is odd but not the
+                # duplication-and-false-provenance defect this guards, and
+                # rejecting it would be a scope this round has not measured.
+                withheld_test_file=(
+                    _resolved_test_file(hypothesis) if test_file is None else None
+                ),
             )
         except (LLMError, ComposerInvalid):
             # compose_template() already appends the marker -- return
@@ -557,7 +734,7 @@ class Composer:
             else ""
         )
         return (
-            f"{_SCHEMA_INSTRUCTIONS}\n"
+            f"{_schema_instructions(test_file_given=test_file is not None)}\n"
             f"Issue #{issue.number}: {issue.title}\n"
             f"Outcome: {outcome.value} -- {reason}\n"
             f"Versions: {_versions_line(hypothesis, run_result)}\n"

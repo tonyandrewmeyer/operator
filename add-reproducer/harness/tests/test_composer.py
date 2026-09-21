@@ -17,7 +17,10 @@ from composer import (
     AUTOMATION_PREFIX,
     Composer,
     ComposerInvalid,
+    _rendered_command_sequences,
     _resolved_test_file,
+    _test_file_to_render,
+    _validate,
     compose_template,
 )
 from models import (
@@ -75,6 +78,26 @@ class _StaticLLM:
         if self._error is not None:
             raise self._error
         return self._response
+
+
+def _commands_block(run: RunResult) -> str:
+    """The commands block a well-behaved response has to carry.
+
+    `spike-step-5/fifth-dispatch/RESULT.md` §2: `_validate()` now requires
+    that the response render `run_result.commands` exactly, so a stub whose
+    `comment_body` is a single sentence is no longer a *valid* response --
+    it is one that would fall back to the template. The ten stubs below that
+    predate the check are given a correct block rather than exempted from
+    it: each of those tests is about some other gate (control, log records,
+    test file, the prefix, the marker), and every one of them is a sharper
+    test of that gate when the response around it is otherwise well-formed.
+    """
+    lines = "\n".join(f"$ {c.command}" for c in run.commands)
+    return f"```shell\n{lines}\n```"
+
+
+def _stub_body(text: str, run: RunResult) -> dict:
+    return {"comment_body": f"{text}\n\n{_commands_block(run)}\n"}
 
 
 # --- compose_template() -------------------------------------------------
@@ -212,14 +235,14 @@ def test_composer_control_gate_not_applied_when_no_control_exists():
     # The control-mention requirement only applies when run_result.control
     # is actually set -- a plain `reproduced` outcome with no control must
     # not be penalised for never mentioning one.
-    llm = _StaticLLM(response={"comment_body": "Reproduced cleanly, nothing about any control."})
-    composer = Composer(llm)
     hyp = _load_hypothesis(2341)
     run = RunResult(
         hypothesis_number=2341,
         branch="none",
         commands=[CommandResult(command="uv run pytest -v", exit_code=1, stderr='"boom"')],
     )
+    llm = _StaticLLM(response=_stub_body("Reproduced cleanly, nothing about any control.", run))
+    composer = Composer(llm)
     hyp.observed = 'crashes with "boom"'
     # #2341's real extraction embeds a test file as a heredoc in commands[]
     # (spike-step-5/maintainer-review/FOLLOWUPS.md §1) -- irrelevant to what
@@ -283,14 +306,14 @@ def test_composer_log_gate_not_applied_when_no_log_records_exist():
     # The log-record-mention requirement only applies when a command
     # actually carries log_records -- a plain `reproduced` outcome with no
     # log records must not be penalised for never mentioning any.
-    llm = _StaticLLM(response={"comment_body": "Reproduced cleanly, no log records involved."})
-    composer = Composer(llm)
     hyp = _load_hypothesis(2341)
     run = RunResult(
         hypothesis_number=2341,
         branch="none",
         commands=[CommandResult(command="uv run pytest -v", exit_code=1, stderr='"boom"')],
     )
+    llm = _StaticLLM(response=_stub_body("Reproduced cleanly, no log records involved.", run))
+    composer = Composer(llm)
     hyp.observed = 'crashes with "boom"'
     # Same reason as test_composer_control_gate_not_applied_when_no_control_exists
     # above -- strip #2341's real heredoc-embedded test file, unrelated here.
@@ -328,11 +351,15 @@ def test_composer_never_calls_llm_for_silent_outcome():
 
 
 def test_composer_uses_llm_body_when_valid():
-    llm = _StaticLLM(response={"comment_body": "Reproduced cleanly.\n\nVersions: repo=main\n\nControl run confirmed the observer works."})
-    composer = Composer(llm)
     hyp = _load_hypothesis(2639)
     run = _load_run(2639)
     issue = _load_issue(2639)
+    llm = _StaticLLM(
+        response=_stub_body(
+            "Reproduced cleanly.\n\nVersions: repo=main\n\nControl run confirmed the observer works.", run
+        )
+    )
+    composer = Composer(llm)
     body = composer.compose(hyp, issue, run, Outcome.REPRODUCED_POSITIVE_SIGNAL_ABSENT, "control confirmed", run_id="run-x", timestamp="2026-07-27T00:00:00Z")
     assert after_prefix(body).startswith("Reproduced cleanly.")
     assert llm.calls == 1
@@ -484,18 +511,18 @@ def test_composer_llm_response_missing_heredoc_test_file_falls_back_to_template(
 
 
 def test_composer_llm_response_including_heredoc_test_file_is_accepted():
-    llm = _StaticLLM(
-        response={
-            "comment_body": "Reproduced.\n\n<details>\n<summary>Test file: repro_test.py</summary>\n\n```python\n...\n```\n\n</details>\n"
-        }
-    )
-    composer = Composer(llm)
     hyp = _load_hypothesis(2341)
     run = RunResult(
         hypothesis_number=2341,
         branch="none",
         commands=[CommandResult(command="uv run pytest repro_test.py -v", exit_code=0, stdout="1 passed in 0.08s")],
     )
+    llm = _StaticLLM(
+        response=_stub_body(
+            "Reproduced.\n\n<details>\n<summary>Test file: repro_test.py</summary>\n\n```python\n...\n```\n\n</details>", run
+        )
+    )
+    composer = Composer(llm)
     got = composer.compose(hyp, _load_issue(2341), run, Outcome.REPRODUCED, "matched", run_id="run-x", timestamp="t")
     assert after_prefix(got).startswith("Reproduced.")
 
@@ -548,16 +575,14 @@ def test_composer_llm_response_missing_test_file_falls_back_to_template():
 
 
 def test_composer_llm_response_including_test_file_is_accepted():
-    llm = _StaticLLM(
-        response={
-            "comment_body": (
-                "Reproduced.\n\ntest_issue_9999_repro.py:\n```python\ndef test_x():\n    assert False\n```\n"
-            )
-        }
-    )
-    composer = Composer(llm)
     hyp = _hypothesis_with_test_file()
     run = RunResult(hypothesis_number=9999, branch="none", commands=[CommandResult(command=c, exit_code=0) for c in hyp.commands])
+    llm = _StaticLLM(
+        response=_stub_body(
+            "Reproduced.\n\ntest_issue_9999_repro.py:\n```python\ndef test_x():\n    assert False\n```", run
+        )
+    )
+    composer = Composer(llm)
     got = composer.compose(hyp, _issue_9999(), run, Outcome.REPRODUCED, "matched", run_id="run-x", timestamp="t")
     assert after_prefix(got).startswith("Reproduced.")
     assert "test_issue_9999_repro.py" in got
@@ -566,11 +591,11 @@ def test_composer_llm_response_including_test_file_is_accepted():
 def test_composer_test_file_gate_not_applied_when_none_exists():
     # #2639 has no synthesized test file -- a comment that never mentions
     # one must not be penalised for it.
-    llm = _StaticLLM(response={"comment_body": "Reproduced cleanly.\n\nControl run confirmed the observer works."})
-    composer = Composer(llm)
     hyp = _load_hypothesis(2639)
     run = _load_run(2639)
     issue = _load_issue(2639)
+    llm = _StaticLLM(response=_stub_body("Reproduced cleanly.\n\nControl run confirmed the observer works.", run))
+    composer = Composer(llm)
     body = composer.compose(hyp, issue, run, Outcome.REPRODUCED_POSITIVE_SIGNAL_ABSENT, "control confirmed", run_id="run-x", timestamp="t")
     assert after_prefix(body).startswith("Reproduced cleanly.")
 
@@ -580,15 +605,17 @@ def test_composer_fixture_llm_replays_a_composition_recording(tmp_path):
     # present, FixtureLLM serves it and Composer uses it directly, no
     # fallback.
     fixtures_dir = tmp_path
-    (fixtures_dir / "compositions").mkdir()
-    (fixtures_dir / "compositions" / "2639.json").write_text(
-        json.dumps({"comment_body": "Recorded composition body.\n\nControl run confirmed the observer works."})
-    )
-    llm = FixtureLLM(fixtures_dir)
-    composer = Composer(llm)
     hyp = _load_hypothesis(2639)
     run = _load_run(2639)
     issue = _load_issue(2639)
+    (fixtures_dir / "compositions").mkdir()
+    (fixtures_dir / "compositions" / "2639.json").write_text(
+        json.dumps(
+            _stub_body("Recorded composition body.\n\nControl run confirmed the observer works.", run)
+        )
+    )
+    llm = FixtureLLM(fixtures_dir)
+    composer = Composer(llm)
     got = composer.compose(hyp, issue, run, Outcome.REPRODUCED_POSITIVE_SIGNAL_ABSENT, "control confirmed", run_id="run-y", timestamp="t")
     assert after_prefix(got).startswith("Recorded composition body.")
     assert "add-reproducer:issue=2639:run=run-y" in got
@@ -630,7 +657,7 @@ def test_template_prefixes_every_comment_worthy_outcome(outcome):
 
 def test_llm_path_prefixes_the_model_body():
     hyp, issue, run = _prefix_case()
-    llm = _StaticLLM({"comment_body": "Reproduced. Here is what happened."})
+    llm = _StaticLLM(_stub_body("Reproduced. Here is what happened.", run))
     got = Composer(llm).compose(hyp, issue, run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
     assert got.startswith(AUTOMATION_PREFIX + "\n\n")
     assert after_prefix(got).startswith("Reproduced. Here is what happened.")
@@ -641,7 +668,7 @@ def test_llm_path_does_not_double_the_disclaimer():
     when it does anyway. Cosmetic, so repaired rather than rejected."""
     hyp, issue, run = _prefix_case()
     llm = _StaticLLM(
-        {"comment_body": "> **Automated attempt** -- please verify.\n\nReproduced. Here is what happened."}
+        _stub_body("> **Automated attempt** -- please verify.\n\nReproduced. Here is what happened.", run)
     )
     got = Composer(llm).compose(hyp, issue, run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
     assert got.count("Automated") == 1
@@ -888,12 +915,13 @@ def test_the_llm_path_is_not_asked_for_a_file_the_commands_already_show():
     asking the model to include a `<details>` block whose heading says the
     commands do not show the file would reintroduce the contradiction one
     layer up, and demanding the path back would reject a correct comment."""
-    llm = _StaticLLM(response={"comment_body": "The bug reproduced in this automated attempt."})
+    run = _dispatch_run()
+    llm = _StaticLLM(response=_stub_body("The bug reproduced in this automated attempt.", run))
     composer = Composer(llm)
     got = composer.compose(
         _dispatch_hypothesis(),
         _dispatch_issue(),
-        _dispatch_run(),
+        run,
         Outcome.REPRODUCED_WEAKER,
         "reason",
         run_id="r1",
@@ -930,3 +958,370 @@ def test_a_none_branch_comment_now_discloses_the_ops_it_resolved():
     # Still no juju: this branch provisions no substrate, and the asymmetry
     # between the two fields is the point, not an oversight.
     assert "observed_juju=" not in body
+
+
+# --- The live composer's invented test-file section
+# (spike-step-5/fourth-dispatch/RESULT.md §3, fixed in fifth-dispatch) ----
+#
+# On the path where the extraction's test file is a heredoc inside
+# `commands[]`, `_test_file_to_render()` returns `None` and `_build_prompt()`
+# emits no test-file section. `deepseek/deepseek-chat` rendered one anyway on
+# both of the fourth round's live runs, with different damage each time --
+# run 1 dropped the heredoc from its commands block (its three printed
+# commands give "ERROR: file or directory not found: test_cwd.py", exit 4,
+# when pasted), run 2 kept it and printed the body twice under a malformed
+# `<Synthesized test file>` tag.
+#
+# The four files under `fixtures/composed/` are those two runs' own
+# artefacts, byte-for-byte as GitHub Actions uploaded them: `<n>-run.json` is
+# the `add-reproducer-run` artefact's `2045-run.json` and `<n>.md` is its
+# `2045.md`, the composed-and-withheld comment. Nothing below is transcribed
+# or reconstructed, so these are regressions against what the model really
+# returned rather than against a description of it.
+
+_LIVE_RUNS = {
+    "run1": "35442613976",  # dropped the heredoc from its commands block
+    "run2": "35442768800",  # kept it, and printed the body twice
+}
+
+
+def _live(which: str) -> tuple[Hypothesis, RunResult, str]:
+    """The hypothesis, run result and model `comment_body` of one fourth-round
+    live run.
+
+    `2045.md` is the *composed* comment, so it carries `AUTOMATION_PREFIX`
+    and the marker that `Composer.compose()` adds around the model's body.
+    Both are stripped back off here, which reconstructs exactly the string
+    `_validate()` was handed at the time.
+    """
+    run_id = _LIVE_RUNS[which]
+    raw = json.loads((FIXTURES / "composed" / f"2045-{run_id}-run.json").read_text())
+    run = RunResult.from_dict(raw)
+    hyp = Hypothesis.from_dict(2045, raw["hypothesis"])
+    composed = (FIXTURES / "composed" / f"2045-{run_id}.md").read_text()
+    body = after_prefix(composed)
+    marker = f"<!-- add-reproducer:issue=2045:run={run_id} -->"
+    assert body.rstrip().endswith(marker), body[-200:]
+    return hyp, run, body.rstrip()[: -len(marker)].rstrip()
+
+
+def _validate_live(which: str) -> None:
+    """`_validate()` with exactly the arguments `Composer.compose()` builds
+    for this run."""
+    hyp, run, body = _live(which)
+    test_file = _test_file_to_render(hyp, run)
+    assert test_file is None, "these runs are on the withheld path; that is the premise"
+    _validate(
+        {"comment_body": body},
+        control_output=None,
+        test_file_path=None,
+        log_output=None,
+        commands=[c.command for c in run.commands],
+        withheld_test_file=_resolved_test_file(hyp),
+    )
+
+
+def test_the_fourth_rounds_live_runs_are_both_on_the_withheld_path():
+    """The premise, asserted rather than assumed: no synthesised file, the
+    test file a heredoc inside the extraction's own commands, the run
+    executing that heredoc -- so the commands block shows the body and
+    `_test_file_to_render()` correctly declines to show it again."""
+    for which, run_id in _LIVE_RUNS.items():
+        hyp, run, _ = _live(which)
+        assert hyp.synthesized_test_file is None, which
+        assert _resolved_test_file(hyp) is not None, which
+        assert _test_file_to_render(hyp, run) is None, which
+        assert run.branch == "none", which
+        assert len(run.commands) == 4, (which, run_id)
+
+
+def test_run_1s_real_output_is_rejected():
+    """The commands check, against the artefact that motivated it. Run 1's
+    comment prints three of the four commands that ran, dropping the
+    `cat > test_cwd.py << 'PYEOF'` heredoc."""
+    with pytest.raises(ComposerInvalid, match="commands block is not the 4 commands"):
+        _validate_live("run1")
+
+
+def test_run_2s_real_output_is_rejected():
+    """The test-file-section check, against the artefact that motivated it.
+    Run 2's commands block is faithful -- all four, verbatim -- so nothing
+    about the commands could have caught it; what is wrong is the section
+    above them."""
+    with pytest.raises(ComposerInvalid, match="more than once"):
+        _validate_live("run2")
+
+
+def test_neither_live_run_could_have_been_caught_before():
+    """The gap this round closes, stated as a test rather than as prose.
+
+    `_validate()`'s test-file check keys on `test_file_path`, which is
+    `None` on exactly this path, and none of the other three checks looks at
+    the commands at all -- so the pre-existing gates accept both comments."""
+    for which in _LIVE_RUNS:
+        hyp, run, body = _live(which)
+        _validate(
+            {"comment_body": body},
+            control_output=None,
+            test_file_path=None,
+            log_output=None,
+            commands=[],
+            withheld_test_file=None,
+        )
+
+
+def test_run_1s_commands_are_a_subsequence_of_what_ran():
+    """Why "matches" is sequence equality and not subsequence, measured on
+    the artefact rather than argued.
+
+    Run 1 dropped a command without reordering or inventing one, so what it
+    printed *is* an in-order subsequence of what ran -- a subsequence test
+    would accept the one comment this check exists to reject."""
+    _, run, body = _live("run1")
+    ran = [c.command for c in run.commands]
+    printed = _rendered_command_sequences(body)[0]
+    assert printed != ran
+    assert len(printed) == 3
+
+    def is_subsequence(small, large):
+        it = iter(large)
+        return all(item in it for item in small)
+
+    assert is_subsequence(printed, ran)
+
+
+def test_a_reordered_commands_block_is_rejected():
+    """Why "matches" is sequence equality and not set equality. Set equality
+    rejects run 1 too, but accepts this -- and "write the file, then install,
+    then run it" reordered into "run it, then write the file" fails for a
+    reader exactly as an omission does."""
+    _, run, _ = _live("run2")
+    ran = [c.command for c in run.commands]
+    shuffled = [ran[3], ran[0], ran[1], ran[2]]
+    block = "\n".join(f"$ {c}" for c in shuffled)
+    with pytest.raises(ComposerInvalid, match="commands block is not the 4 commands"):
+        _validate(
+            {"comment_body": f"Reproduced.\n\n```shell\n{block}\n```\n"},
+            control_output=None,
+            test_file_path=None,
+            log_output=None,
+            commands=ran,
+            withheld_test_file=None,
+        )
+    assert sorted(shuffled) == sorted(ran)
+
+
+def test_a_faithful_commands_block_is_accepted():
+    """The check must not reject the comment this round is trying to get.
+    Run 2's commands block is the faithful one, heredoc and all, so it
+    passes the commands check on its own."""
+    _, run, body = _live("run2")
+    _validate(
+        {"comment_body": body},
+        control_output=None,
+        test_file_path=None,
+        log_output=None,
+        commands=[c.command for c in run.commands],
+        withheld_test_file=None,
+    )
+
+
+def test_a_heredoc_command_is_read_as_one_command():
+    """The parse that makes the check usable at all: a heredoc that writes a
+    twenty-line test file is one `CommandResult.command`, and it renders as a
+    `$ ` line followed by twenty lines that are not. Splitting on lines would
+    make every heredoc in the corpus look like a mismatch."""
+    _, run, body = _live("run2")
+    printed = _rendered_command_sequences(body)[0]
+    assert printed == [c.command for c in run.commands]
+    assert printed[2].startswith("cat > test_getcwd.py << 'PYEOF'")
+    assert printed[2].endswith("PYEOF")
+    assert "\n" in printed[2]
+
+
+@pytest.mark.parametrize("fence", ["```shell", "```sh", "```bash", "```console", "```", "~~~shell"])
+def test_the_commands_block_is_found_whatever_its_fence(fence):
+    """The prompt asks for ```shell and run 1 used it, but nothing makes a
+    model do so -- and a block tagged `sh` or tagged nothing is the same
+    block to a reader. Rejecting over the info string would be a fallback
+    bought for no reader-visible gain."""
+    close = "~~~" if fence.startswith("~~~") else "```"
+    _, run, _ = _live("run2")
+    ran = [c.command for c in run.commands]
+    block = "\n".join(f"$ {c}" for c in ran)
+    _validate(
+        {"comment_body": f"Reproduced.\n\n{fence}\n{block}\n{close}\n"},
+        control_output=None,
+        test_file_path=None,
+        log_output=None,
+        commands=ran,
+        withheld_test_file=None,
+    )
+
+
+def test_a_control_blocks_dollar_line_is_not_mistaken_for_the_commands():
+    """`_control_output()` renders its own `$ ` line, so "the block with
+    dollar signs in it" is not a unique description. The check asks whether
+    *any* block is the sequence that ran rather than guessing which one was
+    meant -- and the control block, being one command, is not it."""
+    _, run, _ = _live("run2")
+    ran = [c.command for c in run.commands]
+    block = "\n".join(f"$ {c}" for c in ran)
+    body = (
+        f"Reproduced.\n\n```shell\n{block}\n```\n\n"
+        "Control (re-run to confirm the observer itself works):\n"
+        "```\n$ juju debug-log --replay\nunit-my-charm-0: nothing\n```\n"
+    )
+    sequences = _rendered_command_sequences(body)
+    assert len(sequences) == 2
+    assert sequences[1] == ["juju debug-log --replay\nunit-my-charm-0: nothing"]
+    _validate(
+        {"comment_body": body},
+        control_output="$ juju debug-log --replay",
+        test_file_path=None,
+        log_output=None,
+        commands=ran,
+        withheld_test_file=None,
+    )
+
+
+def test_a_collapsed_section_is_rejected_where_none_was_supplied():
+    """The structural half of the test-file check, and the half that catches
+    run 1: its `<details>` body appears only once in the comment, because it
+    dropped the heredoc, so counting the body does not see it."""
+    hyp, run, body = _live("run1")
+    assert body.count(_resolved_test_file(hyp).body) == 1
+    assert "<details>" in body
+    with pytest.raises(ComposerInvalid, match="collapsed section"):
+        _validate(
+            {"comment_body": body},
+            control_output=None,
+            test_file_path=None,
+            log_output=None,
+            commands=[],  # commands check disabled, so only this one can fire
+            withheld_test_file=_resolved_test_file(hyp),
+        )
+
+
+def test_run_2s_duplication_is_the_defect_the_third_dispatch_closed():
+    """`third-dispatch/RESULT.md` §1 stopped the *template* rendering the
+    body twice. Run 2 is the same fourteen-line duplication arriving through
+    the model instead, and this is it measured on the real comment."""
+    hyp, _, body = _live("run2")
+    assert body.count(_resolved_test_file(hyp).body) == 2
+
+
+def test_the_withheld_check_does_not_fire_when_the_section_was_supplied():
+    """`#2341`'s shape: the executed run replays only the final pytest
+    invocation, so the heredoc never reaches the commands block, the section
+    is genuinely required, and a `<details>` block is correct. This must stay
+    accepted."""
+    hyp = _load_hypothesis(2341)
+    run = RunResult(
+        hypothesis_number=2341,
+        branch="none",
+        commands=[CommandResult(command="uv run pytest repro_test.py -v", exit_code=0, stdout="1 passed")],
+    )
+    assert _test_file_to_render(hyp, run) is not None
+    llm = _StaticLLM(
+        response=_stub_body(
+            "Reproduced.\n\n<details>\n<summary>Test file: repro_test.py</summary>\n\n"
+            "```python\n...\n```\n\n</details>",
+            run,
+        )
+    )
+    got = Composer(llm).compose(hyp, _load_issue(2341), run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
+    assert after_prefix(got).startswith("Reproduced.")
+    assert "<details>" in got
+
+
+def test_a_rejected_live_comment_falls_back_to_the_template():
+    """What `_validate()` failing *does*, end to end and for both runs: the
+    same thing every other check in it already does. Not a retry (a second
+    live call, with no evidence it converges -- the defect was 2/2 and the
+    damage differed), and not an annotation (which ships the wrong commands
+    block with a note admitting it). The template is not an arbitrary
+    fallback here: it renders `run_result.commands` verbatim and applies
+    `_test_file_to_render()` itself, so it is right by construction about
+    exactly the two things these checks test."""
+    for which in _LIVE_RUNS:
+        hyp, run, body = _live(which)
+        issue = _dispatch_issue()
+        llm = _StaticLLM(response={"comment_body": body})
+        got = Composer(llm).compose(
+            hyp, issue, run, Outcome.REPRODUCED_WEAKER, "reason", run_id=_LIVE_RUNS[which], timestamp="t"
+        )
+        want = compose_template(
+            hyp, issue, run, Outcome.REPRODUCED_WEAKER, "reason", run_id=_LIVE_RUNS[which], timestamp="t"
+        )
+        assert got == want, which
+        assert llm.calls == 1, which
+        # And the fallback is a comment a reader can actually paste: every
+        # command that ran, in order, the heredoc included.
+        assert _rendered_command_sequences(got)[0] == [c.command for c in run.commands], which
+        assert "<details>" not in got, which
+
+
+# --- The prompt's conditional (fifth-dispatch item 1) --------------------
+
+
+def test_the_withheld_path_forbids_the_section_rather_than_omitting_it():
+    """The fix to the prompt. Before this round `_SCHEMA_INSTRUCTIONS` was one
+    string carrying the "If a ... section is given below" paragraph whether or
+    not one was, so the model's only cue was an absence it had to notice."""
+    hyp, run, _ = _live("run1")
+    prompt = Composer._build_prompt(
+        hyp, _dispatch_issue(), run, Outcome.REPRODUCED_WEAKER, "reason", "t"
+    )
+    assert "So do NOT write one." in prompt
+    assert "No `<details>` block and no `<summary>` anywhere in the" in prompt
+    assert "A \"Synthesized test file\" or \"Test file\" section is given below" not in prompt
+    # Still no section, which is the property the third dispatch added and
+    # this round must not regress.
+    assert "Test file: " not in prompt
+    assert "Synthesized test file: " not in prompt
+
+
+def test_the_supplied_path_still_asks_for_the_section():
+    """The other side of the conditional: `#2341`'s shape must keep the
+    rendering instructions it has always had, verbatim."""
+    hyp = _load_hypothesis(2341)
+    run = RunResult(
+        hypothesis_number=2341,
+        branch="none",
+        commands=[CommandResult(command="uv run pytest repro_test.py -v", exit_code=0, stdout="1 passed")],
+    )
+    prompt = Composer._build_prompt(hyp, _load_issue(2341), run, Outcome.REPRODUCED, "matched", "t")
+    assert 'A "Synthesized test file" or "Test file" section is given below' in prompt
+    assert "So do NOT write one." not in prompt
+    assert "<summary>` is the given heading text verbatim" in prompt
+    assert "Test file: repro_test.py" in prompt
+
+
+def test_both_branches_keep_the_rest_of_the_instructions():
+    """Splitting one string into head/branch/tail is the kind of change that
+    silently drops a paragraph. Both prompts must still carry the numbered
+    list, the log-record paragraph, the control paragraph and the closing
+    warning, in that order."""
+    supplied_hyp = _load_hypothesis(2341)
+    supplied_run = RunResult(
+        hypothesis_number=2341,
+        branch="none",
+        commands=[CommandResult(command="uv run pytest repro_test.py -v", exit_code=0, stdout="1 passed")],
+    )
+    withheld_hyp, withheld_run, _ = _live("run1")
+    prompts = [
+        Composer._build_prompt(supplied_hyp, _load_issue(2341), supplied_run, Outcome.REPRODUCED, "m", "t"),
+        Composer._build_prompt(withheld_hyp, _dispatch_issue(), withheld_run, Outcome.REPRODUCED_WEAKER, "r", "t"),
+    ]
+    markers = [
+        '  "comment_body": str',
+        "1. One line stating the outcome plainly",
+        "5. One line: \"Reproduced on <base>/<substrate> at <timestamp>.\"",
+        'If a "Captured log records" section is given below',
+        'If a "Control run" section is given below',
+        "A confidently wrong comment is worse than no",
+    ]
+    for prompt in prompts:
+        positions = [prompt.index(m) for m in markers]
+        assert positions == sorted(positions), prompt[:400]

@@ -1,0 +1,71 @@
+{
+  "branch": "none",
+  "hypothesis": {
+    "issue_number": 2045,
+    "in_scope": true,
+    "moving_parts": {
+      "repo_version": null,
+      "juju_version": null,
+      "base": null,
+      "substrate": "none",
+      "other": {},
+      "ci_run_url": null,
+      "symbol_anchor": null
+    },
+    "commands": [
+      "uv init --bare .",
+      "uv add 'ops[testing]'",
+      "cat > test_getcwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, *args):\n        super().__init__(*args)\n        self.framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, _):\n        cwd = os.getcwd()\n        assert cwd == self.framework.charm_dir, f'Expected {self.framework.charm_dir}, got {cwd}'\n\n@pytest.fixture\ndef charm_ctx():\n    meta = {'name': 'my-charm'}\n    ctx = testing.Context(MyCharm, meta=meta)\n    return ctx\n\ndef test_getcwd(charm_ctx):\n    with charm_ctx(charm_ctx.on.update_status(), testing.State()) as mgr:\n        pass\nPYEOF",
+      "uv run pytest test_getcwd.py -v"
+    ],
+    "expected": "The charm's current working directory should be the charm root (self.framework.charm_dir).",
+    "observed": "The current working directory is the repository root instead of the charm root.",
+    "confidence": "medium",
+    "synthesized_test_file": null
+  },
+  "surface": null,
+  "hypothesis_number": 2045,
+  "commands": [
+    {
+      "command": "uv init --bare .",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "Adding `repro` as member of workspace `/tmp/add-reproducer-scratch-axqyu3dq/issue-2045`\nInitialized project `repro` at `/tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro`\n",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.007
+    },
+    {
+      "command": "uv add 'ops[testing]'",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "Resolved 16 packages in 51ms\nInstalled 6 packages in 2ms\n + opentelemetry-api==1.44.0\n + ops==3.8.2\n + ops-scenario==8.8.2\n + pyyaml==6.0.3\n + typing-extensions==4.16.0\n + websocket-client==1.9.2\n",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.101
+    },
+    {
+      "command": "cat > test_getcwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, *args):\n        super().__init__(*args)\n        self.framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, _):\n        cwd = os.getcwd()\n        assert cwd == self.framework.charm_dir, f'Expected {self.framework.charm_dir}, got {cwd}'\n\n@pytest.fixture\ndef charm_ctx():\n    meta = {'name': 'my-charm'}\n    ctx = testing.Context(MyCharm, meta=meta)\n    return ctx\n\ndef test_getcwd(charm_ctx):\n    with charm_ctx(charm_ctx.on.update_status(), testing.State()) as mgr:\n        pass\nPYEOF",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.003
+    },
+    {
+      "command": "uv run pytest test_getcwd.py -v",
+      "exit_code": 1,
+      "stdout": "============================= test session starts ==============================\nplatform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /tmp/add-reproducer-scratch-axqyu3dq/issue-2045/.venv/bin/python\ncachedir: .pytest_cache\nrootdir: /tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro\nconfigfile: pyproject.toml\ncollecting ... collected 1 item\n\ntest_getcwd.py::test_getcwd FAILED                                       [100%]\n\n=================================== FAILURES ===================================\n_________________________________ test_getcwd __________________________________\n\nself = <test_getcwd.MyCharm object at 0x7f57d6366180>\n_ = <UpdateStatusEvent via MyCharm/on/update_status[1]>\n\n    def _on_update_status(self, _):\n        cwd = os.getcwd()\n>       assert cwd == self.framework.charm_dir, f'Expected {self.framework.charm_dir}, got {cwd}'\nE       AssertionError: Expected /tmp/tmpq0gznwh1, got /tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro\nE       assert '/tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro' == PosixPath('/tmp/tmpq0gznwh1')\nE        +  where PosixPath('/tmp/tmpq0gznwh1') = <scenario._ops_main_mock.CapturingFramework object at 0x7f57d6366c60>.charm_dir\nE        +    where <scenario._ops_main_mock.CapturingFramework object at 0x7f57d6366c60> = <test_getcwd.MyCharm object at 0x7f57d6366180>.framework\n\ntest_getcwd.py:13: AssertionError\n\nThe above exception was the direct cause of the following exception:\n\ncharm_ctx = <scenario.context.Context object at 0x7f57d64f4080>\n\n    def test_getcwd(charm_ctx):\n>       with charm_ctx(charm_ctx.on.update_status(), testing.State()) as mgr:\n\ntest_getcwd.py:22: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n../.venv/lib/python3.12/site-packages/scenario/context.py:164: in __exit__\n    self.run()\n../.venv/lib/python3.12/site-packages/scenario/context.py:132: in run\n    self._exit_wrapped_ctx(*sys.exc_info())\n../.venv/lib/python3.12/site-packages/scenario/context.py:155: in _exit_wrapped_ctx\n    self._wrapped_ctx.__exit__(exc_type, exc_val, exc_tb)\n/usr/lib/python3.12/contextlib.py:158: in __exit__\n    self.gen.throw(value)\n../.venv/lib/python3.12/site-packages/scenario/context.py:964: in _run\n    with runtime.exec(\n/usr/lib/python3.12/contextlib.py:158: in __exit__\n    self.gen.throw(value)\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <scenario._runtime.Runtime object at 0x7f57d666faa0>\nstate = State(config={}, relations=frozenset(), networks=frozenset(), containers=frozenset(), storages=frozenset(), opened_por..., deferred=[], stored_states=frozenset(), app_status=UnknownStatus(), unit_status=UnknownStatus(), workload_version='')\nevent = _Event(path='update_status', storage=None, relation=None, relation_remote_unit_id=None, relation_departed_unit_id=None...tion=None, custom_event=None, custom_event_args=(), custom_event_kwargs={}, _owner_path=[], _juju_name='update-status')\ncontext = <scenario.context.Context object at 0x7f57d64f4080>\n\n    @contextmanager\n    def exec(\n        self,\n        state: State,\n        event: _Event,\n        context: Context[CharmType],\n    ) -> Generator[Ops[CharmType]]:\n        \"\"\"Runs an event with this state as initial state on a charm.\n    \n        Returns the 'output state', that is, the state as mutated by the charm during the\n        event handling.\n    \n        This will set the environment up and call ops.main().\n        After that it's up to Ops.\n        \"\"\"\n        from ._consistency_checker import check_consistency  # avoid cycles\n    \n        check_consistency(state, event, self._charm_spec, self._juju_version, self._unit_id)\n    \n        charm_type = self._charm_spec.charm_type\n        logger.info(f'Preparing to fire {event.name} on {charm_type.__name__}')\n    \n        # we make a copy to avoid mutating the input state\n        output_state = copy.deepcopy(state)\n    \n        logger.info(' - generating virtual charm root')\n        with self._virtual_charm_root() as temporary_charm_root:\n            logger.info(' - preparing env')\n            env = self._get_event_env(\n                state=state,\n                event=event,\n                charm_root=temporary_charm_root,\n            )\n            juju_context = JujuContext.from_environ(env)\n            # We need to set JUJU_VERSION in os.environ, because charms may use\n            # `JujuVersion.from_environ()` to get the (simulated) Juju version.\n            # For consistency, we put all the other ones there too, although we'd\n            # like to change this in the future.\n            previous_env = os.environ.copy()\n            os.environ.update(env)\n    \n            logger.info(' - entering ops.main (mocked)')\n            from ._ops_main_mock import Ops\n    \n            ops = None\n    \n            try:\n                ops = Ops(\n                    state=output_state,\n                    event=event,\n                    context=context,\n                    charm_spec=dataclasses.replace(\n                        self._charm_spec,\n                        charm_type=self._wrap(charm_type),\n                    ),\n                    juju_context=juju_context,\n                )\n    \n                try:\n                    yield ops\n                except _Abort as e:\n                    # If ops raised _Abort(0) within the charm code then we want to treat that as\n                    # normal completion.\n                    if e.exit_code != 0:\n                        raise\n    \n            except (NoObserverError, ActionFailed):\n                raise  # propagate along\n            except Exception as e:\n                bare = os.getenv('SCENARIO_BARE_CHARM_ERRORS', 'false')\n                if bare.lower() == 'true' or (bare.isdigit() and int(bare)):\n                    raise\n                # The following is intentionally on one long line, so that the last line of pdb\n                # output shows the error message (pdb shows the \"raise\" line).\n>               raise UncaughtCharmError(f'Uncaught {type(e).__name__} in charm, try \"exceptions [n]\" if using pdb on Python 3.13+. Details: {e!r}') from e  # fmt: skip  # ruff: ignore[line-too-long]\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE               scenario.errors.UncaughtCharmError: Uncaught AssertionError in charm, try \"exceptions [n]\" if using pdb on Python 3.13+. Details: AssertionError(\"Expected /tmp/tmpq0gznwh1, got /tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro\\nassert '/tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro' == PosixPath('/tmp/tmpq0gznwh1')\\n +  where PosixPath('/tmp/tmpq0gznwh1') = <scenario._ops_main_mock.CapturingFramework object at 0x7f57d6366c60>.charm_dir\\n +    where <scenario._ops_main_mock.CapturingFramework object at 0x7f57d6366c60> = <test_getcwd.MyCharm object at 0x7f57d6366180>.framework\")\n\n../.venv/lib/python3.12/site-packages/scenario/_runtime.py:366: UncaughtCharmError\n------------------------------ Captured log call -------------------------------\nDEBUG    root:_main.py:340 ops 3.8.2 up and running.\nDEBUG    root:storage.py:70 Initializing SQLite local storage: :memory:.\nDEBUG    root:_main.py:476 Emitting Juju event update_status.\n=========================== short test summary info ============================\nFAILED test_getcwd.py::test_getcwd - scenario.errors.UncaughtCharmError: Uncaught AssertionError in charm, try \"exceptions [n]\" if using pdb on Python 3.13+. Details: AssertionError(\"Expected /tmp/tmpq0gznwh1, got /tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro\\nassert '/tmp/add-reproducer-scratch-axqyu3dq/issue-2045/repro' == PosixPath('/tmp/tmpq0gznwh1')\\n +  where PosixPath('/tmp/tmpq0gznwh1') = <scenario._ops_main_mock.CapturingFramework object at 0x7f57d6366c60>.charm_dir\\n +    where <scenario._ops_main_mock.CapturingFramework object at 0x7f57d6366c60> = <test_getcwd.MyCharm object at 0x7f57d6366180>.framework\")\n============================== 1 failed in 0.33s ===============================\n",
+      "stderr": "",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.83
+    }
+  ],
+  "control": null,
+  "aborted_at_step": null,
+  "skipped_steps": [],
+  "observed_juju_version": null,
+  "observed_ops_version": "3.8.2"
+}

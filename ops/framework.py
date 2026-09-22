@@ -38,6 +38,9 @@ from ._private import tracer
 from .model import Model, _ModelBackend
 from .storage import JujuStorage, NoSnapshotError, SQLiteStorage
 
+if TYPE_CHECKING:
+    from typing_extensions import Self
+
 
 class Serializable(typing.Protocol):
     """The type returned by :meth:`Framework.load_snapshot`."""
@@ -371,12 +374,6 @@ class Object:
 
     handle_kind: str = HandleKind()  # type: ignore
 
-    if TYPE_CHECKING:
-        # to help the type checker and IDEs:
-        # all these are guaranteed to be set at runtime.
-        @property
-        def on(self) -> 'ObjectEvents': ...  # ruff: ignore[undocumented-public-method, quoted-annotation]
-
     def __init__(self, parent: Framework | Object, key: str | None):
         self.framework: Framework = None  # type: ignore
         self.handle: Handle = None  # type: ignore
@@ -411,7 +408,7 @@ class ObjectEvents(Object):
             super().__init__(parent, key)
         self._cache: weakref.WeakKeyDictionary[Object, ObjectEvents] = weakref.WeakKeyDictionary()
 
-    def __get__(self, emitter: Object, emitter_type: type[Object]):
+    def __get__(self, emitter: Object | None, emitter_type: type[Object]) -> Self:
         if emitter is None:
             return self
         instance = self._cache.get(emitter)
@@ -419,7 +416,7 @@ class ObjectEvents(Object):
             # Same type, different instance, more data. Doing this unusual construct
             # means people can subclass just this one class to have their own 'on'.
             instance = self._cache[emitter] = type(self)(emitter)
-        return instance
+        return typing.cast('Self', instance)
 
     @classmethod
     def define_event(cls, event_kind: str, event_type: type[EventBase]):
@@ -568,7 +565,7 @@ _event_regex = r'^(|.*/)on/[a-zA-Z_]+\[\d+\]$'
 class Framework(Object):
     """Main interface from the Charm to the ops library's infrastructure."""
 
-    on = FrameworkEvents()  # type: ignore
+    on = FrameworkEvents()
     """Used for :meth:`observe`-ing framework-specific events."""
 
     # Override properties from Object so that we can set them in __init__.
@@ -582,12 +579,6 @@ class Framework(Object):
     """The directory where the charm is running."""
 
     _stored: StoredStateData = None  # type: ignore
-
-    # to help the type checker and IDEs:
-    if TYPE_CHECKING:
-
-        @property
-        def on(self) -> 'FrameworkEvents': ...  # ruff: ignore[undocumented-public-method, quoted-annotation]
 
     def __init__(
         self,
@@ -1192,8 +1183,10 @@ class BoundStoredState:
 
     def __getattr__(self, key: str) -> Any:
         # "on" is the only reserved key that can't be used in the data map.
+        # StoredStateData doesn't actually have an "on" attribute; this always
+        # raises AttributeError, which is the point (accessing it is reserved).
         if key == 'on':
-            return self._data.on
+            return self._data.on  # type: ignore
         if key not in self._data:
             raise AttributeError(f"attribute '{key}' is not stored")
         return _wrap_stored(self._data, self._data[key])

@@ -1359,46 +1359,98 @@ class _MockPebbleClient(_TestingPebbleClient):
         return lanes
 
     @staticmethod
-    def _ordering_cycles(known_services: dict[str, pebble.Service]) -> list[list[str]]:
-        """Return every ``before``/``after`` cycle in the plan, each sorted.
+    def _ordering_successors(
+        known_services: dict[str, pebble.Service],
+    ) -> dict[str, list[str]]:
+        """The ``before``/``after`` graph, each service's successors in written order.
+
+        A successor of ``a`` here is a service ``a`` is ordered *after*,
+        spelt either as ``a``'s own ``after: [b]`` or as ``b``'s
+        ``before: [a]``. That is the direction the walk in
+        ``_ordering_cycles`` follows, which is the direction Real-Pebble
+        probe #14 measured (WORKLOAD-MOCK-DESIGN.md §42.3) rather than the
+        start-ordering direction ``_service_dependency_order`` uses.
+
+        **The order of these lists decides what gets reported, so they are
+        lists and not sets.** Swapping two names inside one ``after`` list,
+        changing nothing else, changes which cycle real Pebble names: §42.4's
+        `021`/`022` measured that at an acyclic branch point, §43.4's
+        `027`/`028` measured it again from inside a cycle, and §43.3's
+        `030`/`031` on branches of different depths. A ``set`` cannot tell
+        any of those pairs apart, which is what the previous version of this
+        graph got wrong.
+
+        Where a service's successors come from more than one list there is no
+        single written order to follow, and the order chosen is: the
+        service's own ``after`` list first, in the order it is written, then
+        one entry per service naming it in a ``before`` list, those services
+        taken in the order the plan declares them and each list in the order
+        it is written. That extends "written order" in the only direction
+        that is not a sort, which is the whole point of the rule.
+
+        Real Pebble has no stable answer on the shapes where that choice
+        bites: §42.5's `023` and `024` name a different cycle on different
+        runs of the same plan on the same binary (49/14 over 63 runs, and
+        19/11 over 30). So there is nothing to be faithful to there, and
+        ``_ordering_cycle`` says what the mock does instead.
+
+        **A self-edge is not a cycle here**, because it is not one for
+        Pebble either: a service declaring itself in its own ``after`` is
+        accepted and starts normally (probe #12, §39.2, and three more
+        shapes in probe #13, §40.5). Self-edges are dropped as the graph is
+        built, so a service on no cycle cannot reach itself and no
+        single-service component is ever cyclic.
+        """
+        names = set(known_services)
+        successors: dict[str, list[str]] = {name: [] for name in known_services}
+        for name, service in known_services.items():
+            for other in service.after:
+                if other in names and other != name and other not in successors[name]:
+                    successors[name].append(other)
+        for name, service in known_services.items():
+            for other in service.before:
+                if other in names and other != name and name not in successors[other]:
+                    successors[other].append(name)
+        return successors
+
+    def _ordering_cycles(
+        self,
+        known_services: dict[str, pebble.Service],
+    ) -> list[list[str]]:
+        """Every ``before``/``after`` cycle, in the order a walk completes them.
 
         A cycle is a maximal set of services that can all reach each other
         along ``before``/``after`` edges -- a strongly connected component
-        of more than one service. A plan can hold several disjoint ones, so
-        this returns a list; the returned order carries no meaning and
-        ``_ordering_cycle`` does the picking.
+        of more than one service. A plan can hold several, so this returns a
+        list, ordered as ``_ordering_cycle`` needs it: first completed
+        first. Each cycle itself comes back sorted, because that is how the
+        error message names one.
 
         Mutual reachability by brute force, rather than the Tarjan pass
         Pebble itself uses (``tarjanSort``): a plan holds a handful of
         services, and the definition-shaped version is the one worth
-        reading here.
+        reading here. Tarjan would give the completion order for free, and
+        the walk below is what pays for it separately.
 
-        **A self-edge is not a cycle here**, because it is not one for
-        Pebble either: a service declaring itself in its own ``after`` is
-        accepted and starts normally (Real-Pebble probe #12,
-        WORKLOAD-MOCK-DESIGN.md §39.2, and three more shapes in probe #13
-        §40.5). Self-edges are dropped as the graph is built below, so a
-        service on no cycle cannot reach itself and no single-service
-        component is ever cyclic.
+        The walk is depth-first, entering services in alphabetical order and
+        following each service's successors in written order, which is
+        §42.3's rule. A component's members are all reached from whichever
+        of them the walk enters first, and that one is the last of them to
+        leave the stack, so the largest finishing step within a component is
+        the step at which the walk completed it. Sorting the components by
+        that gives completion order. It is not the same as sorting by the
+        *smallest* finishing step: on §43.3's `025` the first service to
+        finish anywhere is in the cycle that completes last.
 
         This is ordering only. A ``requires`` cycle is legal and works
         (§28.3) -- membership is a set closure, which is order-free -- and
         is handled by ``_service_requires_closure``'s visited-set walk, not
         here.
         """
-        names = set(known_services)
-        successors: dict[str, set[str]] = {name: set() for name in names}
-        for name in names:
-            service = known_services[name]
-            for other in service.before:
-                if other in names and other != name:
-                    successors[name].add(other)
-            for other in service.after:
-                if other in names and other != name:
-                    successors[other].add(name)
+        successors = self._ordering_successors(known_services)
 
         reachable: dict[str, set[str]] = {}
-        for name in names:
+        for name in successors:
             seen: set[str] = set()
             queue = [name]
             while queue:
@@ -1408,15 +1460,33 @@ class _MockPebbleClient(_TestingPebbleClient):
                         queue.append(successor)
             reachable[name] = seen
 
+        finished: dict[str, int] = {}
+        entered: set[str] = set()
+        for root in sorted(successors):
+            if root in entered:
+                continue
+            entered.add(root)
+            stack = [(root, iter(successors[root]))]
+            while stack:
+                name, pending = stack[-1]
+                successor = next(pending, None)
+                if successor is None:
+                    stack.pop()
+                    finished[name] = len(finished)
+                elif successor not in entered:
+                    entered.add(successor)
+                    stack.append((successor, iter(successors[successor])))
+
         cycles: list[list[str]] = []
         grouped: set[str] = set()
-        for name in sorted(names):
+        for name in sorted(successors):
             if name in grouped or name not in reachable[name]:
                 continue
             members = {other for other in reachable[name] if name in reachable[other]}
             members.add(name)
             grouped.update(members)
             cycles.append(sorted(members))
+        cycles.sort(key=lambda cycle: max(finished[member] for member in cycle))
         return cycles
 
     def _ordering_cycle(self, known_services: dict[str, pebble.Service]) -> list[str]:
@@ -1450,17 +1520,29 @@ class _MockPebbleClient(_TestingPebbleClient):
         cycles = self._ordering_cycles(known_services)
         if not cycles:
             return []
-        # Which cycle, when there are several: the one holding the
-        # alphabetically-first cyclic service. Measured on two shapes
-        # (§40.4) -- `012` is the tie-break twin that rules out declaration
-        # order, reporting `alpha, beta` where the first-declared loop is
-        # `yak`/`zebra`. Two agreeing shapes is what this is worth: §40.7
-        # notes they do not rule out the rule being an artefact of the
-        # order the daemon's own SCC pass discovers components in, which
-        # could coincide with alphabetical for reasons that do not hold in
-        # general. A shape whose alphabetically-first cyclic service sits
-        # in the component discovered last would firm it up.
-        return min(cycles, key=lambda cycle: cycle[0])
+        # Which cycle, when there are several: the first one the walk
+        # completes, which `_ordering_cycles` has already put first.
+        #
+        # This is a rule fitted to nineteen shapes across probes #13, #14
+        # and #15 (§42.3 states it, §43 adds the last seven), ten of them
+        # with the prediction committed to before the shape was run. It is
+        # not read off the daemon -- `tarjanSort` was deliberately never
+        # opened, so that the shapes measure Pebble rather than somebody's
+        # reading of it. It replaced "the cycle holding the
+        # alphabetically-first cyclic service", which fitted the two shapes
+        # it was written from and was wrong on eight of the next twelve
+        # (§42.6).
+        #
+        # **The rule is not total, and deliberately so.** On a plan where
+        # one service's successors come from more than one service's list,
+        # real Pebble has no stable answer at all: §42.5's `023` and `024`
+        # name a different cycle on different runs of the same plan on the
+        # same binary. Nothing a mock can do is faithful there, so the mock
+        # is deterministic instead of nondeterministic -- it gives whatever
+        # the rule gives, which is what `_ordering_successors`' assembly
+        # order decides. A test pinning one of those shapes is pinning the
+        # mock's answer and not Pebble's, and should say so.
+        return cycles[0]
 
     def _check_ordering_cycle(self, known_services: dict[str, pebble.Service]) -> None:
         """Raise if ``known_services`` contains a ``before``/``after`` cycle.
@@ -1898,13 +1980,23 @@ class _MockPebbleClient(_TestingPebbleClient):
     def _render_services(self) -> dict[str, pebble.Service]:
         """The combined plan, refusing to render one with an ordering cycle.
 
-        This is the mock's plan load. Real Pebble checks twice -- once when
-        a layer is added and once when the daemon reads the layer directory
-        at startup (§28.3) -- and only the first has an `add_layer` call
-        behind it. A `Container(layers=...)` built directly in a test never
-        goes through `add_layer`, so without this the second check would
-        have no counterpart and a hand-written cyclic plan would reach
-        `_service_dependency_order`.
+        **This is a mock-only safety net, and it does not mirror a real
+        `replan`.** Real-Pebble probe #13 went looking for a way to put a
+        cycle in front of a running daemon's `replan` and found none
+        (WORKLOAD-MOCK-DESIGN.md §40.2): a cyclic plan on disk stops the
+        daemon starting at all, and a cyclic layer file written under a
+        running daemon is never read. Probe #14 closed two more routes
+        (§42.7). So a real daemon's plan is acyclic by construction and
+        there is no real `replan` behaviour for this to be faithful to.
+
+        What it does guard is a state a test can reach and a daemon cannot:
+        a `Container(layers=...)` written by hand never goes through
+        `add_layer`, so without this a hand-written cyclic plan would sail
+        past every check and reach `_service_dependency_order`. Kept for
+        that (§42.11), and routing it through `_check_ordering_cycle` along
+        with `add_layer` is not a liberty: §42.7 measured plan-load
+        rejection naming the same cycle as `add_layer` on two shapes and
+        §43.7 on seven more, with no disagreement.
         """
         services = super()._render_services()
         self._check_ordering_cycle(services)

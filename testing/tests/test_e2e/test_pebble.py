@@ -3460,11 +3460,17 @@ def test_ordering_cycle_names_only_the_cycle_members():
 def _add_layer_cycle_message(layer: ops.pebble.Layer) -> str:
     """The rejection message `add_layer` gives for `layer`, or '' if accepted.
 
-    The seven shapes below are Real-Pebble probe #13's fresh-shape check
-    (WORKLOAD-MOCK-DESIGN.md §40.4/§40.5), and five of the seven ask the
-    same question of `add_layer` -- what, if anything, it names -- so the
-    scaffolding is shared and each test carries only its shape and its
-    measured answer.
+    The shapes below are the layers of Real-Pebble probes #13, #14 and #15
+    (WORKLOAD-MOCK-DESIGN.md §40.4/§40.5, §42 and §43), and nearly all of
+    them ask the same question of `add_layer` -- what, if anything, it
+    names -- so the scaffolding is shared and each test carries only its
+    shape and its measured answer.
+
+    Each shape is the probe layer with `startup: disabled` dropped, since
+    the cycle check runs before anything looks at startup and every one of
+    these layers is rejected. Everything the check reads -- the service
+    names, their declaration order, and the contents and order of each
+    `before`/`after` list -- is the layer's.
     """
     container = Container('foo', can_connect=True)
     ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
@@ -3613,8 +3619,8 @@ def test_two_disjoint_cycles_name_the_members_of_only_one():
     )
 
 
-def test_which_of_two_disjoint_cycles_is_named_is_alphabetical_not_declared():
-    """The cycle named is the one holding the alphabetically-first member.
+def test_which_of_two_disjoint_cycles_is_named_is_not_declaration_order():
+    """Declaration order does not decide which of two loops is named.
 
     Probe #13 §40.4, `012`: the tie-break twin of `006`, which cannot say
     *which* cycle because its first-declared service (`mango`) and its
@@ -3622,10 +3628,13 @@ def test_which_of_two_disjoint_cycles_is_named_is_alphabetical_not_declared():
     -- first-declared is `zebra`, alphabetically-first is `alpha` -- and
     the daemon reported `alpha, beta`.
 
-    §40.7 records what this rests on: two agreeing shapes, which do not
-    rule out the rule being an artefact of the order the daemon's own SCC
-    pass discovers components in. So this test pins a measured behaviour
-    and not a derivation.
+    What this shape rules out is declaration order, and that is all it was
+    ever entitled to rule out. It was read as measuring "the
+    alphabetically-first cyclic service", and §40.7 warned at the time
+    that two agreeing shapes did not rule out an artefact of the daemon's
+    own discovery order. Probe #14 showed it was one (§42.3): a walk
+    visiting services alphabetically starts at `alpha` here, so the two
+    rules agree on this shape and part company on eight others.
     """
     layer = ops.pebble.Layer({
         'services': {
@@ -3659,3 +3668,652 @@ def test_a_service_ordered_after_a_cycle_member_is_not_named():
     assert _add_layer_cycle_message(layer) == (
         '400 Bad Request: services in before/after loop: dsring1, dsring2'
     )
+
+
+def test_the_cycle_named_is_the_one_a_sorted_walk_completes_first():
+    """The cycle named is not the one holding the alphabetically-first member.
+
+    Real-Pebble probe #14 (WORKLOAD-MOCK-DESIGN.md §42.2, `013`) is the
+    shape §40.9 asked for and it took the previous rule down: `aentry` is
+    alphabetically first in the plan, carries no cycle, and is ordered
+    after a member of the `mloop`/`nloop` loop, while `bloop`/`cloop` holds
+    the alphabetically-first *cyclic* service. The daemon reported
+    `mloop, nloop`.
+
+    What fits is a depth-first walk that visits services alphabetically and
+    follows each service's `after` list in written order, reporting the
+    first cycle it completes. Read with the twin below, which moves the
+    structure and leaves every name where it is.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'mloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['nloop']},
+            'nloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mloop']},
+            'aentry': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mloop']},
+            'bloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['cloop']},
+            'cloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bloop']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: mloop, nloop'
+    )
+
+
+def test_the_named_cycle_moves_with_the_structure_and_not_the_names():
+    """The twin of the shape above (probe #14 §42.2, `014`).
+
+    `aentry` is ordered after `bloop` instead of `mloop`; every service
+    keeps its name and its alphabetical position, and the only thing that
+    changes is which loop the entry service leads into. The daemon
+    reported `bloop, cloop`.
+
+    A rule that picked by name could not move here, so the pair is what
+    rules out naming rules rather than either layer alone.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'mloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['nloop']},
+            'nloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mloop']},
+            'aentry': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bloop']},
+            'bloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['cloop']},
+            'cloop': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bloop']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: bloop, cloop'
+    )
+
+
+def test_a_cycle_is_not_chosen_by_being_the_largest():
+    """Size does not decide, part one (probe #14 §42.2, `015`).
+
+    Two loops, one of two services and one of three, with the
+    alphabetically-first cyclic service in the smaller. The daemon
+    reported `bringone, bringtwo`, the smaller one, which is also where
+    the walk arrives first.
+
+    Probe #13's shapes could not ask this: `006` and `012` both held two
+    loops of two services, so neither size rule had ever been put a
+    question it could fail. This shape and its twin below kill both
+    between them; each on its own agrees with too much.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'wheelone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['wheelthree'],
+            },
+            'wheeltwo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['wheelone'],
+            },
+            'wheelthree': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['wheeltwo'],
+            },
+            'bringone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['bringtwo'],
+            },
+            'bringtwo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['bringone'],
+            },
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: bringone, bringtwo'
+    )
+
+
+def test_a_cycle_is_not_chosen_by_being_the_smallest():
+    """Size does not decide, part two (probe #14 §42.2, `016`).
+
+    The twin of the shape above with the alphabetically-first cyclic
+    service moved into the three-service loop. The daemon reported
+    `apexone, apexthree, apextwo`, the larger one.
+
+    If size governed, one of this pair would have to disagree with the
+    other. Neither does. This is one of the shapes that fails to
+    discriminate between the walk and the rule it replaced, and it is here
+    to stop "the old rule was wrong" being read as "everything was wrong".
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'zringone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['zringtwo'],
+            },
+            'zringtwo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['zringone'],
+            },
+            'apexone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['apexthree'],
+            },
+            'apextwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['apexone']},
+            'apexthree': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['apextwo'],
+            },
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: apexone, apexthree, apextwo'
+    )
+
+
+def test_three_cycles_and_only_the_one_the_walk_reaches_is_named():
+    """Three loops, one answer, and it is neither naming rule (probe #14 §42.2, `017`).
+
+    The first-declared cyclic service is `monoone`, the
+    alphabetically-first is `betaone`, and the daemon reported
+    `zetaone, zetatwo` -- the loop reached from `aalead`, which sorts first
+    in the plan and is on no cycle. Three candidate rules, three different
+    answers, in one layer.
+
+    It also repeats two things measured on two-loop plans: exactly one
+    cycle is named, and neither the free service (`freebie`) nor the
+    downstream one (`aalead`) is named at all.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'monoone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['monotwo']},
+            'monotwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['monoone']},
+            'zetaone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zetatwo']},
+            'zetatwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zetaone']},
+            'betaone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['betatwo']},
+            'betatwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['betaone']},
+            'aalead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zetaone']},
+            'freebie': {'override': 'replace', 'command': '/bin/sleep 1000'},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: zetaone, zetatwo'
+    )
+
+
+def test_the_cycle_named_is_the_first_completed_not_the_first_entered():
+    """First entered and first completed are not the same (probe #14 §42.2, `018`).
+
+    The two loops here are not disjoint components: `downone` is ordered
+    after `upone`, so the walk starts at `downone`, which is itself
+    cyclic, and reaches `upone`/`uptwo` through the loop it is standing
+    in. `upone`/`uptwo` has no edges leading out of it and so finishes
+    first. The daemon reported `upone, uptwo`.
+
+    So it is the first cycle *completed*, not the first entered and not
+    the last completed. No shape before probe #14 could separate those,
+    because they only come apart when one cycle is reached through
+    another.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'upone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['uptwo']},
+            'uptwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['upone']},
+            'downone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['downtwo', 'upone'],
+            },
+            'downtwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['downone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: upone, uptwo'
+    )
+
+
+def test_the_first_completed_cycle_is_named_when_it_also_sorts_first():
+    """The twin of the shape above (probe #14 §42.2, `019`).
+
+    Same chain, names permuted so that the sink loop is also the one
+    holding the alphabetically-first cyclic service. The daemon reported
+    `alfaone, alfatwo`.
+
+    This is the control for the pair: the answer stays on the sink when
+    the names move onto it, so the previous shape's result is not an
+    artefact of the sink happening to sort second.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'zuluone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['zulutwo', 'alfaone'],
+            },
+            'zulutwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zuluone']},
+            'alfaone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['alfatwo']},
+            'alfatwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['alfaone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: alfaone, alfatwo'
+    )
+
+
+def test_a_lead_chain_carries_the_walk_past_two_unrelated_cycles():
+    """A three-hop acyclic chain decides the answer (probe #14 §42.3, `020`).
+
+    Pre-registered: written after the shapes above had been measured and
+    before it was run, to test the rule they fitted rather than to fit it
+    again. `aaa1` sorts first in the plan and leads through `aaa2` and
+    `aaa3` into the `mid` loop; the alphabetically-first cyclic service is
+    `bx1`, in a loop the chain never touches; and `zz1`/`zz2` is declared
+    first and reachable from nothing. The daemon reported
+    `midone, midtwo`.
+
+    Three rules, three different answers, and the committed prediction is
+    the one that came out.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'zz1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zz2']},
+            'zz2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zz1']},
+            'bx1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bx2']},
+            'bx2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bx1']},
+            'midone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['midtwo']},
+            'midtwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['midone']},
+            'aaa1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['aaa2']},
+            'aaa2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['aaa3']},
+            'aaa3': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['midone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: midone, midtwo'
+    )
+
+
+def test_the_written_order_of_an_after_list_decides_which_cycle_is_named():
+    """Two names in one list, and their order is the whole answer (probe #14 §42.4, `021`).
+
+    Pre-registered. `alead` carries two branches in one `after` list,
+    written `[zcyc1, mcyc1]`, each leading into a different loop, with a
+    third loop holding the alphabetically-first cyclic service and
+    reachable from nothing. The daemon reported `zcyc1, zcyc2`.
+
+    This is the constraint on any implementation: which cycle gets named
+    depends on the order two names appear inside one YAML list, which is
+    not a property of the graph. Reading `before`/`after` into a set, or
+    sorting them, throws the deciding information away.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'alead': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['zcyc1', 'mcyc1'],
+            },
+            'mcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc2']},
+            'mcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'zcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc2']},
+            'zcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc1']},
+            'bcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc2']},
+            'bcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc1']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: zcyc1, zcyc2'
+    )
+
+
+def test_swapping_two_names_in_one_after_list_changes_the_named_cycle():
+    """The twin of the shape above (probe #14 §42.4, `022`).
+
+    The same services, the same declaration order, the same edges and the
+    same graph, with `alead`'s list written `[mcyc1, zcyc1]`. The daemon
+    reported `mcyc1, mcyc2`.
+
+    A walk that sorted the list would give `mcyc1, mcyc2` for both shapes
+    and be right here by coincidence, so the pair is what pins written
+    order rather than either layer alone.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'alead': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['mcyc1', 'zcyc1'],
+            },
+            'mcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc2']},
+            'mcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'zcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc2']},
+            'zcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc1']},
+            'bcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc2']},
+            'bcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc1']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: mcyc1, mcyc2'
+    )
+
+
+def test_the_walk_passes_through_two_cycles_to_the_one_it_names():
+    """The first completed cycle wins two levels down (probe #15 §43.3, `025`).
+
+    Real-Pebble probe #15 built the shape §42.10 named as the obvious way
+    the walk rule could still be wrong: `alead` leads into the
+    `pone`/`ptwo` loop, that loop into `qone`/`qtwo`, and that one into
+    `rone`/`rtwo`, which is a sink. The walk has to pass through two
+    cycles to reach the one it completes first. The daemon reported
+    `rone, rtwo`.
+
+    It is also the shape that rules out ordering components by their
+    *earliest* finishing member: `ptwo` is the first service to finish
+    anywhere here, and its cycle completes last.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'qone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['qtwo', 'rone'],
+            },
+            'qtwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['qone']},
+            'rone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['rtwo']},
+            'rtwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['rone']},
+            'pone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['ptwo', 'qone'],
+            },
+            'ptwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['pone']},
+            'alead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['pone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: rone, rtwo'
+    )
+
+
+def test_the_named_cycle_is_the_sink_when_the_names_move_to_the_middle():
+    """The twin of the shape above (probe #15 §43.3, `026`).
+
+    The same three-cycle chain with the names permuted so that the
+    alphabetically-first cyclic service sits in the middle loop rather
+    than the first one. The daemon reported `rone, rtwo` again: the answer
+    stayed where the structure put it while the names moved.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'pone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['ptwo', 'bmid1'],
+            },
+            'ptwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['pone']},
+            'bmid1': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['bmid2', 'rone'],
+            },
+            'bmid2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bmid1']},
+            'rone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['rtwo']},
+            'rtwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['rone']},
+            'alead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['pone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: rone, rtwo'
+    )
+
+
+def test_written_order_decides_from_inside_a_cycle_too():
+    """A branching `after` list on a cyclic service (probe #15 §43.4, `027`).
+
+    Probe #14 measured written order at an acyclic branch point (`021` and
+    `022` above). This asks the same question where the branching list
+    belongs to a service that is itself on a cycle: `cone` carries
+    `[ctwo, zsink1, msink1]`, where `ctwo` closes its own loop and the
+    other two lead into disjoint sink loops that nothing else reaches. The
+    daemon reported `zsink1, zsink2`.
+
+    So the written-order constraint is not confined to lead-in services,
+    which matters because a cyclic service's own list is the awkward place
+    to keep it.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'dec1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['dec2']},
+            'dec2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['dec1']},
+            'msink1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['msink2']},
+            'msink2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['msink1']},
+            'zsink1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zsink2']},
+            'zsink2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zsink1']},
+            'cone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['ctwo', 'zsink1', 'msink1'],
+            },
+            'ctwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['cone']},
+            'alead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['cone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: zsink1, zsink2'
+    )
+
+
+def test_swapping_a_cyclic_services_branch_list_changes_the_named_cycle():
+    """The twin of the shape above (probe #15 §43.4, `028`).
+
+    Nine services, the same declaration order and the same edge set, with
+    `cone`'s list written `[ctwo, msink1, zsink1]`. The daemon reported
+    `msink1, msink2`.
+
+    The mock at the previous tip could not tell this shape from its twin
+    at all, because it held successors in a set: both gave `cone, ctwo`.
+    A sorted walk gives `msink1, msink2` for both and is right here by
+    coincidence, so it is the pair that discriminates.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'dec1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['dec2']},
+            'dec2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['dec1']},
+            'msink1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['msink2']},
+            'msink2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['msink1']},
+            'zsink1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zsink2']},
+            'zsink2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zsink1']},
+            'cone': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['ctwo', 'msink1', 'zsink1'],
+            },
+            'ctwo': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['cone']},
+            'alead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['cone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: msink1, msink2'
+    )
+
+
+def test_the_walk_leaves_a_cycle_by_the_member_carrying_the_outgoing_edge():
+    """Closing a cycle does not end that branch (probe #15 §43.3, `029`).
+
+    `cone` is entered from `alead` and its only successor is `ctwo`, whose
+    list is `[cone, zsink1]` -- so the back edge that closes
+    `cone`/`ctwo` is explored before the edge leading out of it. An
+    implementation that named a cycle the moment a back edge closed it
+    would stop there. The daemon reported `zsink1, zsink2`, the loop
+    reached through `cone`/`ctwo` and out the far side.
+
+    `bdec1`/`bdec2`, which holds the alphabetically-first cyclic service
+    and is reachable from nothing, is not named.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'cone': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['ctwo']},
+            'ctwo': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['cone', 'zsink1'],
+            },
+            'zsink1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zsink2']},
+            'zsink2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zsink1']},
+            'bdec1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bdec2']},
+            'bdec2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bdec1']},
+            'alead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['cone']},
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: zsink1, zsink2'
+    )
+
+
+def test_the_named_cycle_is_the_first_completed_not_the_most_deeply_nested():
+    """Depth does not decide (probe #15 §43.3, `030`).
+
+    `alead` branches `[zcyc1, mlead]`: the first is one hop into a sink
+    loop, the second a longer descent into a loop that itself reaches
+    another. So the deepest component the walk reaches is `ncyc1`/`ncyc2`
+    and the shallowest is `zcyc1`/`zcyc2`, and the daemon reported the
+    shallow one.
+
+    Every shape before this one had the first completed component also be
+    the deepest the walk had got to, so the two had never been separated.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'ncyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['ncyc2']},
+            'ncyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['ncyc1']},
+            'mcyc1': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['mcyc2', 'ncyc1'],
+            },
+            'mcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'mlead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'zcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc2']},
+            'zcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc1']},
+            'alead': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['zcyc1', 'mlead'],
+            },
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: zcyc1, zcyc2'
+    )
+
+
+def test_the_deep_branch_is_named_when_it_is_written_first():
+    """The twin of the shape above (probe #15 §43.3, `031`).
+
+    `alead`'s list written `[mlead, zcyc1]` and nothing else changed. The
+    walk takes the deep branch first, so the deepest component is now also
+    the first completed, and the daemon reported `ncyc1, ncyc2`.
+
+    This is the second independent pair separating written order from
+    sorted order, on a structure where the two branches differ in depth
+    rather than being mirror images.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'ncyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['ncyc2']},
+            'ncyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['ncyc1']},
+            'mcyc1': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['mcyc2', 'ncyc1'],
+            },
+            'mcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'mlead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'zcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc2']},
+            'zcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc1']},
+            'alead': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['mlead', 'zcyc1'],
+            },
+        },
+    })
+    assert _add_layer_cycle_message(layer) == (
+        '400 Bad Request: services in before/after loop: ncyc1, ncyc2'
+    )
+
+
+def test_the_mock_is_stable_where_real_pebble_is_not_both_edges_before():
+    """The mock gives one answer where the daemon gives two (probe #14 §42.5, `023`).
+
+    This is `021`'s graph spelt the other way round: `alead` carries no
+    `after` at all and `zcyc1` and `mcyc1` each declare `before: [alead]`,
+    so `alead`'s successors are assembled from two services' lists instead
+    of one. The edge set is identical.
+
+    **Real Pebble has no stable answer here.** Over 63 runs, each with a
+    freshly created `$PEBBLE` and a freshly started daemon, it said
+    `zcyc1, zcyc2` 49 times and `mcyc1, mcyc2` 14 times. So this test
+    pins the mock's answer and not the daemon's: what is asserted is that
+    repeated calls agree with each other, which is the decision recorded
+    in §42.11 -- the mock is deterministic where Pebble is not, rather
+    than nondeterministic to mirror it.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'alead': {'override': 'replace', 'command': '/bin/sleep 1000'},
+            'zcyc1': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['zcyc2'],
+                'before': ['alead'],
+            },
+            'zcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc1']},
+            'mcyc1': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['mcyc2'],
+                'before': ['alead'],
+            },
+            'mcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'bcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc2']},
+            'bcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc1']},
+        },
+    })
+    answers = {_add_layer_cycle_message(layer) for _ in range(10)}
+    assert len(answers) == 1
+    assert answers.pop().startswith('400 Bad Request: services in before/after loop: ')
+
+
+def test_the_mock_is_stable_where_real_pebble_is_not_one_edge_each_way():
+    """The same, with only one edge spelt `before` (probe #14 §42.5, `024`).
+
+    `alead after: [zcyc1]` and `mcyc1 before: [alead]`, so the two edges
+    still come from two lists but only one of them is a `before`. Over 30
+    runs real Pebble said `zcyc1, zcyc2` 19 times and `mcyc1, mcyc2` 11
+    times, which is what says the instability arrives as soon as a
+    service's successors are assembled from more than one list rather than
+    needing both edges spelt `before`.
+
+    As above, this pins the mock's answer and not the daemon's.
+    """
+    layer = ops.pebble.Layer({
+        'services': {
+            'alead': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc1']},
+            'zcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc2']},
+            'zcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['zcyc1']},
+            'mcyc1': {
+                'override': 'replace',
+                'command': '/bin/sleep 1000',
+                'after': ['mcyc2'],
+                'before': ['alead'],
+            },
+            'mcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['mcyc1']},
+            'bcyc1': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc2']},
+            'bcyc2': {'override': 'replace', 'command': '/bin/sleep 1000', 'after': ['bcyc1']},
+        },
+    })
+    answers = {_add_layer_cycle_message(layer) for _ in range(10)}
+    assert len(answers) == 1
+    assert answers.pop().startswith('400 Bad Request: services in before/after loop: ')

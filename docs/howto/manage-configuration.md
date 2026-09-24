@@ -46,8 +46,9 @@ class WikiConfig(pydantic.BaseModel):
     name: str = pydantic.Field('Wiki')
     skin: str = pydantic.Field('vector')
 
-    @pydantic.validator('name')
-    def validate_name(cls, value):
+    @pydantic.field_validator('name')
+    @classmethod
+    def validate_name(cls, value: str) -> str:
         if len(value) < 4:
             raise ValueError('Name must be at least 4 characters long')
         if ' ' in value:
@@ -63,28 +64,24 @@ In the `src/charm.py` file of the charm project, in the `__init__` function of t
 self.framework.observe(self.on.config_changed, self._on_config_changed)
 ```
 
-Also in the `__init__` function, load the config into the config class that you
-defined. Pass `errors='blocked'` to have the charm exit after setting a blocked
-status if the configuration doesn't validate against the class you defined. The
-default is `errors='raise'`, which means that the charm is responsible for
-catching any `ValueError` raised.
-
-```python
-self.typed_config = self.load_config(WikiConfig, errors='blocked')
-```
-
-Then, in the body of the charm definition, define the event handler.
+Then, in the body of the charm definition, define the event handler, and load the
+config into the config class that you defined. Pass `errors='blocked'` to have
+the charm exit after setting a blocked status if the configuration doesn't
+validate against the class you defined. The default is `errors='raise'`, which
+means that the charm is responsible for catching any `ValueError` raised.
 
 ```python
 def _on_config_changed(self, event: ops.ConfigChangedEvent):
-    name = self.typed_config.name
+    config = self.load_config(WikiConfig, errors='blocked')
     existing_name = self.get_wiki_name()
-    if name == existing_name:
+    if config.name == existing_name:
         # Nothing to do.
         return
-    logger.info('Changing wiki name to %s', name)
-    self.set_wiki_name(name)
+    logger.info('Changing wiki name to %s', config.name)
+    self.set_wiki_name(config.name)
 ```
+
+Load the config in each handler that needs it, rather than once in `__init__`. With `errors='blocked'`, an invalid configuration ends the Juju event as soon as `load_config` is called. From `__init__` that happens before any handler runs, so the handler you're testing is never reached, and `ops.testing` reports the exit as an uncaught error instead of returning a state.
 
 See more: [](ops.CharmBase.load_config), [](ops.CharmBase.config)
 

@@ -109,12 +109,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - run: sudo snap install --classic concierge
-
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
 
-      # No `concierge prepare` step: the harness runs it, with the juju
-      # channel the issue's own version pin selects.
+      # No `snap install concierge` step and no `concierge prepare` step: the
+      # harness does both, in the one place that needs them. `concierge` is
+      # used only by the scratch-charm branches' first command, so the runner
+      # seam installs it there (`seams/runner.py`'s
+      # `INSTALL_CONCIERGE_COMMAND`) and prepares with the juju channel the
+      # issue's own version pin selects. Installing it here instead cost
+      # 14-21s on every one of thirty dispatches, on well under a tenth of
+      # which anything used it, and failed the whole job once on a snap store
+      # 408 before any harness code ran
+      # (`spike-step-5/seventh-dispatch/RESULT.md` §2.2, §5).
       - name: Try to reproduce the issue
         working-directory: add-reproducer/harness
         env:

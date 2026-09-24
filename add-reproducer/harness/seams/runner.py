@@ -113,6 +113,11 @@ CONCIERGE_MODEL = "testing"
 # `cleanup` polls for an asynchronous `juju remove-application` to finish, so
 # it needs the same order of budget as the removal itself.
 STEP_TIMEOUTS_S = {
+    # `snap install` measured 14-21s over sixteen GHA dispatches
+    # (`spike-step-5/seventh-dispatch/RESULT.md` §5), with one 53s outlier the
+    # round before. Ten minutes is a backstop against a wedged snapd, not a
+    # budget: the one recorded failure was a store 408 that returned in 6s.
+    "install-concierge": 10 * 60,
     "prepare": 25 * 60,
     "pack": 20 * 60,
     "cleanup": APP_REMOVAL_POLLS * APP_REMOVAL_POLL_INTERVAL_S + 60,
@@ -149,9 +154,49 @@ STEP_TIMEOUTS_S = {
 # branch both criterion-1 candidate issues actually route to; see
 # `spike-step-5/gate-substrate/RESULT.md` §5.
 #
+# `install-concierge` is here because `prepare` is: a run whose concierge
+# never installed has nothing to prepare with, and the point of putting the
+# install in the sequence at all is that a failed one is then recorded as an
+# abandoned prerequisite -- `classifier.py` reads that as
+# `INFRASTRUCTURE_FAILED`, which composes nothing -- instead of failing a
+# workflow step before any harness code runs, which is what the store 408 in
+# `spike-step-5/seventh-dispatch/RESULT.md` §2.2 did.
+#
 # `cleanup` is deliberately *not* here: removing an application that isn't
 # deployed is the normal case, not a failure.
-PREREQUISITE_STEPS = ("prepare", "pack", "deploy", "wait", "stimulus", "clone")
+PREREQUISITE_STEPS = ("install-concierge", "prepare", "pack", "deploy", "wait", "stimulus", "clone")
+
+# Installed here, immediately before the first command that needs it, rather
+# than unconditionally by the workflow before the pipeline runs.
+#
+# Concierge is used by exactly one thing: `sudo concierge prepare`, the first
+# step of `_scratch_sequence()`. The `none` and `k8s-clone` branches never
+# touch it, and neither does a run that stops at the filter or the in-scope
+# gate -- which is most of them. Measured: 30 dispatches, on well under a
+# tenth of which the runner reached a scratch branch, each paying 14-21s for
+# the install, one failing outright on a snap store 408
+# (`spike-step-5/seventh-dispatch/RESULT.md` §2.2 and §5).
+#
+# Why here and not as a conditional workflow step: gating a workflow step on
+# "will a scratch branch run?" means knowing the substrate, which is the
+# extraction's output, so the workflow would have to run extraction, stop,
+# install, and then resume -- either paying for the extraction twice or
+# growing a resume mode. Worse, the extraction is not deterministic
+# (`sixth-dispatch` §7's substrate instability), so the second run could
+# choose a branch the first did not install for. Putting it in the sequence
+# costs nothing, keeps one pipeline invocation, and the dependency ends up
+# stated where it exists.
+#
+# Idempotent by the guard, not by snap's own behaviour: a VM or a developer
+# box that already has concierge spends nothing here, and `snap install` on an
+# installed snap exits non-zero ("snap ... is already installed"), which as a
+# prerequisite step would abort the run.
+#
+# `which`, not `command -v`, because `dry_run.generate_plan()` runs the whole
+# plan through `runnability.assess()` and that gate's `_first_token()` treats
+# `command` as a wrapper word, lands on `-v`, and calls the line prose. `which`
+# is in its `RUNNER_TOOLS` allowlist and means the same thing here.
+INSTALL_CONCIERGE_COMMAND = "which concierge >/dev/null 2>&1 || sudo snap install --classic concierge"
 
 # A k8s scratch charm declares an `oci-image` resource per container (see
 # spike-step-3/charm/render.py), and `juju deploy` refuses a local charm
@@ -787,6 +832,9 @@ def _scratch_sequence(
     pebble_container = (dict(surface.pebble_service) if surface else {}).get("container")
     resource_args = f" --resource {pebble_container}-image={DEFAULT_WORKLOAD_IMAGE}" if pebble_container else ""
     steps = [
+        # The only branches that need concierge install it, immediately before
+        # using it. See `INSTALL_CONCIERGE_COMMAND`.
+        PlannedCommand("install-concierge", INSTALL_CONCIERGE_COMMAND),
         # `--juju-channel` explicitly, never concierge's own default -- see
         # `_juju_channel()` for what the implicit default cost.
         PlannedCommand(

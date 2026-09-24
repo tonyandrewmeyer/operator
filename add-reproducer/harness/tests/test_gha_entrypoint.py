@@ -103,3 +103,99 @@ def test_marker_prefix_matches_what_the_composer_appends(run):
         repo="canonical/operator",
     )
     assert run.MARKER_PREFIX.format(number=2639) in _marker(issue, "34100431032")
+
+
+# -- the extraction record reaches the artefact, the log and the summary -----
+#
+# A run that stops at the in-scope gate has no `RunResult`, so before the
+# extraction record existed it wrote nothing at all and `upload-artifact`
+# reported `No files were found` (`spike-step-5/seventh-dispatch/RESULT.md`
+# §4.2). That is the stop four dispatches took on 2026-09-23.
+
+
+def _gate_stop_result(number: int = 2484):
+    from pipeline import PipelineResult
+
+    return PipelineResult(
+        number,
+        "extraction",
+        None,
+        "in_scope=false (second pass ran and confirmed the drop)",
+        None,
+        extraction_record={
+            "schema_version": 1,
+            "issue_number": number,
+            "first_pass": {"in_scope": False, "confidence": "low", "substrate": "none"},
+            "second_pass": {"ran": True, "concrete_defect": False, "recovered": False},
+            "final_in_scope": False,
+            "llm_calls": [
+                {
+                    "purpose": "extraction",
+                    "model": "deepseek/deepseek-chat",
+                    "provider": "DeepSeek",
+                    "usage": {"total_tokens": 11},
+                }
+            ],
+        },
+    )
+
+
+@pytest.fixture
+def gate_stop(run, monkeypatch, tmp_path):
+    from models import Issue
+
+    issue = Issue(
+        number=2484,
+        title="t",
+        body="b",
+        labels=[],
+        state="OPEN",
+        created_at="",
+        author="a",
+        repo="canonical/operator",
+    )
+
+    class _Pipeline:
+        def run_for_issue(self, issue, **kwargs):
+            return _gate_stop_result()
+
+    monkeypatch.setattr(run, "fetch_issue", lambda repo, number, token: issue)
+    monkeypatch.setattr(run, "build_pipeline", lambda **kwargs: _Pipeline())
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "--repo", "canonical/operator", "--issue", "2484", "--out-dir", str(out_dir)]
+    )
+    return out_dir, summary
+
+
+def test_a_gate_stop_writes_an_extraction_artefact(run, gate_stop, capsys):
+    out_dir, _ = gate_stop
+    assert run.main() == 0
+
+    import json as _json
+
+    record = _json.loads((out_dir / "2484-extraction.json").read_text())
+    assert record["first_pass"]["substrate"] == "none"
+    assert record["llm_calls"][0]["provider"] == "DeepSeek"
+
+
+def test_a_gate_stop_prints_the_record_to_the_job_log(run, gate_stop, capsys):
+    assert run.main() == 0
+    out = capsys.readouterr().out
+    # The `stage=` line is unchanged apart from its parenthetical, so earlier
+    # rounds' logs still read the same way and a grep across them still works.
+    assert "stage=extraction" in out
+    assert "reason=in_scope=false (second pass ran and confirmed the drop)" in out
+    assert "provider=DeepSeek" in out
+    assert "substrate=none" in out
+
+
+def test_a_gate_stop_puts_the_record_in_the_job_summary(run, gate_stop):
+    _, summary = gate_stop
+    assert run.main() == 0
+    text = summary.read_text()
+    assert "second pass: ran" in text
+    assert "provider=DeepSeek" in text

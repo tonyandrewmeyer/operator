@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import classifier
+import extraction_record
 import filter_stage
 import runner_stage
 from composer import Composer
@@ -55,6 +56,11 @@ class PipelineResult:
     branch: str | None = None
     hypothesis: object | None = None
     surface: SurfaceInference | None = None
+    # What extraction did, on every run that got as far as extraction --
+    # including the ones that stop at the in-scope gate, which is where the
+    # dispatches that most needed explaining stopped. `None` means the run
+    # never reached extraction (a filter drop). See `extraction_record.py`.
+    extraction_record: dict | None = None
 
 
 def _enclosing_python_project(path: Path) -> Path | None:
@@ -147,6 +153,12 @@ class Pipeline:
         self.extractor = TwoPassExtractor(llm)
         self.surface_inferrer = SurfaceInferrer(llm)
         self.composer = Composer(llm)
+        # Set by `_run_for_issue` as soon as extraction returns, and stamped
+        # onto whatever `PipelineResult` comes back. Held here rather than
+        # threaded through every return because `_run_for_issue` has nine of
+        # them past extraction, and a record that only some paths carried
+        # would be worse than none.
+        self._extraction_record: dict | None = None
 
     @property
     def scratch_root(self) -> Path:
@@ -167,6 +179,28 @@ class Pipeline:
         this is exactly what spike-step-4 did by hand (walked all four
         `in_scope: true` extractions regardless of confidence, to
         calibrate the runner/classifier). Production runs leave it False."""
+        # Cleared per issue: a batch run reuses one `Pipeline`, and a filter
+        # drop must not inherit the previous issue's extraction record.
+        self._extraction_record = None
+        result = self._run_for_issue(
+            issue,
+            calibration_mode=calibration_mode,
+            ignore_in_scope=ignore_in_scope,
+            run_id=run_id,
+            timestamp=timestamp,
+        )
+        result.extraction_record = extraction_record.refresh_calls(self._extraction_record, self.llm)
+        return result
+
+    def _run_for_issue(
+        self,
+        issue: Issue,
+        *,
+        calibration_mode: bool = False,
+        ignore_in_scope: bool = False,
+        run_id: str | None = None,
+        timestamp: str | None = None,
+    ) -> PipelineResult:
         run_id = run_id or str(uuid.uuid4())
         timestamp = timestamp or datetime.now(timezone.utc).isoformat()
 
@@ -177,10 +211,25 @@ class Pipeline:
         try:
             hypothesis = self.extractor.extract(issue)
         except ExtractionInvalid as exc:
+            self._extraction_record = extraction_record.build(
+                issue.number, extractor=self.extractor, hypothesis=None, llm=self.llm, error=str(exc)
+            )
             return PipelineResult(issue.number, "extraction", None, f"invalid extraction: {exc}", None)
+        self._extraction_record = extraction_record.build(
+            issue.number, extractor=self.extractor, hypothesis=hypothesis, llm=self.llm
+        )
 
         if not hypothesis.in_scope and not ignore_in_scope:
-            return PipelineResult(issue.number, "extraction", None, "in_scope=false (second opinion)", None)
+            # The reason now names what the second pass did, instead of
+            # asserting a "second opinion" the log could not support -- see
+            # `extraction_record.in_scope_drop_reason()`.
+            return PipelineResult(
+                issue.number,
+                "extraction",
+                None,
+                extraction_record.in_scope_drop_reason(self._extraction_record),
+                None,
+            )
 
         # Branch is decided here, ahead of its other use below, because the
         # confidence gate needs it: `extraction.py`'s own instructions tie
@@ -424,6 +473,11 @@ def main() -> int:
             issue, calibration_mode=args.calibration_mode, ignore_in_scope=args.ignore_in_scope
         )
         print(f"#{result.issue_number}: stage={result.stage_reached} outcome={result.outcome} reason={result.reason}")
+        if result.extraction_record is not None:
+            for line in extraction_record.render(result.extraction_record):
+                print(f"  {line}")
+            record_path = args.out_dir / f"{issue.number}-extraction.json"
+            record_path.write_text(json.dumps(result.extraction_record, indent=2, default=str))
         if result.comment:
             comment_path = args.out_dir / f"{issue.number}.md"
             comment_path.write_text(result.comment)

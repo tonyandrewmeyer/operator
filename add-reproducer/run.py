@@ -42,6 +42,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE / "harness"))
 
+import extraction_record  # noqa: E402
 from models import Issue  # noqa: E402
 from pipeline import build_pipeline  # noqa: E402
 
@@ -181,6 +182,20 @@ def main() -> int:
     result = pipeline.run_for_issue(issue, run_id=os.environ.get("GITHUB_RUN_ID"))
 
     print(f"#{result.issue_number}: stage={result.stage_reached} outcome={result.outcome} reason={result.reason}")
+    # Written before anything that can fail below it, and outside the
+    # `run_result` branch: a run that stops at the in-scope gate has no
+    # `RunResult` at all, and that is precisely the stop whose reasons went
+    # unrecorded across four dispatches. `-extraction.json` matches the
+    # workflow's `out/*.json` upload glob, so the artefact now exists for a
+    # gate stop too.
+    record_lines: list[str] = []
+    if result.extraction_record is not None:
+        (out_dir / f"{issue.number}-extraction.json").write_text(
+            json.dumps(result.extraction_record, indent=2, default=str)
+        )
+        record_lines = extraction_record.render(result.extraction_record)
+        for line in record_lines:
+            print(line)
     if result.run_result is not None:
         (out_dir / f"{issue.number}-run.json").write_text(
             json.dumps(
@@ -202,6 +217,8 @@ def main() -> int:
         f"- outcome: `{result.outcome}`",
         f"- reason: {result.reason or '-'}",
     ]
+    if record_lines:
+        summary += ["", "```", *record_lines, "```"]
     if not result.comment:
         summary.append("- comment: **none composed** (the pipeline stayed silent)")
         summarise(summary)

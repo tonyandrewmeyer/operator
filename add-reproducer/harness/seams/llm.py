@@ -102,6 +102,16 @@ class LiveOpenRouterLLM:
         self.model = model or os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL)
         self.max_attempts = max_attempts
         self._sleep = sleep  # injectable so tests don't actually wait
+        # One entry per completed call, in call order. `last_raw_content` /
+        # `last_usage` only ever described the *last* call, so a run that made
+        # three calls could say nothing about the first two -- and the fields
+        # that would identify a bad one are exactly the per-call ones:
+        # OpenRouter serves `deepseek/deepseek-chat` from several providers,
+        # routes per account, and reports which it used in the response's own
+        # `provider`/`model`. `spike-step-5/comments-check/RESULT.md` §4 could
+        # not separate provider variance from the Actions key precisely
+        # because no dispatch recorded either.
+        self.calls: list[dict] = []
 
     def _post(self, body: bytes) -> dict:
         """POST with bounded retry on the transient codes.
@@ -155,9 +165,24 @@ class LiveOpenRouterLLM:
             }
         ).encode()
         payload = self._post(body)
+        # Recorded before the content is read, so a response this seam then
+        # rejects still leaves a record of which provider produced it.
+        # `.get()` throughout: `provider` is not in OpenRouter's documented
+        # response schema for every provider, and a missing field must leave
+        # the entry present with a null rather than lose the whole call.
+        self.calls.append(
+            {
+                "purpose": purpose,
+                "model": payload.get("model"),
+                "provider": payload.get("provider"),
+                "usage": payload.get("usage"),
+            }
+        )
         content = payload["choices"][0]["message"]["content"]
         # Kept so calibration runs can record exactly what the model said,
-        # including when it fails to parse (`spike-step-5/live-llm/`).
+        # including when it fails to parse (`spike-step-5/live-llm/`). Both
+        # still describe the last call only; `self.calls` is the per-call
+        # record.
         self.last_raw_content = content
         self.last_usage = payload.get("usage")
         try:
@@ -173,8 +198,16 @@ class FixtureLLM:
 
     def __init__(self, fixtures_dir: Path):
         self.fixtures_dir = Path(fixtures_dir)
+        # Same attribute and the same shape as `LiveOpenRouterLLM.calls`, so
+        # anything that reads the call record works in fixture mode too --
+        # which is the only mode the test suite has. `model`/`provider`/
+        # `usage` stay `None` here on purpose: nothing was called, and a
+        # record that named a provider for a replayed fixture would be a lie
+        # in exactly the direction this record exists to stop.
+        self.calls: list[dict] = []
 
     def complete_json(self, *, purpose: str, prompt: str, context: dict) -> dict:
+        self.calls.append({"purpose": purpose, "model": None, "provider": None, "usage": None})
         subdir = _FIXTURE_DIRS.get(purpose)
         if subdir is None:
             raise LLMError(f"FixtureLLM has no recordings for purpose={purpose!r}")

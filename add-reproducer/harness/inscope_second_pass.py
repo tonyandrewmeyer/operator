@@ -204,6 +204,12 @@ class TwoPassExtractor:
         self._first = Extractor(llm, **kwargs)
         self.llm = llm
         self.last_second_pass: dict | None = None
+        # The first pass's own hypothesis, kept because `extract()` returns
+        # the *recovered* one when the second pass overrides a drop -- so
+        # after a recovery there was otherwise no way to say what the first
+        # pass had concluded, which is half of what an extraction record is
+        # for.
+        self.last_first_pass: Hypothesis | None = None
 
     @property
     def max_comment_chars(self) -> int:
@@ -214,8 +220,12 @@ class TwoPassExtractor:
         return Extractor._build_prompt(issue, max_comment_chars)
 
     def extract(self, issue: Issue) -> Hypothesis:
-        hyp = self._first.extract(issue)
+        # Cleared before the call, not after it: a first pass that raises must
+        # not leave the previous issue's record standing for this one.
         self.last_second_pass = None
+        self.last_first_pass = None
+        hyp = self._first.extract(issue)
+        self.last_first_pass = hyp
         if not needs_second_pass(hyp):
             return hyp
         prompt = _build_second_pass_prompt(issue, hyp, self._first.max_comment_chars)

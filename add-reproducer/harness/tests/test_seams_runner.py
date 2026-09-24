@@ -145,6 +145,10 @@ def test_run_lxd_scratch_builds_prepare_pack_deploy_diagnostics_sequence(monkeyp
     # No pebble user/command in `surface` -> no stimulus step (Approach §4
     # delta docstring: this seam does not invent an action from nothing).
     assert calls == [
+        # Installed by the branch that needs it, not by the workflow: only the
+        # scratch branches ever run a concierge command
+        # (`seams/runner.py`'s `INSTALL_CONCIERGE_COMMAND`).
+        "which concierge >/dev/null 2>&1 || sudo snap install --classic concierge",
         "sudo concierge prepare --juju-channel 4.0/stable -p machine",  # concierge has no `lxd` preset
         # `-o` matters: without it charmcraft writes the .charm to cwd and
         # the deploy glob below never matches (first successful pack,
@@ -184,9 +188,10 @@ def test_run_lxd_scratch_falls_back_without_charm_dir(monkeypatch):
 
     result = SubprocessRunnerSeam().run(branch="lxd-scratch", hypothesis=_hypothesis("lxd"), surface=None, context={})
 
-    assert calls[1] == "charmcraft pack"
-    assert calls[2].startswith("juju remove-application -m concierge-lxd:testing repro-i9999 ")
-    assert calls[3] == "juju deploy -m concierge-lxd:testing ./*.charm repro-i9999"
+    # Indices shifted by one when `install-concierge` joined the sequence.
+    assert calls[2] == "charmcraft pack"
+    assert calls[3].startswith("juju remove-application -m concierge-lxd:testing repro-i9999 ")
+    assert calls[4] == "juju deploy -m concierge-lxd:testing ./*.charm repro-i9999"
     assert result.branch == "lxd-scratch"
 
 
@@ -206,9 +211,10 @@ def test_run_lxd_scratch_includes_stimulus_when_pebble_info_present(monkeypatch)
         branch="lxd-scratch", hypothesis=_hypothesis("lxd"), surface=surface, context={"charm_dir": "charm-9999"}
     )
 
-    # cleanup joined the sequence in 2026-08-21's per-issue-app-name fix.
-    assert len(calls) == 8  # prepare, pack, cleanup, deploy, wait, stimulus, status, debug-log
-    stimulus = calls[5]
+    # cleanup joined the sequence in 2026-08-21's per-issue-app-name fix, and
+    # install-concierge on 2026-09-24.
+    assert len(calls) == 9  # install-concierge, prepare, pack, cleanup, deploy, wait, stimulus, status, debug-log
+    stimulus = calls[6]
     assert stimulus.startswith(f'juju ssh -m concierge-lxd:testing {_UNIT} -- "')  # no k8s --container on lxd
     assert "_daemon_" in stimulus
     assert "pebble notify canonical.com/repro/notice key=value" in stimulus
@@ -326,9 +332,11 @@ def test_run_lxd_scratch_nonzero_exit_captured_not_raised(monkeypatch):
     assert len(result.commands) == 1
     assert result.commands[0].exit_code == 1
     assert result.commands[0].stderr == "boom"
-    assert result.commands[0].step == "prepare"
-    assert result.aborted_at_step == "prepare"
-    assert result.skipped_steps == ["pack", "cleanup", "deploy", "wait", "status", "debug-log"]
+    # The first command is now the concierge install, so it is the first
+    # prerequisite a blanket-failing shell aborts at.
+    assert result.commands[0].step == "install-concierge"
+    assert result.aborted_at_step == "install-concierge"
+    assert result.skipped_steps == ["prepare", "pack", "cleanup", "deploy", "wait", "status", "debug-log"]
 
 
 def test_run_lxd_scratch_timeout_captured_not_raised(monkeypatch):
@@ -342,7 +350,7 @@ def test_run_lxd_scratch_timeout_captured_not_raised(monkeypatch):
     assert len(result.commands) == 1
     assert result.commands[0].exit_code == 124
     assert "timed out" in result.commands[0].stderr
-    assert result.aborted_at_step == "prepare"
+    assert result.aborted_at_step == "install-concierge"
 
 
 def test_build_steps_get_a_longer_timeout_than_the_flat_default(monkeypatch):

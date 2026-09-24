@@ -104,7 +104,9 @@ def test_build_plan_k8s_scratch_matches_executed_sequence(monkeypatch):
 def test_build_plan_k8s_scratch_prepare_flag_is_k8s_not_lxd():
     hyp = _hypothesis("k8s", [])
     plan = build_plan(branch="k8s-scratch", hypothesis=hyp, surface=None, context={})
-    assert plan[0].command == "sudo concierge prepare --juju-channel 4.0/stable -p k8s"
+    # `plan[1]`, not `plan[0]`: the lazy `install-concierge` step sits ahead of
+    # `prepare` (`seams/runner.py`'s `INSTALL_CONCIERGE_COMMAND`).
+    assert plan[1].command == "sudo concierge prepare --juju-channel 4.0/stable -p k8s"
 
 
 def test_build_plan_lxd_scratch_prepare_flag_is_machine():
@@ -114,7 +116,7 @@ def test_build_plan_lxd_scratch_prepare_flag_is_machine():
     (2026-08-18). The old name and assertion encoded the bug."""
     hyp = _hypothesis("lxd", [])
     plan = build_plan(branch="lxd-scratch", hypothesis=hyp, surface=None, context={})
-    assert plan[0].command == "sudo concierge prepare --juju-channel 4.0/stable -p machine"
+    assert plan[1].command == "sudo concierge prepare --juju-channel 4.0/stable -p machine"
 
 
 def test_build_plan_unknown_branch_raises():
@@ -134,7 +136,18 @@ def test_2639_plan_routes_to_k8s_scratch():
 def test_2639_plan_covers_the_whole_branch_including_control():
     _, plan = dry_run.generate_plan(2639, fixtures_dir=FIXTURES)
     steps = [p.step for p in plan]
-    assert steps == ["prepare", "pack", "cleanup", "deploy", "wait", "stimulus", "status", "debug-log", "control"]
+    assert steps == [
+        "install-concierge",
+        "prepare",
+        "pack",
+        "cleanup",
+        "deploy",
+        "wait",
+        "stimulus",
+        "status",
+        "debug-log",
+        "control",
+    ]
 
 
 def test_2639_plan_has_no_unfilled_placeholders():
@@ -175,7 +188,16 @@ def test_2639_plan_without_a_real_stimulus_omits_stimulus_and_control(tmp_path):
         """{"charm_name": "repro-i2639-pebble-notice", "pebble_service": {"container": "workload"}, "expected_signal": "observed notice:"}"""
     )
     _, plan = dry_run.generate_plan(2639, fixtures_dir=fixtures_dir)
-    assert [p.step for p in plan] == ["prepare", "pack", "cleanup", "deploy", "wait", "status", "debug-log"]
+    assert [p.step for p in plan] == [
+        "install-concierge",
+        "prepare",
+        "pack",
+        "cleanup",
+        "deploy",
+        "wait",
+        "status",
+        "debug-log",
+    ]
 
 
 # --- the committed artefact must match what the generator produces today ---

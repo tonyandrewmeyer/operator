@@ -41,6 +41,7 @@ disagreeing about which model they are in.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import pathlib
 import shutil
 import tempfile
@@ -49,7 +50,7 @@ from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeAlias, cast
 from uuid import uuid4
 
-from . import _isolated_serde
+from . import _charm_mocking, _isolated_serde
 from ._isolated_worker import _load_charm_type
 from ._isolation import IsolatedContext, _load_charm_spec
 from .context import _DEFAULT_JUJU_VERSION, Context
@@ -168,6 +169,7 @@ class _InProcessRunner(_Runner):
         juju_version: str,
         app_trusted: bool,
         charm_roots: Mapping[int, pathlib.Path],
+        mocking: _charm_mocking.CharmMocking,
     ):
         self._charm_type = charm_type
         self._meta = meta
@@ -177,6 +179,7 @@ class _InProcessRunner(_Runner):
         self._juju_version = juju_version
         self._app_trusted = app_trusted
         self._charm_roots = charm_roots
+        self._mocking = mocking
         self._contexts: dict[int, Context[CharmBase]] = {}
 
     def _context(self, unit_id: int) -> Context[CharmBase]:
@@ -197,7 +200,8 @@ class _InProcessRunner(_Runner):
         return self._contexts[unit_id]
 
     def run(self, unit_id: int, event: _Event, state: State) -> State:
-        return self._context(unit_id).run(event, state)
+        with self._mocking.dispatching(f'{self._app_name}/{unit_id}', state.model.name):
+            return self._context(unit_id).run(event, state)
 
     def close(self) -> None:
         self._contexts.clear()
@@ -295,6 +299,7 @@ class App:
         config: Mapping[str, Any],
         python_executable: str | None = None,
         extra_sys_path: Sequence[str] = (),
+        mocking: Mapping[str, Any] | None = None,
         juju_version: str = _DEFAULT_JUJU_VERSION,
     ):
         if state_template is not None:
@@ -307,6 +312,14 @@ class App:
         # Each unit gets its own charm directory (see _make_charm_root). The
         # runners read this mapping when they dispatch, so it is shared.
         self._charm_roots: dict[int, pathlib.Path] = {}
+        mocking = dict(mocking) if mocking is not None else {}
+        _charm_mocking.check_mocking_json(mocking)
+        charm_mocking = _charm_mocking.CharmMocking(
+            self._charm_source or _charm_class_root(cast('type[CharmBase]', charm)),
+            app_name=name,
+            mocking=mocking,
+            module_name=f'_ops_testing_mocking_{uuid4().hex}',
+        )
         # A path with an interpreter runs the charm in its own process; a path
         # without one, or a charm class, runs it in this process. Which one it
         # is decides how events are executed, so the application owns that
@@ -329,22 +342,30 @@ class App:
                     app_name=name,
                     juju_version=juju_version,
                     app_trusted=trust,
+                    mocking=mocking,
                 ),
                 self._charm_roots,
             )
+            # The mocking itself loads in the worker; the parent reports the
+            # configuration problems it can see without importing anything.
+            charm_mocking.check()
         else:
             if extra_sys_path:
                 raise JujuError(
                     "extra_sys_path= adds to an isolated worker's sys.path, so it "
                     'needs python_executable= as well.'
                 )
+            # The charm's mocking module loads before the charm itself, so its
+            # import-time patches are in place when the charm is imported.
+            charm_mocking.load()
             if self._charm_source is None:
                 charm_type = cast('type[CharmBase]', charm)
             else:
-                charm_type = _load_charm_type(
-                    self._charm_source,
-                    module_name=f'_ops_testing_charm_{uuid4().hex}',
-                )
+                with charm_mocking.importing():
+                    charm_type = _load_charm_type(
+                        self._charm_source,
+                        module_name=f'_ops_testing_charm_{uuid4().hex}',
+                    )
             self._runner = _InProcessRunner(
                 charm_type,
                 meta=meta,
@@ -354,6 +375,7 @@ class App:
                 juju_version=juju_version,
                 app_trusted=trust,
                 charm_roots=self._charm_roots,
+                mocking=charm_mocking,
             )
         self._meta = meta
         self._config_schema = config_schema
@@ -595,6 +617,7 @@ class Juju:
         actions: Mapping[str, Any] | None = None,
         python_executable: str | None = None,
         extra_sys_path: Sequence[str] = (),
+        mocking: Mapping[str, Any] | None = None,
         juju_version: str = _DEFAULT_JUJU_VERSION,
     ) -> App:
         """Deploy a charm, as ``juju deploy`` would.
@@ -638,6 +661,12 @@ class Juju:
                 imported modules with any other charm deployed that way.
             extra_sys_path: Directories prepended to the worker's
                 ``sys.path``. Only with ``python_executable``.
+            mocking: Keyword arguments for the charm's own mocking function,
+                which the charm configures in its ``pyproject.toml`` under
+                ``[tool.ops.testing.mocking]``. Use it to vary how the
+                charm's mocks behave in this test. Only JSON values are
+                accepted, because for a charm in its own interpreter this
+                dict is all that is sent.
             juju_version: The Juju agent version to simulate.
 
         Returns:
@@ -646,8 +675,9 @@ class Juju:
         Raises:
             JujuError: if an application of this name already exists,
                 ``num_units`` is not positive, the charm path or the
-                template is not accepted, or ``python_executable`` or
-                ``extra_sys_path`` is given where it can't apply.
+                template is not accepted, ``python_executable`` or
+                ``extra_sys_path`` is given where it can't apply, or the
+                charm's mocking can't be set up with ``mocking``.
         """
         self._check_open()
         if num_units < 1:
@@ -700,6 +730,7 @@ class Juju:
             config=_merged_config(config_schema, config),
             python_executable=python_executable,
             extra_sys_path=extra_sys_path,
+            mocking=mocking,
             juju_version=juju_version,
         )
         self._state.apps[app_name] = new_app
@@ -1171,6 +1202,19 @@ class Juju:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _charm_class_root(charm_type: type[CharmBase]) -> pathlib.Path | None:
+    """The source tree a charm class was loaded from, if it has a ``pyproject.toml``.
+
+    Found the same way as ``Context`` finds a charm class's metadata: the
+    class is expected to be in ``src/charm.py``.
+    """
+    try:
+        root = pathlib.Path(inspect.getfile(charm_type)).parent.parent
+    except (OSError, TypeError):
+        return None
+    return root if (root / 'pyproject.toml').exists() else None
 
 
 def _check_state_template(template: State) -> None:

@@ -524,6 +524,10 @@ class IsolatedContext:
             :class:`~ops.testing.Context`.
         charm_root: The charm directory the charm runs with, as for
             :class:`~ops.testing.Context`.
+        mocking: Keyword arguments for the charm's own mocking, configured in
+            its ``pyproject.toml``. The worker opens that mocking, inside the
+            default mocks, around each event. ``None`` runs the charm with no
+            mocking at all.
         dispatch_timeout: Seconds to let a single event run in the worker
             before the worker is killed and :class:`IsolationError` raised.
             Pass ``None`` to wait indefinitely, which is what a charm being
@@ -570,6 +574,7 @@ class IsolatedContext:
         juju_version: str = _DEFAULT_JUJU_VERSION,
         app_trusted: bool = False,
         charm_root: str | pathlib.Path | None = None,
+        mocking: Mapping[str, Any] | None = None,
         spawn_per_event: bool = False,
         idle_timeout: float | None = None,
         dispatch_timeout: float | None = _DEFAULT_DISPATCH_TIMEOUT,
@@ -600,6 +605,7 @@ class IsolatedContext:
         self.juju_version = juju_version
         self.app_trusted = app_trusted
         self.charm_root = charm_root
+        self._mocking = dict(mocking) if mocking is not None else None
 
         self.dispatch_timeout = dispatch_timeout
         self._spawn_per_event = spawn_per_event
@@ -624,6 +630,7 @@ class IsolatedContext:
             'juju_version': self.juju_version,
             'app_trusted': self.app_trusted,
             'charm_root': None if self.charm_root is None else str(self.charm_root),
+            'mocking': self._mocking,
             'event': _isolated_serde.encode_event(event),
             'state_in': state._to_json(),
         }

@@ -1,0 +1,5 @@
+name: beta
+summary: Charm that depends on confdep v2.
+description: |
+  Demonstration charm for per-charm dependency isolation. Requires the v2 API
+  of confdep (NEW_NAME, compute()==2), which is incompatible with v1.

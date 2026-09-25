@@ -59,7 +59,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
 from uuid import UUID, uuid4, uuid5
 
-from . import _isolated_serde
+from . import _charm_mocking, _isolated_serde
 from ._isolated_worker import _load_charm_type
 from ._isolation import IsolatedContext, _load_charm_spec
 from .context import _DEFAULT_JUJU_VERSION, Context
@@ -109,7 +109,10 @@ class CharmSpec(Generic[CharmType]):
     mocking: Callable[..., contextlib.AbstractContextManager[Any]] | None = None
     """A function returning a context manager that mocks what the charm needs.
 
-    :class:`Juju` opens it around each of the application's dispatches.
+    :class:`Juju` calls it with the ``mocked=`` given to :meth:`Juju.deploy`
+    as keyword arguments, and opens the result around each of the
+    application's dispatches, inside the default mocks. With no ``mocking``,
+    the charm still gets the default mocks.
     """
 
 
@@ -329,7 +332,7 @@ class _InProcessRunner(_Runner):
         juju_version: str,
         app_trusted: bool,
         charm_roots: Mapping[int, pathlib.Path],
-        mocking: Callable[..., contextlib.AbstractContextManager[Any]] | None = None,
+        mocking: _charm_mocking.CharmMocking,
     ):
         self._charm_type = charm_type
         self._meta = meta
@@ -360,9 +363,7 @@ class _InProcessRunner(_Runner):
         return self._contexts[unit_id]
 
     def run(self, unit_id: int, event: _Event, state: State) -> State:
-        if self._mocking is None:
-            return self._context(unit_id).run(event, state)
-        with self._mocking():
+        with self._mocking.dispatching(f'{self._app_name}/{unit_id}', state.model.name):
             return self._context(unit_id).run(event, state)
 
     def close(self) -> None:
@@ -482,6 +483,7 @@ class App:
         config: Mapping[str, Any] | None = None,
         state_template: State | None = None,
         trust: bool = False,
+        mocked: Mapping[str, Any] | None = None,
         juju_version: str = _DEFAULT_JUJU_VERSION,
     ):
         if state_template is not None:
@@ -500,6 +502,8 @@ class App:
         self._config = _merged_config(self._config_schema, config)
         self._state_template = state_template if state_template is not None else State()
         self._trust = trust
+        self._mocked = dict(mocked) if mocked is not None else {}
+        _charm_mocking.check_mocking_json(self._mocked)
         self._juju_version = juju_version
         # Set by Juju once it knows where the charm runs; see _run_in_process
         # and _run_in_worker.
@@ -523,17 +527,30 @@ class App:
 
     def _run_in_process(self) -> None:
         """Run the charm in the test process, loading it from its path if it has one."""
-        mocking: Callable[..., contextlib.AbstractContextManager[Any]] | None = None
         if isinstance(self._charm, CharmSpec):
             charm_type = cast('type[CharmBase]', self._charm.charm_type)
-            mocking = self._charm.mocking
+            mocking = self._charm_mocking(
+                None, function=self._charm.mocking, charm_sources=_class_sources(charm_type)
+            )
         elif self._charm_source is None:
             charm_type = cast('type[CharmBase]', self._charm)
-        else:
-            charm_type = _load_charm_type(
-                self._charm_source,
-                module_name=f'_ops_testing_charm_{uuid4().hex}',
+            mocking = self._charm_mocking(
+                _charm_class_root(charm_type), charm_sources=_class_sources(charm_type)
             )
+        else:
+            charm_type: type[CharmBase] | None = None
+            mocking = self._charm_mocking(self._charm_source)
+        # The charm's mocking module loads before the charm itself, so its
+        # import-time patches are in place when the charm is imported.
+        mocking.load()
+        if charm_type is None:
+            assert self._charm_source is not None
+            # The charm import itself runs inside the defaults.
+            with mocking.importing():
+                charm_type = _load_charm_type(
+                    self._charm_source,
+                    module_name=f'_ops_testing_charm_{uuid4().hex}',
+                )
         self._charm_type = charm_type
         self._runner = _InProcessRunner(
             charm_type,
@@ -566,8 +583,28 @@ class App:
                 app_name=self._name,
                 juju_version=self._juju_version,
                 app_trusted=self._trust,
+                mocking=self._mocked,
             ),
             self._charm_roots,
+        )
+        # The mocking itself loads in the worker; the parent reports the
+        # configuration problems it can see without importing anything.
+        self._charm_mocking(self._charm_source).check()
+
+    def _charm_mocking(
+        self,
+        root: pathlib.Path | None,
+        *,
+        function: Callable[..., contextlib.AbstractContextManager[Any]] | None = None,
+        charm_sources: Sequence[pathlib.Path] | None = None,
+    ) -> _charm_mocking.CharmMocking:
+        return _charm_mocking.CharmMocking(
+            root,
+            app_name=self._name,
+            mocking=self._mocked,
+            module_name=f'_ops_testing_mocking_{uuid4().hex}',
+            function=function,
+            charm_sources=charm_sources,
         )
 
     @property
@@ -833,6 +870,7 @@ class Juju:
         num_units: int = 1,
         isolated: bool = False,
         requirements: str | pathlib.Path | None = None,
+        mocked: Mapping[str, Any] | None = None,
         juju_version: str = _DEFAULT_JUJU_VERSION,
     ) -> App:
         """Deploy a charm, as ``juju deploy`` would.
@@ -876,6 +914,14 @@ class Juju:
             requirements: A requirements file to build the isolated
                 environment from, for a charm whose dependencies can't be
                 found from its build plugin. Only with ``isolated=True``.
+            mocked: Keyword arguments for the charm's own mocking: the
+                function the charm configures in its ``pyproject.toml`` under
+                ``[tool.ops.testing.mocking]``, or a ``CharmSpec``'s
+                ``mocking``. Use it to vary how the charm's mocks behave in
+                this test. In this version, only for a charm that runs in the
+                test process, so not with ``isolated=True``. Only JSON values
+                are accepted, so that allowing it for an isolated charm later
+                is purely an addition.
             juju_version: The Juju agent version to simulate.
 
         Returns:
@@ -884,8 +930,9 @@ class Juju:
         Raises:
             JujuError: if an application of this name already exists,
                 ``num_units`` is not positive, the charm or the template is
-                not accepted, or ``isolated`` or ``requirements`` is given
-                where it can't apply.
+                not accepted, ``isolated`` or ``requirements`` is given
+                where it can't apply, ``mocked`` is given with ``isolated``,
+                or the charm's mocking can't be set up with ``mocked``.
             NotImplementedError: if ``isolated`` is true.
         """
         self._check_open()
@@ -896,6 +943,11 @@ class Juju:
             raise JujuError(
                 'isolated= and requirements= need a charm on disk: a charm class or '
                 'CharmSpec runs in the test process. Deploy it from a path.'
+            )
+        if isolated and mocked is not None:
+            raise JujuError(
+                'mocked= is only for charms that run in the test process in this '
+                'version; deploy the charm without isolated=True to pass mocked=.'
             )
         if isolated:
             raise NotImplementedError(
@@ -910,6 +962,7 @@ class Juju:
             state_template=state_template,
             trust=trust,
             num_units=num_units,
+            mocked=mocked,
             juju_version=juju_version,
         )
 
@@ -922,6 +975,7 @@ class Juju:
         state_template: State | None = None,
         trust: bool = False,
         num_units: int = 1,
+        mocked: Mapping[str, Any] | None = None,
         juju_version: str = _DEFAULT_JUJU_VERSION,
         python_executable: str | None = None,
         extra_sys_path: Sequence[str] = (),
@@ -953,6 +1007,7 @@ class Juju:
             config=config,
             state_template=state_template,
             trust=trust,
+            mocked=mocked,
             juju_version=juju_version,
         )
         if python_executable is not None:
@@ -1537,6 +1592,28 @@ def _claim_model_identity() -> tuple[str, str, tuple[str, int]]:
     taken.add(slot)
     name, uuid = _model_identity(identity, function, slot)
     return name, uuid, (identity, slot)
+
+
+def _class_sources(charm_type: type[Any]) -> list[pathlib.Path]:
+    """The file a charm class is defined in, to find the charmlibs libraries it uses."""
+    try:
+        source = inspect.getsourcefile(charm_type)
+    except TypeError:
+        return []
+    return [pathlib.Path(source)] if source else []
+
+
+def _charm_class_root(charm_type: type[CharmBase]) -> pathlib.Path | None:
+    """The source tree a charm class was loaded from, if it has a ``pyproject.toml``.
+
+    Found the same way as ``Context`` finds a charm class's metadata: the
+    class is expected to be in ``src/charm.py``.
+    """
+    try:
+        root = pathlib.Path(inspect.getfile(charm_type)).parent.parent
+    except (OSError, TypeError):
+        return None
+    return root if (root / 'pyproject.toml').exists() else None
 
 
 def _check_state_template(template: State) -> None:

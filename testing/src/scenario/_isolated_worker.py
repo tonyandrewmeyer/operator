@@ -40,6 +40,8 @@ A request dict has the keys:
 - ``meta`` / ``config`` / ``actions`` (``dict | None``): charm spec.
 - ``app_name`` (``str``), ``unit_id`` (``int``), ``juju_version`` (``str``).
 - ``app_trusted`` (``bool``), ``charm_root`` (``str | None``): as for ``Context``.
+- ``mocking`` (``dict | None``): the keyword arguments for the charm's own
+  mocking; ``None`` runs the charm with no mocking at all.
 - ``event`` (``str``): the JSON wire form of the input ``_Event``.
 - ``state_in`` (``str``): the JSON wire form of the input ``State``.
 
@@ -58,6 +60,7 @@ runtime dependencies may differ.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import json
@@ -150,13 +153,32 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context, State, _isolated_serde
+    from scenario import Context, State, _charm_mocking, _isolated_serde
 
     charm_source = request['charm_source']
+    mocking_key = f'mocking:{charm_source}'
+    mocking: _charm_mocking.CharmMocking | None = None
+    if charm_cache is not None and mocking_key in charm_cache:
+        mocking = cast('_charm_mocking.CharmMocking', charm_cache[mocking_key])
+    elif request.get('mocking') is not None:
+        mocking = _charm_mocking.CharmMocking(
+            pathlib.Path(charm_source),
+            app_name=request['app_name'],
+            mocking=request['mocking'],
+            module_name='_ops_testing_mocking',
+        )
+        if charm_cache is not None:
+            charm_cache[mocking_key] = mocking
+    if mocking is not None:
+        # The charm's mocking module loads before the charm itself, so its
+        # import-time patches are in place when the charm is imported.
+        mocking.load()
+
     if charm_cache is not None and charm_source in charm_cache:
         charm_type = charm_cache[charm_source]
     else:
-        charm_type = _load_charm_type(pathlib.Path(charm_source))
+        with mocking.importing() if mocking is not None else contextlib.nullcontext():
+            charm_type = _load_charm_type(pathlib.Path(charm_source))
         if charm_cache is not None:
             charm_cache[charm_source] = charm_type
 
@@ -174,7 +196,12 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         app_trusted=request['app_trusted'],
         charm_root=request['charm_root'],
     )
-    state_out = ctx.run(event, state_in)
+    if mocking is None:
+        state_out = ctx.run(event, state_in)
+    else:
+        unit_name = f'{request["app_name"]}/{request["unit_id"]}'
+        with mocking.dispatching(unit_name, state_in.model.name):
+            state_out = ctx.run(event, state_in)
     return {'state_out': state_out._to_json()}
 
 
@@ -189,6 +216,7 @@ def serve() -> int:
         ``0`` on a clean shutdown (``{"cmd": "shutdown"}`` or stdin closed).
     """
     from . import _worker_protocol
+    from .errors import JujuError
 
     real_stdin = sys.stdin.buffer
     # Anything written to stdout would corrupt the framed protocol. Reassigning
@@ -212,6 +240,10 @@ def serve() -> int:
             return 0
         try:
             response = _run(request, charm_cache)
+        except JujuError as e:
+            # A problem with how the charm is set up to run, such as its
+            # mocking, rather than a failure inside a hook.
+            response = {'error': str(e)}
         except Exception:
             response = {'error': traceback.format_exc()}
         _worker_protocol.write_frame(real_stdout, json.dumps(response).encode('utf8'))
@@ -231,6 +263,8 @@ def main(argv: list[str]) -> int:
     if argv[1] == '--serve':
         return serve()
 
+    from .errors import JujuError
+
     request_file, response_file = argv[1], argv[2]
 
     with open(request_file, encoding='utf8') as fh:
@@ -239,6 +273,8 @@ def main(argv: list[str]) -> int:
     response: dict[str, str]
     try:
         response = _run(request)
+    except JujuError as e:
+        response = {'error': str(e)}
     except Exception:
         response = {'error': traceback.format_exc()}
 

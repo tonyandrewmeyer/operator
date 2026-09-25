@@ -59,6 +59,7 @@ runtime dependencies may differ.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -70,7 +71,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ops import CharmBase
 
 
-def _load_charm_type(charm_source: pathlib.Path) -> type[CharmBase]:
+def _load_charm_type(charm_source: pathlib.Path, module_name: str = 'charm') -> type[CharmBase]:
     """Import the charm module and return its CharmBase subclass.
 
     Adds ``charm_source/src`` and ``charm_source/lib`` to ``sys.path`` so that
@@ -78,6 +79,10 @@ def _load_charm_type(charm_source: pathlib.Path) -> type[CharmBase]:
 
     Args:
         charm_source: Path to the charm repository root.
+        module_name: The name to import ``src/charm.py`` under. The worker
+            runs one charm, so it uses ``charm``. Several charms loaded into
+            one process each need their own name, and are loaded from the
+            file rather than found on ``sys.path``.
 
     Returns:
         The charm class (a :class:`ops.CharmBase` subclass).
@@ -92,7 +97,19 @@ def _load_charm_type(charm_source: pathlib.Path) -> type[CharmBase]:
         if pathlib.Path(entry).exists() and entry not in sys.path:
             sys.path.insert(0, entry)
 
-    module = importlib.import_module('charm')
+    if module_name == 'charm':
+        module = importlib.import_module('charm')
+    elif module_name in sys.modules:
+        module = sys.modules[module_name]
+    else:
+        spec = importlib.util.spec_from_file_location(
+            module_name, charm_source / 'src' / 'charm.py'
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f'Cannot load {charm_source}/src/charm.py.')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
 
     charm_types = [
         t
@@ -105,7 +122,7 @@ def _load_charm_type(charm_source: pathlib.Path) -> type[CharmBase]:
         raise RuntimeError(
             f'Multiple CharmBase subclasses found in {charm_source}/src/charm.py: '
             f'{[t.__name__ for t in charm_types]}. '
-            'The isolated worker requires exactly one.'
+            'Exactly one is required.'
         )
     return charm_types[0]
 

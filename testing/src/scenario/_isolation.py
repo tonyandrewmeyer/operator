@@ -157,7 +157,7 @@ def _dispatch(
         'app_trusted': app_trusted,
         'charm_root': None if charm_root is None else str(charm_root),
         'event': _isolated_serde.encode_event(event),
-        'state_in': _isolated_serde.encode_state(state_in),
+        'state_in': state_in._to_json(),
     }
 
     with tempfile.TemporaryDirectory(prefix='ops-iso-') as tmp:
@@ -209,7 +209,7 @@ def _dispatch(
             f'Isolated charm run failed for {app_name}/{unit_id}:\n{response["error"]}'
         )
 
-    return _isolated_serde.decode_state(response['state_out'])
+    return State._from_json(response['state_out'])
 
 
 def _child_environ() -> dict[str, str]:

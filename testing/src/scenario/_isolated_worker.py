@@ -34,7 +34,7 @@ Protocol (spawn-per-event)
 Serialisation compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ``State`` and ``_Event`` are round-tripped through
-:mod:`scenario._isolated_serde`, which reconstructs scenario dataclasses by
+:mod:`scenario._state_serde`, which reconstructs scenario dataclasses by
 name. The parent and worker must therefore have the **same** ``ops`` version.
 The parent sets ``PYTHONPATH`` to include the ``testing/src`` directory so the
 worker imports the matching ``scenario.*`` classes.
@@ -123,13 +123,13 @@ def _run(request: dict[str, Any]) -> dict[str, str]:
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context, _isolated_serde
+    from scenario import Context, State, _isolated_serde
 
     charm_source = pathlib.Path(request['charm_source'])
     charm_type = _load_charm_type(charm_source)
 
     event = _isolated_serde.decode_event(request['event'])
-    state_in = _isolated_serde.decode_state(request['state_in'])
+    state_in = State._from_json(request['state_in'])
 
     ctx = Context(
         charm_type,
@@ -143,7 +143,7 @@ def _run(request: dict[str, Any]) -> dict[str, str]:
         charm_root=request['charm_root'],
     )
     state_out = ctx.run(event, state_in)
-    return {'state_out': _isolated_serde.encode_state(state_out)}
+    return {'state_out': state_out._to_json()}
 
 
 def main(argv: list[str]) -> int:

@@ -78,25 +78,46 @@ See more: [](ops.Application.add_secret)
 
 The rewrite above is the whole change for a new charm. A charm that's already deployed has two more things to deal with.
 
-Juju doesn't remove relation data because a charm stopped writing it. The `username` and `password` that an earlier revision wrote stay in the application databag for the life of the relation, readable by anyone with model read access, so the upgraded charm has to delete them itself:
+Juju doesn't remove relation data because a charm stopped writing it. The `username` and `password` that an earlier revision wrote stay in the application databag for the life of the relation, readable by anyone with model read access, so the upgraded charm has to delete them itself. A relation that already exists doesn't get another `relation-joined` event, so the charm also has to do this when it's upgraded, not only when a new relation joins:
 
 ```python
+class MyDatabaseCharm(ops.CharmBase):
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(
+            self.on.database_relation_joined, self._on_database_relation_joined
+        )
+        framework.observe(self.on.upgrade_charm, self._on_upgrade_charm)
+
     def _on_database_relation_joined(self, event: ops.RelationJoinedEvent):
-        content = {
-            'username': 'admin',
-            'password': 'admin',
-        }
-        secret = self.app.add_secret(content)
-        secret.grant(event.relation)
-        databag = event.relation.data[self.app]
-        databag['secret-id'] = secret.id
+        self._share_credentials(event.relation)
+
+    def _on_upgrade_charm(self, event: ops.UpgradeCharmEvent):
+        # Relations that an earlier version of this charm set up won't be
+        # joined again, so move them over to a secret now.
+        for relation in self.model.relations['database']:
+            self._share_credentials(relation)
+
+    def _share_credentials(self, relation: ops.Relation):
+        if not self.unit.is_leader():
+            return
+        databag = relation.data[self.app]
+        if 'secret-id' not in databag:
+            content = {
+                'username': 'admin',
+                'password': 'admin',
+            }
+            secret = self.app.add_secret(content)
+            secret.grant(relation)
+            databag['secret-id'] = secret.id
         # An earlier version of this charm wrote the credentials in plain text.
         for key in ('username', 'password'):
-            if key in databag:
-                del databag[key]
+            databag.pop(key, None)
 ```
 
-The other end of the relation also has to be ready for the change. If the observer is a charm library that other charms vendor, then every requirer that hasn't run `charmcraft fetch-libs` and released since the change still reads `username` and `password`, and gets nothing once the owner stops writing them. Give the requirer a release that prefers `secret-id` and falls back to the plain-text keys, wait for the requirers to pick it up, and only then stop writing them.
+`_share_credentials` only creates a secret if the relation doesn't already have one, because `relation-joined` fires once for each remote unit and `upgrade-charm` fires on every upgrade. Only the leader can write to the application databag, so the other units leave it alone.
+
+The other end of the relation also has to be ready for the change. If the observer is a charm library that other charms vendor, then every requirer that hasn't run `charmcraft fetch-libs` and released since the change still reads `username` and `password`, and gets nothing once the owner stops writing them. Give the requirer a release that prefers `secret-id` and falls back to the plain-text keys, wait for the requirers to pick it up, and only then release the owner change above.
 
 ### Create a new secret revision
 

@@ -14,7 +14,7 @@
 
 """Run the migration example from the 'manage secrets' how-to.
 
-The handler is read out of the Markdown source and executed as printed, so that
+The charm is read out of the Markdown source and executed as printed, so that
 the page can't drift away from what works.
 """
 
@@ -34,16 +34,7 @@ MIGRATION_BLOCK = 'An earlier version of this charm wrote the credentials in pla
 
 META: dict[str, Any] = {'name': 'my-database', 'provides': {'database': {'interface': 'db'}}}
 
-CHARM_TEMPLATE = """
-class MyDatabaseCharm(ops.CharmBase):
-    def __init__(self, framework: ops.Framework):
-        super().__init__(framework)
-        framework.observe(
-            self.on.database_relation_joined, self._on_database_relation_joined
-        )
-
-{handler}
-"""
+PLAIN_TEXT = {'username': 'admin', 'password': 'admin'}
 
 
 def block(contains: str) -> str:
@@ -56,21 +47,58 @@ def block(contains: str) -> str:
     return matching[0]
 
 
-def test_migrate_an_existing_charm_to_secrets():
+def context() -> testing.Context[ops.CharmBase]:
     namespace: dict[str, Any] = {'ops': ops}
-    handler = textwrap.indent(textwrap.dedent(block(MIGRATION_BLOCK)), ' ' * 4)
-    exec(CHARM_TEMPLATE.format(handler=handler), namespace)  # ruff: ignore[exec-builtin]
-    ctx = testing.Context(namespace['MyDatabaseCharm'], meta=META)
-    relation = testing.Relation(
-        'database',
-        remote_units_data={0: {}},
-        local_app_data={'username': 'admin', 'password': 'admin'},
-    )
+    exec(textwrap.dedent(block(MIGRATION_BLOCK)), namespace)  # ruff: ignore[exec-builtin]
+    return testing.Context(namespace['MyDatabaseCharm'], meta=META)
+
+
+def assert_moved_to_secret(state: testing.State, relation: testing.Relation):
+    databag = state.get_relation(relation.id).local_app_data
+    assert set(databag) == {'secret-id'}
+    secret = state.get_secret(id=databag['secret-id'])
+    assert secret.latest_content == PLAIN_TEXT
+
+
+def test_upgrade_moves_an_existing_relation_to_a_secret():
+    relation = testing.Relation('database', local_app_data=dict(PLAIN_TEXT))
     state_in = testing.State(relations={relation}, leader=True)
 
+    ctx = context()
+    state_out = ctx.run(ctx.on.upgrade_charm(), state_in)
+
+    assert_moved_to_secret(state_out, relation)
+
+
+def test_new_relation_gets_a_secret():
+    relation = testing.Relation('database', remote_units_data={0: {}})
+    state_in = testing.State(relations={relation}, leader=True)
+
+    ctx = context()
     state_out = ctx.run(ctx.on.relation_joined(relation, remote_unit=0), state_in)
 
-    databag = state_out.get_relation(relation.id).local_app_data
-    assert set(databag) == {'secret-id'}
-    secret = state_out.get_secret(id=databag['secret-id'])
-    assert secret.latest_content == {'username': 'admin', 'password': 'admin'}
+    assert_moved_to_secret(state_out, relation)
+
+
+def test_second_upgrade_keeps_the_secret():
+    ctx = context()
+    relation = testing.Relation('database', local_app_data=dict(PLAIN_TEXT))
+    state_in = testing.State(relations={relation}, leader=True)
+    first = ctx.run(ctx.on.upgrade_charm(), state_in)
+    secret_id = first.get_relation(relation.id).local_app_data['secret-id']
+
+    second = ctx.run(ctx.on.upgrade_charm(), first)
+
+    assert second.get_relation(relation.id).local_app_data == {'secret-id': secret_id}
+    assert len(second.secrets) == 1
+
+
+def test_non_leader_leaves_the_databag_alone():
+    relation = testing.Relation('database', local_app_data=dict(PLAIN_TEXT))
+    state_in = testing.State(relations={relation}, leader=False)
+
+    ctx = context()
+    state_out = ctx.run(ctx.on.upgrade_charm(), state_in)
+
+    assert state_out.get_relation(relation.id).local_app_data == PLAIN_TEXT
+    assert not state_out.secrets

@@ -72,6 +72,9 @@ jobs:
 
       # Clean between runs so that no tox or uv environment built against one
       # ops carries over into the next run, and to stay within the runner's disk.
+      # The patched runs take ops from git rather than the local checkout: hyrum
+      # installs a local path as editable, and Pyright can't follow the import
+      # hook that a setuptools editable install uses.
       - name: Run unit tests with the charms' own ops
         if: ${{ !cancelled() }}
         run: |
@@ -82,7 +85,7 @@ jobs:
       - name: Run unit tests with this ops
         if: ${{ !cancelled() }}
         run: |
-          hyrum check unit --patch "ops @ $GITHUB_WORKSPACE/operator" --workers 3 --verbose \
+          hyrum check unit --patch "ops @ git+https://github.com/$GITHUB_REPOSITORY@$GITHUB_SHA" --workers 3 --verbose \
             --no-fail --save "$RESULTS/patched-unit.json" --log-dir "$LOGS/patched-unit"
           hyrum clean --quiet
 
@@ -96,13 +99,13 @@ jobs:
       - name: Run static checks with this ops
         if: ${{ !cancelled() }}
         run: |
-          hyrum check static --patch "ops @ $GITHUB_WORKSPACE/operator" --workers 3 --verbose \
+          hyrum check static --patch "ops @ git+https://github.com/$GITHUB_REPOSITORY@$GITHUB_SHA" --workers 3 --verbose \
             --no-fail --save "$RESULTS/patched-static.json" --log-dir "$LOGS/patched-static"
 
       - name: Compare with the baseline
         if: ${{ !cancelled() }}
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           status=0
           for target in unit static; do
             echo "## Shard ${SHARD}: ${target}" >> "$GITHUB_STEP_SUMMARY"

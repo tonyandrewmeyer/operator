@@ -24,7 +24,7 @@ jobs:
 
       - name: Install TIOBE and project dependencies
         run: |
-          uv export --no-emit-project --frozen --no-hashes --group unit --group lint --group release --group tiobe > requirements.txt
+          uv export --no-emit-project --frozen --no-hashes --group unit --group lint --group tiobe > requirements.txt
           pip install -e . -r requirements.txt --break-system-packages
 
       - name: TICS GitHub Action
@@ -41,4 +41,8 @@ jobs:
     needs: [TICS]
     permissions:
       issues: write
+      actions: read  # for ai-failure-enrich.yaml
+    secrets:
+      # For ai-failure-enrich.yaml -- can only be read in the ai-failure-triage environment.
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
     uses: ./.github/workflows/notify-scheduled-failure.yaml

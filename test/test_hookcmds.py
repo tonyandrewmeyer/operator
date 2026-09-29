@@ -188,6 +188,28 @@ def test_run_error(run: Run):
     assert excinfo.value.stderr == 'error msg'
 
 
+def test_error_message_omits_args(run: Run):
+    run.handle(['juju-log', '--log-level', 'INFO', '--', 'msg'], returncode=2, stderr='error msg')
+    with pytest.raises(hookcmds.Error) as excinfo:
+        hookcmds.juju_log('msg')
+    assert str(excinfo.value) == "command 'juju-log' exited with status 2"
+    assert repr(excinfo.value).count('msg') == 0
+    # Arguments of commands that are not sensitive remain available programmatically.
+    assert excinfo.value.cmd == ['juju-log', '--log-level', 'INFO', '--', 'msg']
+
+
+def test_action_set_error_redacts_args(run: Run):
+    run.handle(['action-set', 'password=hunter2'], returncode=1, stderr='boom')
+    with pytest.raises(hookcmds.Error) as excinfo:
+        hookcmds.action_set({'password': 'hunter2'})
+    assert 'hunter2' not in str(excinfo.value)
+    assert 'hunter2' not in repr(excinfo.value)
+    assert 'hunter2' not in repr(excinfo.value.cmd)
+    assert excinfo.value.cmd == ['action-set', '...']
+    assert excinfo.value.returncode == 1
+    assert excinfo.value.stderr == 'boom'
+
+
 def test_action_fail(run: Run):
     run.handle(['action-fail'])
     hookcmds.action_fail()

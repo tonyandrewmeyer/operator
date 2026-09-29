@@ -15,7 +15,14 @@
 from __future__ import annotations
 
 import datetime
+import os
 import subprocess
+
+# Hook commands whose arguments carry private data (for example, action results),
+# so the arguments must not appear in exception messages or in the `cmd` attribute.
+_REDACTED_ARGS_COMMANDS = frozenset({'action-set'})
+
+_REDACTED = '...'
 
 
 class Error(Exception):
@@ -25,7 +32,11 @@ class Error(Exception):
     """Exit status of the child process."""
 
     cmd: list[str]
-    """The full command that was run."""
+    """The command that was run.
+
+    The arguments of commands that may carry private data, such as ``action-set``,
+    are replaced with ``'...'``.
+    """
 
     stdout: str = ''
     """Stdout output of the child process."""
@@ -35,10 +46,16 @@ class Error(Exception):
 
     def __init__(self, *, returncode: int, cmd: list[str], stdout: str = '', stderr: str = ''):
         self.returncode = returncode
+        cmd = list(cmd)
+        if cmd and os.path.basename(cmd[0]) in _REDACTED_ARGS_COMMANDS:
+            cmd = [cmd[0], _REDACTED]
         self.cmd = cmd
         self.stdout = stdout
         self.stderr = stderr
-        super().__init__(f'command {cmd!r} exited with status {returncode}')
+        # Only the command name is included in the message, as the arguments may be private and
+        # the message ends up in tracebacks and logs.
+        name = cmd[0] if cmd else ''
+        super().__init__(f'command {name!r} exited with status {returncode}')
 
 
 def run(

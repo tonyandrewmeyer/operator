@@ -3566,6 +3566,10 @@ class _ModelBackend:
         finally:
             self._is_recursive.reset(token)
 
+    # Keyword arguments that may carry private data (secret content, relation data, and so on)
+    # and so are never recorded in tracing spans.
+    _SENSITIVE_SPAN_KWARGS = frozenset({'content', 'data', 'spec', 'k8s_resources'})
+
     @contextlib.contextmanager
     def _wrap_hookcmd(self, cmd: str, *args: Any, **kwargs: Any):
         if self._is_recursive.get():
@@ -3581,7 +3585,13 @@ class _ModelBackend:
                     if args:
                         span.set_attribute('args', args)
                     if kwargs:
-                        span.set_attribute('kwargs', [f'{k}={v}' for k, v in kwargs.items()])
+                        span.set_attribute(
+                            'kwargs',
+                            [
+                                f'{k}={"..." if k in self._SENSITIVE_SPAN_KWARGS else v}'
+                                for k, v in kwargs.items()
+                            ],
+                        )
                 yield
         except hookcmds.Error as e:
             self._check_for_security_event(e.cmd[0], e.returncode, e.stderr)

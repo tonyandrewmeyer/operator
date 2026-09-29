@@ -24,6 +24,7 @@ import pathlib
 import re
 import sys
 import tempfile
+import traceback
 import typing
 import unittest
 import warnings
@@ -1212,6 +1213,34 @@ class TestModel:
             _ = model.unit.status.message
         assert str(excinfo.value) == 'ERROR cannot get status\n'
         assert excinfo.value.args[0] == 'ERROR cannot get status\n'
+
+    def test_action_set_error_does_not_leak_values(
+        self, fake_script: FakeScript, fake_juju_version: None
+    ):
+        backend = _ModelBackend('myapp/0')
+        fake_script.write('action-set', """echo 'ERROR failed' >&2; exit 1""")
+        # Use a variable so that the value doesn't appear in the traceback via this source line.
+        results = {'password': ''.join(['hunter', '2'])}
+        with pytest.raises(ops.ModelError) as excinfo:
+            backend.action_set(results)
+        formatted = ''.join(traceback.format_exception(excinfo.value))
+        assert 'hunter2' not in formatted
+        assert 'action-set' in formatted
+
+    def test_span_kwargs_redact_sensitive_values(
+        self, fake_script: FakeScript, fake_juju_version: None
+    ):
+        backend = _ModelBackend('myapp/0')
+        fake_script.write('secret-add', 'echo secret:abc')
+        span = mock.MagicMock()
+        with mock.patch('ops.model.tracer.start_as_current_span') as start:
+            start.return_value.__enter__.return_value = span
+            backend.secret_add({'password': 'hunter2'}, label='mylabel', owner='application')
+        kwargs = [c.args[1] for c in span.set_attribute.call_args_list if c.args[0] == 'kwargs']
+        assert kwargs
+        assert 'hunter2' not in str(kwargs)
+        assert 'content=...' in kwargs[0]
+        assert 'label=mylabel' in kwargs[0]
 
     @mock.patch('grp.getgrgid')
     @mock.patch('pwd.getpwuid')

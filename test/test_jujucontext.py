@@ -337,3 +337,28 @@ def test_from_environ_relation(event: str, additional_env: dict[str, str]):
         assert context.remote_unit_name == 'remoteunit'
     if 'JUJU_DEPARTING_UNIT' in environ:
         assert context.relation_departing_unit_name == 'd-unit'
+
+
+def test_error_context_hook_and_relation():
+    ctx = JujuContext._from_dict({
+        'JUJU_DISPATCH_PATH': 'hooks/db-relation-changed',
+        'JUJU_HOOK_NAME': 'db-relation-changed',
+        'JUJU_MODEL_NAME': 'm',
+        'JUJU_MODEL_UUID': 'u',
+        'JUJU_UNIT_NAME': 'app/0',
+        'JUJU_RELATION': 'db',
+        'JUJU_RELATION_ID': 'db:3',
+        'JUJU_REMOTE_APP': 'other',
+    })
+    assert ctx._error_context() == (
+        'hook db-relation-changed, relation=db, relation-id=3, remote-app=other'
+    )
+
+
+def test_error_context_empty():
+    ctx = JujuContext._from_dict({
+        'JUJU_MODEL_NAME': 'm',
+        'JUJU_MODEL_UUID': 'u',
+        'JUJU_UNIT_NAME': 'app/0',
+    })
+    assert ctx._error_context() == ''

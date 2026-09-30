@@ -293,6 +293,32 @@ class JujuContext:
             workload_name=env.get('JUJU_WORKLOAD_NAME') or None,
         )
 
+    def _error_context(self) -> str:
+        """Describe the current hook or action, for adding to error messages.
+
+        Returns an empty string if there is no hook or action context.
+        """
+        if self.action_name:
+            parts = [f'action {self.action_name}']
+        elif self.hook_name:
+            parts = [f'hook {self.hook_name}']
+        else:
+            return ''
+        for label, value in (
+            ('relation', self.relation_name),
+            ('relation-id', self.relation_id),
+            ('remote-app', self.remote_app_name),
+            ('remote-unit', self.remote_unit_name),
+            ('secret-id', self.secret_id),
+            ('secret-label', self.secret_label),
+            ('storage', self.storage_name),
+            ('workload', self.workload_name),
+            ('pebble-check', self.pebble_check_name),
+        ):
+            if value is not None:
+                parts.append(f'{label}={value}')
+        return ', '.join(parts)
+
     @classmethod
     def from_environ(cls, environ: Mapping[str, str] | None = None) -> JujuContext:
         """Create a ``JujuContext`` object from the environment.

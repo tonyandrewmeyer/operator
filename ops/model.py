@@ -3592,7 +3592,8 @@ class _ModelBackend:
                 raise RelationNotFoundError() from e
             elif cmd.startswith('secret-') and 'not found' in e.stderr.lower():
                 raise SecretNotFoundError() from e
-            raise ModelError(e.stderr) from e
+            context = self._juju_context._error_context()
+            raise ModelError(f'{e.stderr} [{context}]' if context else e.stderr) from e
 
     def _check_for_security_event(self, cmd: str, returncode: int, stderr: str):
         authz_messages = (

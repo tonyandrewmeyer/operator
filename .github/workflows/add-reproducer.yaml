@@ -56,8 +56,10 @@
 # issue, add local reproduction steps to the issue body. On record
 # (2026-09-10) this shape has never occurred on production traffic —
 # 0 of 77 open issues across two production-configuration runs — and has
-# only ever been produced by two issues in this project's corpora,
-# `canonical/operator#1329` and `#2484`.
+# only ever been produced by one in-scope issue in this project's corpora,
+# `canonical/operator#1329`. (`#2484` had the same shape, but it is a
+# failure of operator's own test suite, which the extraction treats as out
+# of scope since 2026-10-01.)
 name: add-reproducer
 
 on:

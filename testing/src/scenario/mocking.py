@@ -58,6 +58,9 @@ from .state import (
     PeerRelation,
     Relation,
     RelationBase,
+    ServiceBehaviour,
+    ServiceFailureMode,
+    ServiceStart,
     Storage,
     SubordinateRelation,
     _EntityStatus,
@@ -71,6 +74,13 @@ if TYPE_CHECKING:  # pragma: no cover
     from .state import Exec, Secret, State, _CharmSpec, _Event
 
 logger = scenario_logger.getChild('mocking')
+
+
+def _rfc3339_now() -> str:
+    """An RFC3339 timestamp for the current time, for synthesised Pebble task logs."""
+    return (
+        datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    )
 
 
 class _MockExecProcess:
@@ -905,8 +915,198 @@ class _MockPebbleClient(_TestingPebbleClient):
         object.__setattr__(self._container, 'check_infos', frozenset(infos))
 
     def replan_services(self, timeout: float = 30.0, delay: float = 0.1):
+        # Real Pebble fails a replan the same way it fails an autostart when
+        # an enabled service won't start, with kind='replan'.
+        enabled = self._enabled_service_names()
+        if self._has_failing_behaviour(enabled):
+            return self._start_with_behaviours(enabled, kind='replan')
         super().replan_services(timeout=timeout, delay=delay)
         self._update_state_check_infos()
+
+    def start_services(
+        self,
+        services: list[str],
+        timeout: float = 30.0,
+        delay: float = 0.1,
+    ) -> pebble.ChangeID:
+        if isinstance(services, str):
+            raise TypeError(f'start_services should take a list of names, not just "{services}"')
+        if self._has_failing_behaviour(services):
+            return self._start_with_behaviours(services)
+        return super().start_services(services, timeout=timeout, delay=delay)
+
+    def restart_services(
+        self,
+        services: list[str],
+        timeout: float = 30.0,
+        delay: float = 0.1,
+    ) -> pebble.ChangeID:
+        if isinstance(services, str):
+            raise TypeError(f'restart_services should take a list of names, not just "{services}"')
+        if self._has_failing_behaviour(services):
+            return self._start_with_behaviours(services, kind='restart')
+        return super().restart_services(services, timeout=timeout, delay=delay)
+
+    def autostart_services(self, timeout: float = 30.0, delay: float = 0.1):
+        self._check_connection()
+        enabled = self._enabled_service_names()
+        if self._has_failing_behaviour(enabled):
+            return self._start_with_behaviours(enabled, kind='autostart')
+        return super().autostart_services(timeout=timeout, delay=delay)
+
+    def _enabled_service_names(self) -> list[str]:
+        # The services that ``autostart``/``replan`` will try to start.
+        return [
+            name
+            for name, service in self._render_services().items()
+            if service.startup == pebble.ServiceStartup.ENABLED.value
+        ]
+
+    def _find_service_behaviour(self, service_name: str) -> ServiceBehaviour | None:
+        for behaviour in self._container.service_behaviours:
+            if behaviour.service_name == service_name:
+                return behaviour
+        return None
+
+    def _has_failing_behaviour(self, services: list[str]) -> bool:
+        for name in services:
+            behaviour = self._find_service_behaviour(name)
+            if behaviour is not None and behaviour.start is ServiceStart.FAILS:
+                return True
+        return False
+
+    def _start_with_behaviours(self, services: list[str], kind: str = 'start') -> NoReturn:
+        """Apply declared ``ServiceBehaviour``s for a start/restart/autostart request.
+
+        Only called when at least one requested service is declared
+        ``ServiceStart.FAILS``, so this always raises ``pebble.ChangeError``,
+        matching what real Pebble raises. Services with no declared FAILS
+        behaviour still reach ACTIVE before the error is raised -- Pebble
+        tracks each service's start attempt independently.
+
+        ``kind`` is the change kind Pebble uses for whichever entry point got
+        us here (``start``/``restart``/``autostart``/``replan``), and the
+        change summary's verb follows it.
+        """
+        if not services:
+            raise self._api_error(400, 'must specify services for start action')
+        known_services = self._render_services()
+        for name in services:
+            if name not in known_services:
+                raise self._api_error(400, f'cannot start services: service {name} does not exist')
+
+        # Pebble's task list is always alphabetical, regardless of entry
+        # point -- plan.go's tarjanSort stabilises Go's randomised map
+        # iteration with sort.Strings.
+        ordered = sorted(services)
+
+        failing: list[tuple[str, ServiceBehaviour]] = []
+        for name in ordered:
+            behaviour = self._find_service_behaviour(name)
+            if behaviour is not None and behaviour.start is ServiceStart.FAILS:
+                failing.append((name, behaviour))
+            else:
+                self._service_status[name] = pebble.ServiceStatus.ACTIVE
+
+        tasks: list[pebble.Task] = []
+        bullets: list[str] = []
+        spawn_time = datetime.datetime.now(tz=datetime.timezone.utc)
+        ready_time = spawn_time + datetime.timedelta(milliseconds=10)
+
+        def _task(name: str, task_kind: str, status: str, log: list[str] | None = None):
+            verb = task_kind.capitalize()
+            return pebble.Task(
+                id=pebble.TaskID(str(uuid.uuid4())),
+                kind=task_kind,
+                summary=f'{verb} service "{name}"',
+                status=status,
+                log=log or [],
+                progress=pebble.TaskProgress(label='', done=1, total=1),
+                spawn_time=spawn_time,
+                ready_time=ready_time,
+            )
+
+        failing_by_name = dict(failing)
+
+        # A restart change carries every "stop" task before any "start" task
+        # -- real Pebble builds the two task sets independently (a StopOrder
+        # pass, then a StartOrder pass) and concatenates them, rather than
+        # interleaving stop/start per service.
+        if kind == 'restart':
+            for name in ordered:
+                tasks.append(_task(name, 'stop', 'Done'))
+
+        for name in ordered:
+            behaviour = failing_by_name.get(name)
+            if behaviour is None:
+                # Pebble emits a Done task for services that did start, not
+                # only for the failures.
+                tasks.append(_task(name, 'start', 'Done'))
+                continue
+            reason, status, log = self._service_failure_detail(known_services[name], behaviour)
+            self._service_status[name] = status
+            bullets.append(f'- Start service "{name}" ({reason})')
+            tasks.append(_task(name, 'start', 'Error', log))
+
+        err = 'cannot perform the following tasks:\n' + '\n'.join(bullets)
+        # The summary counts every *requested* service, not only the failing
+        # ones, and quotes the name. Its leading name, though,
+        # depends on the entry point: real Pebble's start/restart handler
+        # uses the client's request order verbatim (payload.Services[0] in
+        # api_services.go), while autostart/replan reassign payload.Services
+        # to an alphabetically-sorted list before building the summary. So
+        # start/restart lead with the caller's first-requested name and
+        # autostart/replan lead with the alphabetically first affected name.
+        leading = services[0] if kind in ('start', 'restart') else ordered[0]
+        summary = f'{kind.capitalize()} service "{leading}"'
+        if len(ordered) > 1:
+            summary += f' and {len(ordered) - 1} more'
+        change = pebble.Change(
+            id=pebble.ChangeID(str(uuid.uuid4())),
+            kind=kind,
+            summary=summary,
+            status='Error',
+            tasks=tasks,
+            ready=True,
+            err=err,
+            spawn_time=spawn_time,
+            ready_time=ready_time,
+        )
+        raise pebble.ChangeError(err, change)
+
+    def _service_failure_detail(
+        self,
+        service: pebble.Service,
+        behaviour: ServiceBehaviour,
+    ) -> tuple[str, pebble.ServiceStatus | str, list[str]]:
+        """Return (reason, status, task.log) for a FAILS service."""
+        if behaviour.failure_mode is ServiceFailureMode.EXEC_ERROR:
+            command = service.command.split()[0] if service.command else service.name
+            reason = f'cannot start service: fork/exec {command}: no such file or directory'
+            log = [f'{_rfc3339_now()} ERROR {reason}']
+            return reason, pebble.ServiceStatus.INACTIVE, log
+
+        verb = self._on_failure_verb(service.on_failure)
+        reason = f'service start attempt: exited quickly with code 1, will {verb}'
+        status: pebble.ServiceStatus | str = (
+            pebble.ServiceStatus.ERROR if verb == 'ignore' else 'backoff'
+        )
+        log = [
+            f'{_rfc3339_now()} INFO Most recent service output:',
+            f'{_rfc3339_now()} ERROR {reason}',
+        ]
+        return reason, status, log
+
+    @staticmethod
+    def _on_failure_verb(on_failure: str) -> str:
+        if on_failure in ('', 'restart'):
+            return 'restart'
+        if on_failure == 'ignore':
+            return 'ignore'
+        raise NotImplementedError(
+            f'ServiceStart.FAILS does not model on-failure: {on_failure!r} yet; only '
+            "'' (Pebble's default, equivalent to 'restart') and 'ignore'."
+        )
 
     def add_layer(
         self,
@@ -958,9 +1158,43 @@ class _MockPebbleClient(_TestingPebbleClient):
         return self._container.layers  # pyright: ignore[reportReturnType]
 
     @property
-    def _service_status(self) -> dict[str, pebble.ServiceStatus]:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def _service_status(self) -> dict[str, pebble.ServiceStatus | str]:  # pyright: ignore[reportIncompatibleVariableOverride]
         # See _layers.
         return self._container.service_statuses  # pyright: ignore[reportReturnType]
+
+    def get_services(self, names: list[str] | None = None) -> list[pebble.ServiceInfo]:
+        # Overridden (rather than relying on the parent implementation)
+        # because the parent unconditionally does
+        # ``pebble.ServiceStatus(status)``, which raises ValueError for a
+        # status like ``'backoff'`` that real Pebble reports but that has no
+        # ServiceStatus member.
+        if isinstance(names, str):
+            raise TypeError(f'start_services should take a list of names, not just "{names}"')
+        self._check_connection()
+        services = self._render_services()
+        query = sorted(names) if names is not None else sorted(services.keys())
+        infos: list[pebble.ServiceInfo] = []
+        for name in query:
+            try:
+                service = services[name]
+            except KeyError:
+                # In pebble, it just returns "nothing matched" if there are 0 matches,
+                # but it ignores services it doesn't recognise.
+                continue
+            status = self._service_status.get(name, pebble.ServiceStatus.INACTIVE)
+            if service.startup == '':
+                startup = pebble.ServiceStartup.DISABLED
+            else:
+                startup = pebble.ServiceStartup(service.startup)
+            if isinstance(status, pebble.ServiceStatus):
+                current: pebble.ServiceStatus | str = status
+            else:
+                try:
+                    current = pebble.ServiceStatus(status)
+                except ValueError:
+                    current = status
+            infos.append(pebble.ServiceInfo(name, startup=startup, current=current))
+        return infos
 
     # Based on a method of the same name from Harness.
     def _find_exec_handler(self, command: list[str]) -> Exec | None:

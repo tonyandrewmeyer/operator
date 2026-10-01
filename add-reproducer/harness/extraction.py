@@ -118,9 +118,10 @@ transcribed rather than reconstructed.
 dropped the obvious non-bugs. Set it true ONLY if both of these hold:
 
 1. Someone describes a concrete symptom: an error, a traceback, a crash, a
-   hang, a wrong or missing value -- something that happened, to them or in
-   their CI, and that contradicts what the software promises (its docs, its
-   type hints, its own error messages, or plain expectation).
+   hang, a wrong or missing value -- something that happened to a charm (or
+   other code) that uses the library, in production, in its tests or in its
+   CI, and that contradicts what the software promises (its docs, its type
+   hints, its own error messages, or plain expectation).
 2. The issue does not already contain a COMPLETE, RUNNABLE reproducer.
 
 On (1): a reporter who also proposes a fix is still reporting a bug. "This
@@ -152,6 +153,12 @@ they show code or describe current behaviour:
   would be, even a concrete one.
 - A question about how to use the library.
 - A task, chore, epic, tracking issue, or CI/infrastructure note.
+- A failure of this repository's own test suite or CI: one of the repo's
+  own unit or integration tests failing or flaking, a broken workflow, a
+  misconfigured test environment. This project reproduces failures in
+  charms that *use* the library, not failures of the library's own tests,
+  so this holds even when the issue names a concrete failing test and links
+  the CI run where it failed.
 
 When it is genuinely ambiguous -- when you cannot tell whether the reporter
 hit a broken promise or is asking for something better -- set in_scope

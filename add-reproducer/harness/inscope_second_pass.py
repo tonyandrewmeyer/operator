@@ -100,6 +100,10 @@ behaviour text sounds specific:
 - A design discussion, an open question, or a how-to question.
 - An issue that already contains a complete, runnable reproducer (nothing
   left to add by reproducing it again).
+- A failure of this repository's own test suite or CI -- one of the repo's
+  own tests failing or flaking, a broken workflow, a misconfigured test
+  environment -- however concretely it fails. Only failures in charms (or
+  other code) that use the library count.
 
 Return JSON matching exactly this shape:
 

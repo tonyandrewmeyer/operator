@@ -55,6 +55,7 @@ from .state import (
     JujuLogLine,
     Mount,
     Network,
+    Notice,
     PeerRelation,
     Relation,
     RelationBase,
@@ -903,6 +904,31 @@ class _MockPebbleClient(_TestingPebbleClient):
             )
             infos.add(check_info)
         object.__setattr__(self._container, 'check_infos', frozenset(infos))
+
+    def _update_state_notices(self):
+        """Copy any new or changed notices into the state.
+
+        Pebble keeps a notice once it has been recorded, so a notice the
+        charm produced during the run belongs in the output state -- that is
+        what lets the next run handle it.
+        """
+        object.__setattr__(
+            self._container,
+            'notices',
+            [Notice._from_ops(notice) for notice in self._notices.values()],
+        )
+
+    def notify(
+        self,
+        type: pebble.NoticeType,
+        key: str,
+        *,
+        data: dict[str, str] | None = None,
+        repeat_after: datetime.timedelta | None = None,
+    ) -> str:
+        notice_id = super().notify(type, key, data=data, repeat_after=repeat_after)
+        self._update_state_notices()
+        return notice_id
 
     def replan_services(self, timeout: float = 30.0, delay: float = 0.1):
         super().replan_services(timeout=timeout, delay=delay)

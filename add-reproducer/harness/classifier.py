@@ -155,6 +155,31 @@ def classify(
                 "evidence about the bug",
             )
 
+    # Rung 1a: the model-written test file failed while pytest was collecting
+    # it. Checked before rung 1 because pytest reports this as "collected 0
+    # items" too, and rung 1 used to call it a stale selector. First
+    # `#2045` dispatch at `6853d40e` (2026-10-01, `scope-own-tests/RESULT.md`
+    # §4.1): the extraction put the `testing.Context` run at module level
+    # with no `test_` function, so the charm's assertion fired on import and
+    # pytest printed `ERROR collecting test_cwd.py`. Nothing was stale -- the
+    # file this project wrote was malformed, which is rung 1c's statement
+    # about the generator, so it gets rung 1c's outcome. Rung 0b above has
+    # already taken the collection errors that are really a missing
+    # dependency.
+    written = hypothesis.synthesized_test_file or embedded_test_file(hypothesis.commands)
+    if written is not None:
+        name = written.path.rsplit("/", 1)[-1]
+        collecting_re = re.compile(rf"ERROR collecting \S*{re.escape(name)}\b")
+        for c in commands:
+            text = _command_text(c)
+            if c.exit_code != 0 and _COLLECTION_ERROR_RE.search(text) and collecting_re.search(text):
+                return (
+                    Outcome.UNRUNNABLE_SYNTHESIS_INVALID,
+                    f"the model-written test file {written.path} failed while pytest was "
+                    "collecting it (0 items collected) -- the generated test is malformed, so "
+                    "this is evidence about the generator and not about the reported bug",
+                )
+
     # Rung 1: un-runnable (test selector stale). spike-step-4/2484 --
     # pytest exits non-zero purely from unrelated collection errors, with
     # the `-k` selector matching zero tests. Checked first: this pattern

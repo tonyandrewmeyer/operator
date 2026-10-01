@@ -536,3 +536,92 @@ def test_a_hypothesis_with_no_test_file_at_all_is_untouched():
     hyp.commands = ["uv run pytest -v"]
     outcome, _ = classify(hyp, None, _heredoc_run(_FROZEN_STATE_FAILURE))
     assert outcome is not Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+
+
+# -- rung 1a: a model-written test that fails during collection -----------
+#
+# First `#2045` dispatch at `6853d40e` (2026-10-01): the extraction wrote the
+# `testing.Context` run at module level, the charm's assertion fired while
+# pytest imported the file, and rung 1 called the "collected 0 items" a stale
+# test selector. Trimmed from the run's own pytest output.
+
+_MODULE_LEVEL_TEST = (
+    "cat > test_cwd.py << 'PYEOF'\n"
+    "import os\n"
+    "import ops\n"
+    "from ops import testing\n"
+    "\n"
+    "class MyCharm(ops.CharmBase):\n"
+    "    def __init__(self, *args):\n"
+    "        super().__init__(*args)\n"
+    "        assert os.getcwd() == '/tmp/charm'\n"
+    "\n"
+    "ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n"
+    "with ctx(ctx.on.start(), testing.State()) as mgr:\n"
+    "    pass\n"
+    "PYEOF"
+)
+
+_MODULE_LEVEL_COLLECTION_ERROR = """\
+collecting ... collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+_________________________ ERROR collecting test_cwd.py _________________________
+test_cwd.py:8: in __init__
+    assert os.getcwd() == '/tmp/charm'
+E   AssertionError: assert '/tmp/add-reproducer-scratch-d9lffdmy/issue-2045/repro' == '/tmp/charm'
+E   scenario.errors.UncaughtCharmError: Uncaught AssertionError in charm
+=========================== short test summary info ============================
+ERROR test_cwd.py - scenario.errors.UncaughtCharmError: Uncaught AssertionError in charm
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+"""
+
+
+def _module_level_hypothesis():
+    hyp = _heredoc_hypothesis(observed="os.getcwd() does not match the charm root")
+    hyp.issue_number = 2045
+    hyp.commands = ["uv init --bare .", "uv add 'ops[testing]'", _MODULE_LEVEL_TEST, "uv run pytest test_cwd.py -v"]
+    return hyp
+
+
+def _module_level_run(stdout):
+    return RunResult(
+        hypothesis_number=2045,
+        branch="none",
+        commands=[
+            CommandResult(command="uv init --bare .", exit_code=0),
+            CommandResult(command="uv add 'ops[testing]'", exit_code=0),
+            CommandResult(command=_MODULE_LEVEL_TEST, exit_code=0),
+            CommandResult(command="uv run pytest test_cwd.py -v", exit_code=2, stdout=stdout),
+        ],
+    )
+
+
+def test_a_model_written_test_failing_at_collection_is_invalid_not_stale():
+    outcome, reason = classify(
+        _module_level_hypothesis(), None, _module_level_run(_MODULE_LEVEL_COLLECTION_ERROR)
+    )
+    assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+    assert "test_cwd.py" in reason
+    assert outcome not in COMMENT_OUTCOMES
+
+
+def test_a_collection_error_in_some_other_file_is_still_a_stale_selector():
+    """Rung 1a is about the file this project wrote. A collection error that
+    names a different file is the `#2484` shape, and keeps rung 1."""
+    stdout = _MODULE_LEVEL_COLLECTION_ERROR.replace("test_cwd.py", "tests/test_other.py")
+    outcome, _ = classify(_module_level_hypothesis(), None, _module_level_run(stdout))
+    assert outcome is Outcome.UNRUNNABLE_TEST_SELECTOR_STALE
+
+
+def test_a_missing_dependency_in_a_model_written_test_is_still_infrastructure():
+    """Rung 0b comes first: an import failure while collecting the generated
+    file is the machine, not the generator."""
+    stdout = (
+        "collected 0 items / 1 error\n"
+        "ERROR collecting test_cwd.py\n"
+        "ImportError while importing test module '/tmp/x/test_cwd.py'.\n"
+        "E   ModuleNotFoundError: No module named 'ops'\n"
+    )
+    outcome, _ = classify(_module_level_hypothesis(), None, _module_level_run(stdout))
+    assert outcome is Outcome.INFRASTRUCTURE_FAILED

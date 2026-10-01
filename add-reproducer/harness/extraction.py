@@ -104,6 +104,56 @@ snippet to build one from -- return an empty commands list and set
 confidence to "low" rather than writing prose. An empty list is handled
 (the harness may synthesise a test); prose is not.
 
+When you write a test file, what it asserts is the whole reproduction, so:
+
+- Put the run and the assertion inside a `def test_...():` function. Code
+  at module level runs while pytest is importing the file, so a failure
+  there is a broken test file, not a reproduction.
+- Assert the EXPECTED behaviour, so the test fails if the bug is real and
+  passes if it is not.
+- Compare against the value the issue says is correct, obtained from the
+  library itself -- never a literal you made up. If the issue says one
+  value should equal another the library knows (a path, a name, a default),
+  read both and compare them. A literal is fine only when the issue itself
+  states it.
+- Some values are only visible from inside the charm (anything on `self`,
+  or process state during a hook). Capture them in an event handler into a
+  module-level dict, and assert on that dict in the test function after
+  `ctx.run(...)` returns. An `assert` inside the charm surfaces as an
+  uncaught charm error rather than a clean test failure.
+- `testing.Context` has no `charm`, `charm_dir`, `framework` or `fs`
+  attribute. The charm instance is only reachable as `mgr.charm` inside
+  `with ctx(...) as mgr:`; anything else on `self` has to be captured.
+- In `with ctx(event, state) as mgr:`, the event handlers have NOT run yet
+  inside the block -- they run when the block exits, or when you call
+  `mgr.run()`. Anything a handler captures is not there until then. Prefer
+  `ctx.run(event, state)` followed by the assertion; use the `with` form
+  only when you need `mgr.charm`, and call `mgr.run()` before reading what
+  a handler set.
+- Compare like with like. `os.getcwd()` and `os.environ` give strings,
+  while `self.charm_dir` is a `pathlib.Path`, and a string never equals a
+  Path, so that assertion would fail whether or not the bug is real.
+  Convert both sides (`str(...)` or `pathlib.Path(...)`) first.
+
+For example, for a hypothetical report that `self.unit.name` in
+ops[testing] does not start with the application name:
+
+  captured = {}
+
+  class MyCharm(ops.CharmBase):
+      def __init__(self, framework):
+          super().__init__(framework)
+          framework.observe(self.on.start, self._on_start)
+
+      def _on_start(self, event):
+          captured["unit"] = self.unit.name
+          captured["app"] = self.app.name
+
+  def test_unit_name_starts_with_app_name():
+      ctx = testing.Context(MyCharm, meta={"name": "my-charm"})
+      ctx.run(ctx.on.start(), testing.State())
+      assert captured["unit"].startswith(captured["app"] + "/")
+
 "confidence" is about the reproduction hypothesis as a whole -- whether
 these commands, run on this substrate, would actually show the reported
 failure. It is not a measure of how sure you are about the substrate field

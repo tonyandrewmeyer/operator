@@ -219,6 +219,17 @@ class TwoPassExtractor:
     def max_comment_chars(self) -> int:
         return self._first.max_comment_chars
 
+    # The first pass's test-file check and re-ask (`Extractor.extract()`),
+    # surfaced here so `extraction_record.build()` reads them off whichever
+    # extractor it is given.
+    @property
+    def last_test_checks(self):
+        return self._first.last_test_checks
+
+    @property
+    def last_test_retried(self) -> bool:
+        return self._first.last_test_retried
+
     @staticmethod
     def _build_prompt(issue, max_comment_chars):
         return Extractor._build_prompt(issue, max_comment_chars)

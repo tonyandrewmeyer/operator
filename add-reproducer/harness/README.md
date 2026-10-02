@@ -25,6 +25,13 @@ does.
    using, plus what they said they saw. The issue's comments are included
    in the prompt, not just its body, because a report's real scope is
    often set by a reply rather than the opening text.
+   When the extraction is in scope and writes a test file with a heredoc,
+   `static_test_check.py` reads that file's AST (never runs it) for shapes
+   that cannot reproduce anything: no `test_` function, a run at module
+   level, a `testing.Context` attribute the installed `ops` does not have,
+   a `str` compared with a `Path`, and a few more. If it fails, the
+   extraction is asked again once, with the reasons; the second answer is
+   kept whatever it says, and both verdicts go in the extraction record.
 4. **scope second opinion** (`inscope_second_pass.py`) - a second, narrower
    LLM call on everything the first pass dropped, which recovers reports
    the deterministic filter was too blunt for without widening it.
@@ -114,6 +121,10 @@ workflow use.
 - `surface/` - recorded surface inference for the two that need a charm.
 - `runs/` - captured command output, used to pin the classifier's rungs.
 - `symbols.json` - the lookup table the stale gate's symbol trigger uses.
+- `static_test_check/` - 33 saved `#2045` extractions (four prompt versions
+  of 8, plus one live dispatch), the calibration corpus for
+  `static_test_check.py`; the expected verdicts are in
+  `tests/test_static_test_check.py`.
 
 One caveat is worth stating because it is easy to misread: `#2107` is the
 only `substrate: lxd` extraction anywhere in the corpus, and while the

@@ -3,6 +3,7 @@ name = "add-reproducer-harness"
 version = "0.0.0"
 requires-python = ">=3.10"
 dependencies = [
+    "ops[testing]>=3.8.3",
     "pyyaml",
 ]
 

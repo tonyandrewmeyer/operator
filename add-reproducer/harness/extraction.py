@@ -8,8 +8,9 @@ stay-silent, per Approach §3.
 
 from __future__ import annotations
 
+import static_test_check
 from filter_stage import extract_ci_run_url
-from models import Hypothesis, Issue
+from models import Hypothesis, Issue, StaticCheckResult
 from seams.llm import LLMSeam
 
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
@@ -352,22 +353,79 @@ def _format_comments(issue: Issue, max_chars: int) -> str:
     return "\n\n".join(lines)
 
 
+_TEST_CHECK_RETRY = """
+Your previous answer was rejected before anything ran: a static check of the
+test file it wrote found these problems:
+
+{reasons}
+
+Return the whole extraction again as JSON, with a test file that does not
+have these problems.
+"""
+
+
 class Extractor:
     def __init__(self, llm: LLMSeam, *, max_comment_chars: int = DEFAULT_MAX_COMMENT_CHARS):
         self.llm = llm
         self.max_comment_chars = max_comment_chars
+        # One entry per extraction whose embedded test file was checked, in
+        # call order: empty when nothing was checked, one when the first
+        # answer passed, two when it failed and the extraction was re-asked.
+        # Read by `extraction_record.build()`.
+        self.last_test_checks: list[StaticCheckResult] = []
+        # Whether the re-ask was sent. Not the same as `len(last_test_checks)
+        # == 2`: a re-ask whose answer fails schema validation, or comes back
+        # out of scope or without a test file, adds no second check.
+        self.last_test_retried = False
 
     def extract(self, issue: Issue) -> Hypothesis:
+        """One call, plus one re-ask if the in-scope answer's embedded test
+        file fails `static_test_check`.
+
+        The broken shapes that check catches would otherwise reach the runner
+        and be kept silent by the classifier's rung 1a or 1c, so the re-ask
+        costs nothing in false comments; it is the one chance that issue has
+        of a test that runs (`spike-step-5/static-retry/RESULT.md`). Bounded
+        at one, like `SurfaceInferrer.infer()`'s re-ask, and the second
+        answer is kept whatever its check says: a third attempt is a
+        sampling loop, and the rungs already keep a broken test silent.
+        Out-of-scope answers are not checked, so the check never sends a
+        dropped issue round again.
+        """
+        self.last_test_checks = []
+        self.last_test_retried = False
         prompt = self._build_prompt(issue, self.max_comment_chars)
-        raw = self.llm.complete_json(
-            purpose="extraction", prompt=prompt, context={"issue_number": issue.number}
+        hypothesis = self._extract_once(issue, prompt, {"issue_number": issue.number})
+        first_check = self._check(hypothesis)
+        if first_check is None or first_check.passed:
+            return hypothesis
+        reasons = "\n".join(f"- {reason}" for reason in first_check.reasons)
+        self.last_test_retried = True
+        retried = self._extract_once(
+            issue,
+            prompt + _TEST_CHECK_RETRY.format(reasons=reasons),
+            {"issue_number": issue.number, "retry_after": "static test check failed"},
         )
+        # Checked for the record only: the answer is kept either way.
+        self._check(retried)
+        return retried
+
+    def _extract_once(self, issue: Issue, prompt: str, context: dict) -> Hypothesis:
+        raw = self.llm.complete_json(purpose="extraction", prompt=prompt, context=context)
         validate(raw)
         hypothesis = Hypothesis.from_dict(issue.number, raw)
         # Deterministic pre-extraction (Approach §3 delta): ci_run_url is
         # regex-extractable at filter time, not an LLM output.
         hypothesis.moving_parts.ci_run_url = extract_ci_run_url(issue.body)
         return hypothesis
+
+    def _check(self, hypothesis: Hypothesis) -> StaticCheckResult | None:
+        if not hypothesis.in_scope:
+            return None
+        result = static_test_check.check_commands(hypothesis.commands)
+        if result is not None:
+            self.last_test_checks.append(result)
+        return result
 
     @staticmethod
     def _build_prompt(issue: Issue, max_comment_chars: int) -> str:

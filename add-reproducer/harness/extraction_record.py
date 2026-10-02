@@ -28,7 +28,9 @@ from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_VERSION = 1
+# 2: adds `test_check`, the first pass's static check of its embedded test
+# file and whether that check sent the extraction round once more.
+SCHEMA_VERSION = 2
 
 
 def build(
@@ -65,6 +67,7 @@ def build(
         "issue_number": issue_number,
         "first_pass": _first_pass_fields(first_pass),
         "second_pass": _second_pass_fields(second),
+        "test_check": _test_check_fields(extractor),
         "final_in_scope": getattr(hypothesis, "in_scope", None),
         "llm_calls": list(getattr(llm, "calls", []) or []),
     }
@@ -115,6 +118,24 @@ def _second_pass_fields(raw: dict | None) -> dict:
     }
 
 
+def _test_check_fields(extractor: Any) -> dict:
+    """`checks` holds one entry per in-scope extraction that embedded a test
+    file, in call order, so a re-ask shows the reasons both times.
+    `both_failed` is the case that carries on to the runner exactly as before
+    the check existed, for rung 1a or 1c to keep silent; it is false, not
+    unknown, when the re-ask came back with nothing to check (out of scope,
+    no test file, or a schema failure), because then there is no second
+    verdict to have failed."""
+    checks = [check.to_dict() for check in getattr(extractor, "last_test_checks", None) or []]
+    retried = bool(getattr(extractor, "last_test_retried", False))
+    return {
+        "ran": bool(checks),
+        "checks": checks,
+        "retried": retried,
+        "both_failed": retried and len(checks) == 2 and not any(c["passed"] for c in checks),
+    }
+
+
 def in_scope_drop_reason(record: dict | None) -> str:
     """The `stage=` reason for a run stopped at the in-scope gate.
 
@@ -152,6 +173,18 @@ def render(record: dict) -> list[str]:
         )
     else:
         lines.append("  second pass: did not run")
+    test_check = record.get("test_check") or {}
+    if test_check.get("ran"):
+        for index, check in enumerate(test_check.get("checks") or [], start=1):
+            verdict = "passed" if check.get("passed") else "failed"
+            lines.append(f"  test check {index}: {verdict} ({check.get('path')})")
+            lines.extend(f"    - {reason}" for reason in check.get("reasons") or [])
+        lines.append(
+            f"  test check: retried={test_check.get('retried')} "
+            f"both_failed={test_check.get('both_failed')}"
+        )
+    else:
+        lines.append("  test check: nothing to check")
     lines.append(f"  final in_scope: {record.get('final_in_scope')}")
     if record.get("error"):
         lines.append(f"  error: {record['error']}")

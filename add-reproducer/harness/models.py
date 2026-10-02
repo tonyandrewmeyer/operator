@@ -258,6 +258,23 @@ def embedded_test_file(commands: list[str]) -> "TestFile | None":
 
 
 @dataclass
+class StaticCheckResult:
+    """`static_test_check.check()`'s verdict on an embedded test file.
+
+    `reasons` is empty exactly when `passed` is true. Each reason is a short,
+    factual sentence, written to be fed back to the model as it stands when
+    the extraction is re-asked, and recorded in the extraction record.
+    """
+
+    path: str | None
+    passed: bool
+    reasons: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"path": self.path, "passed": self.passed, "reasons": list(self.reasons)}
+
+
+@dataclass
 class SurfaceInference:
     """Approach §3's "distinct surface inference pass" output.
 

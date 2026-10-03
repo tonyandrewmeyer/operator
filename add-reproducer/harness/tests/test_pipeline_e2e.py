@@ -230,7 +230,7 @@ def test_ignore_in_scope_runs_an_out_of_scope_hypothesis(tmp_path):
     extraction = {
         "in_scope": False,
         "moving_parts": {"substrate": "none", "repo_version": "main"},
-        "commands": ["uv venv", "cat > t.py << 'EOF'\nimport ops\nEOF", "uv run pytest t.py -v"],
+        "commands": ["uv venv", "cat > t.py << 'EOF'\nimport ops\n\ndef test_x():\n    pass\nEOF", "uv run pytest t.py -v"],
         "expected": "x",
         "observed": "y",
         "confidence": "high",
@@ -297,3 +297,84 @@ def test_fixture_llm_defaults_off_for_live(tmp_path, monkeypatch):
 
     p = build_pipeline(fixture_mode=False, fixtures_dir=FIXTURES, work_dir=tmp_path)
     assert isinstance(p.llm, LiveOpenRouterLLM)
+
+
+_CHARM_ROOT_TEST = (
+    "import os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\n"
+    "class MyCharm(ops.CharmBase):\n"
+    "    def __init__(self, framework):\n"
+    "        super().__init__(framework)\n"
+    "        framework.observe(self.on.start, self._on_start)\n\n"
+    "    def _on_start(self, event):\n"
+    "        captured['cwd'] = os.getcwd()\n\n"
+    "def test_cwd():\n"
+    "    ctx = testing.Context(MyCharm, meta={'name': 'x'})\n"
+    "    ctx.run(ctx.on.start(), testing.State())\n"
+    "    assert captured['cwd'] == str(ctx.charm_root)\n"
+)
+
+
+class _RecordingRunner(_StaticRunner):
+    def __init__(self, result: RunResult):
+        super().__init__(result)
+        self.runs = 0
+
+    def run(self, **kwargs) -> RunResult:
+        self.runs += 1
+        return super().run(**kwargs)
+
+
+def _gate_pipeline(tmp_path, commands):
+    """Both extraction answers identical, so the re-ask changes nothing and
+    the hypothesis reaching the gate is the one under test."""
+    extraction = {
+        "in_scope": True,
+        "moving_parts": {"substrate": "none", "repo_version": "main"},
+        "commands": commands,
+        "expected": "cwd is the charm root",
+        "observed": "it is not",
+        "confidence": "high",
+    }
+    failed = RunResult(
+        hypothesis_number=1,
+        branch="none",
+        commands=[CommandResult(command=commands[-1], exit_code=1, stdout="AssertionError")],
+    )
+    runner = _RecordingRunner(failed)
+    from models import Issue
+
+    issue = Issue(
+        number=1, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator"
+    )
+    pipeline = Pipeline(_StaticLLM(extraction, {}), runner, work_dir=tmp_path)
+    return pipeline.run_for_issue(issue, calibration_mode=True), runner
+
+
+def test_a_test_that_fails_the_static_check_is_not_run(tmp_path):
+    """A re-ask's answer is kept whatever its check says; one comparing with
+    an unset `ctx.charm_root` fails on an assertion with or without the fix,
+    and used to reach rung 6 as `reproduced_weaker`."""
+    commands = [
+        "uv init --bare .",
+        f"cat > test_cwd.py << 'PYEOF'\n{_CHARM_ROOT_TEST}PYEOF",
+        "uv run pytest test_cwd.py -v",
+    ]
+    result, runner = _gate_pipeline(tmp_path, commands)
+    assert runner.runs == 0
+    assert result.stage_reached == "extraction:test_check_failed"
+    assert result.outcome == Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+    assert result.comment is None
+    assert "`ctx.charm_root` is `None`" in result.reason
+
+
+def test_a_reporter_script_run_with_python_is_not_gated(tmp_path):
+    """The check is about pytest files; a script with no test function, run
+    with `python`, still goes to the runner."""
+    commands = [
+        "uv init --bare .",
+        "cat > repro.py << 'PYEOF'\nimport ops\nprint(ops.__version__)\nPYEOF",
+        "uv run python repro.py",
+    ]
+    result, runner = _gate_pipeline(tmp_path, commands)
+    assert runner.runs == 1
+    assert result.stage_reached == "classifier"

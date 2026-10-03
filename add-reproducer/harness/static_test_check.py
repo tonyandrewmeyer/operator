@@ -279,6 +279,22 @@ def check_commands(commands: list[str]) -> StaticCheckResult | None:
     return check(test_file.body, path=test_file.path)
 
 
+def runs_under_pytest(commands: list[str]) -> bool:
+    """Whether a command after the test file's heredoc runs pytest on it."""
+    test_file = embedded_test_file(commands)
+    if test_file is None:
+        return False
+    name = test_file.path.rsplit("/", 1)[-1]
+    after = False
+    for command in commands:
+        if not after:
+            after = f"{test_file.path}" in command and "<<" in command
+            continue
+        if "pytest" in command and (name in command or not command.split("pytest", 1)[1].strip()):
+            return True
+    return False
+
+
 def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     try:
         tree = ast.parse(source)
@@ -295,6 +311,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _undefined_names(tree)
     reasons += _context_attributes(tree)
     reasons += _testing_names(tree)
+    reasons += _unset_charm_root(tree)
     reasons += _charm_assigns_read_only_property(tree)
     reasons += _assert_in_charm(tree)
     reasons += _str_compared_with_path(tree)
@@ -535,6 +552,71 @@ def _context_attributes(tree: ast.Module) -> list[str]:
                     f"line {node.lineno}: the test accesses `{node.value.id}.{node.attr}`, "
                     f"{_NO_SUCH_CONTEXT_ATTRIBUTE}"
                 )
+    return list(dict.fromkeys(reasons))
+
+
+def _unset_charm_root(tree: ast.Module) -> list[str]:
+    """`ctx.charm_root` compared for equality, on a `Context` built without
+    `charm_root=`.
+
+    It is the `charm_root=` argument and nothing else, so it is `None`, and
+    a test comparing the charm's cwd with it fails whether or not the bug is
+    real (`spike-step-5/static-retry/RESULT.md` §8, §12). Only for a name
+    bound exactly once in the file, by `Context(...)` with no `charm_root=`
+    and no `**` argument, and never assigned an attribute.
+    """
+    stores: dict[str, int] = {}
+    unset: dict[str, int] = {}
+    attribute_stores: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            stores[node.id] = stores.get(node.id, 0) + 1
+        elif isinstance(node, ast.arg):
+            stores[node.arg] = stores.get(node.arg, 0) + 1
+        elif isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
+            if isinstance(node.value, ast.Name):
+                attribute_stores.add(node.value.id)
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and _is_context_call(node.value)
+            and all(k.arg not in {"charm_root", None} for k in node.value.keywords)
+        ):
+            unset[node.targets[0].id] = node.lineno
+    names = {n: line for n, line in unset.items() if stores.get(n) == 1 and n not in attribute_stores}
+    if not names:
+        return []
+
+    def unset_read(operand: ast.AST) -> ast.Attribute | None:
+        # `ctx.charm_root`, or it wrapped in `str(...)` / `Path(...)`.
+        if isinstance(operand, ast.Call) and len(operand.args) == 1 and not operand.keywords:
+            if ast.unparse(operand.func) in {"str", "Path", "pathlib.Path", "os.fspath"}:
+                operand = operand.args[0]
+        if (
+            isinstance(operand, ast.Attribute)
+            and operand.attr == "charm_root"
+            and isinstance(operand.value, ast.Name)
+            and operand.value.id in names
+        ):
+            return operand
+        return None
+
+    reasons = []
+    for compare in ast.walk(tree):
+        # Only an equality: `ctx.charm_root is None` is a fair thing to assert.
+        if not (isinstance(compare, ast.Compare) and any(isinstance(op, (ast.Eq, ast.NotEq)) for op in compare.ops)):
+            continue
+        for operand in [compare.left, *compare.comparators]:
+            node = unset_read(operand)
+            if node is None:
+                continue
+            reasons.append(
+                f"line {node.lineno}: `{node.value.id}.charm_root` is `None`: it is only the "
+                f"`charm_root=` given to `Context(...)`, and line {names[node.value.id]}'s has "
+                "none, so comparing with it says nothing about the bug. It is not the directory "
+                "the charm runs in; read that in a handler"
+            )
     return list(dict.fromkeys(reasons))
 
 

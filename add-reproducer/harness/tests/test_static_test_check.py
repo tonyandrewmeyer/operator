@@ -50,7 +50,7 @@ EXPECTED = {
         False,
         ["no module-level `def test_", "inside the charm", "`str` and a `pathlib.Path`", "at module level"],
     ),
-    ("after", 0): (False, False, ["`ctx.charm`", "`ctx.fs`"]),
+    ("after", 0): (False, False, ["`ctx.charm`", "`ctx.fs`", "has no `metadata` argument"]),
     ("after", 1): (False, False, ["`ctx.charm`"]),
     ("after", 2): (False, False, ["`ctx.charm`", "`ctx.framework`", "`str` and a `pathlib.Path`"]),
     ("after", 3): (False, False, ["`ctx.charm`", "`str` and a `pathlib.Path`"]),
@@ -287,6 +287,64 @@ def test_star_import_switches_the_undefined_name_rule_off():
 def test_the_context_rule_is_off_when_ops_cannot_be_introspected(monkeypatch):
     monkeypatch.setattr(static_test_check, "context_attributes", lambda: None)
     body = _HEADER + "def test_x():\n    ctx = testing.Context(ops.CharmBase)\n    ctx.charm_dir\n"
+    assert check(body).passed
+
+
+def test_a_name_ops_testing_does_not_have_is_rejected():
+    body = _HEADER + "def test_x():\n    testing.State(relations={testing.StateRelation('db')})\n"
+    (reason,) = check(body).reasons
+    assert "`testing.StateRelation` does not exist" in reason
+
+
+def test_importing_a_name_ops_testing_does_not_have_is_rejected():
+    body = "from ops.testing import StateRelation\n\ndef test_x():\n    StateRelation('db')\n"
+    (reason,) = check(body).reasons
+    assert "`ops.testing` has no `StateRelation`" in reason
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "testing.Context(ops.CharmBase, relations=[])",
+        "ops.testing.Context(ops.CharmBase, relations=[])",
+    ],
+)
+def test_a_keyword_a_testing_class_does_not_take_is_rejected(call):
+    body = _HEADER + f"def test_x():\n    {call}\n"
+    (reason,) = check(body).reasons
+    assert "has no `relations` argument" in reason
+    # It says what the class does take, so the re-ask is not another guess.
+    assert "`charm_root`" in reason and "`meta`" in reason
+
+
+def test_a_keyword_on_a_name_imported_from_ops_testing_is_checked():
+    body = (
+        "from ops.testing import Relation as R\n\n"
+        "def test_x():\n    R('db', remote_apps=['a'])\n"
+    )
+    (reason,) = check(body).reasons
+    assert "`R(...)` has no `remote_apps` argument" in reason
+    assert "`remote_app_name`" in reason
+
+
+def test_valid_testing_calls_pass():
+    body = _HEADER + (
+        "def test_x():\n"
+        "    rel = testing.Relation('db', remote_app_name='pg', remote_app_data={'a': '1'})\n"
+        "    ctx = testing.Context(ops.CharmBase, meta={'name': 'x'}, app_name='x')\n"
+        "    ctx.run(ctx.on.start(), testing.State(relations={rel}, leader=True))\n"
+    )
+    assert check(body).passed
+
+
+def test_a_rebound_testing_name_is_not_checked():
+    body = _HEADER + "def test_x():\n    testing = object()\n    testing.Context(relations=[])\n"
+    assert check(body).passed
+
+
+def test_the_testing_rule_is_off_when_ops_cannot_be_imported(monkeypatch):
+    monkeypatch.setattr(static_test_check, "testing_module", lambda: None)
+    body = _HEADER + "def test_x():\n    testing.Context(ops.CharmBase, relations=[])\n"
     assert check(body).passed
 
 

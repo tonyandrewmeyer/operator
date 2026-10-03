@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import builtins
 import functools
+import inspect
 
 from models import StaticCheckResult, embedded_test_file
 
@@ -136,6 +137,38 @@ def retry_hints(result: StaticCheckResult) -> list[str]:
 
 
 @functools.cache
+def testing_module():
+    """`ops.testing`, or `None` if it cannot be imported, which switches off
+    the rules that read it."""
+    try:
+        from ops import testing
+    except Exception:
+        return None
+    return testing
+
+
+@functools.cache
+def _keyword_parameters(name: str) -> frozenset[str] | None:
+    """The keywords `ops.testing.<name>(...)` accepts, or `None` when that is
+    not knowable: not a class, no signature, or it takes `**kwargs`."""
+    testing = testing_module()
+    obj = getattr(testing, name, None) if testing is not None else None
+    if not isinstance(obj, type):
+        return None
+    try:
+        params = inspect.signature(obj).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return None
+    return frozenset(
+        p.name
+        for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    )
+
+
+@functools.cache
 def charm_read_only_properties() -> frozenset[str]:
     """`CharmBase` properties with no setter: assigning one on `self` in a
     charm raises `AttributeError` when the charm is constructed."""
@@ -175,6 +208,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _module_level_run(tree, context_names)
     reasons += _undefined_names(tree)
     reasons += _context_attributes(tree)
+    reasons += _testing_names(tree)
     reasons += _charm_assigns_read_only_property(tree)
     reasons += _assert_in_charm(tree)
     reasons += _str_compared_with_path(tree)
@@ -407,6 +441,131 @@ def _context_attributes(tree: ast.Module) -> list[str]:
                     f"{_NO_SUCH_CONTEXT_ATTRIBUTE}"
                 )
     return list(dict.fromkeys(reasons))
+
+
+def _testing_aliases(tree: ast.Module) -> tuple[set[str], dict[str, str]]:
+    """(names bound to the `ops.testing` module, {local name: `ops.testing`
+    name} for names imported from it).
+
+    Only names that nothing else in the file binds are returned: anything
+    rebound, even once, is left alone rather than guessed at. `ops.testing`
+    written out in full is handled by the caller, and only when `ops` itself
+    is never rebound.
+    """
+    modules: set[str] = set()
+    imported: dict[str, str] = {}
+    other: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "ops" and not node.level:
+            for alias in node.names:
+                (modules if alias.name == "testing" else other).add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "ops.testing" and not node.level:
+            for alias in node.names:
+                if alias.name != "*":
+                    imported[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "ops.testing" and alias.asname:
+                    modules.add(alias.asname)
+                elif alias.name not in {"ops", "ops.testing"}:
+                    other.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                other.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            other.add(node.id)
+        elif isinstance(node, ast.arg):
+            other.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            other.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            other.update(node.names)
+    clashes = other | (modules & set(imported))
+    return modules - clashes, {k: v for k, v in imported.items() if k not in clashes}
+
+
+def _testing_names(tree: ast.Module) -> list[str]:
+    """A name `ops.testing` does not export, and a keyword argument a
+    `testing` class does not take.
+
+    Both are a guess at the API rather than a test of the bug: on `#2709`, 3
+    of 8 extractions wrote `testing.StateRelation`, `Context(relations=...)`
+    or `Relation(remote_apps=...)`, and failed with `AttributeError` or
+    `TypeError` before reaching an assertion
+    (`spike-step-5/static-retry/RESULT.md` §10). The reason lists what does
+    exist, since naming only the wrong one sends the model to another guess
+    (§7).
+    """
+    testing = testing_module()
+    if testing is None:
+        return []
+    modules, imported = _testing_aliases(tree)
+    ops_rebound = "ops" in _testing_aliases_rebinding(tree)
+    reasons = []
+
+    def owner_is_testing(value: ast.AST) -> bool:
+        if isinstance(value, ast.Name):
+            return value.id in modules
+        return not ops_rebound and ast.unparse(value) == "ops.testing"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "ops.testing" and not node.level:
+            for alias in node.names:
+                if alias.name != "*" and not hasattr(testing, alias.name):
+                    reasons.append(
+                        f"line {node.lineno}: `ops.testing` has no `{alias.name}`, so the import "
+                        "fails"
+                    )
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and owner_is_testing(node.value)
+            and not hasattr(testing, node.attr)
+        ):
+            reasons.append(
+                f"line {node.lineno}: `{ast.unparse(node)}` does not exist; `ops.testing` has no "
+                f"`{node.attr}`"
+            )
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in imported:
+                name = imported[func.id]
+            elif isinstance(func, ast.Attribute) and owner_is_testing(func.value):
+                name = func.attr
+            else:
+                continue
+            accepted = _keyword_parameters(name)
+            if accepted is None:
+                continue
+            for keyword in node.keywords:
+                if keyword.arg is not None and keyword.arg not in accepted:
+                    listed = ", ".join(f"`{p}`" for p in sorted(accepted) if not p.startswith("_"))
+                    reasons.append(
+                        f"line {node.lineno}: `{ast.unparse(func)}(...)` has no `{keyword.arg}` "
+                        f"argument; the arguments it takes are {listed}"
+                    )
+    return list(dict.fromkeys(reasons))
+
+
+def _testing_aliases_rebinding(tree: ast.Module) -> set[str]:
+    """Names bound by anything other than `import ops` / `import ops.testing`."""
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.ImportFrom):
+            bound.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in {"ops", "ops.testing"} or alias.asname:
+                    bound.add((alias.asname or alias.name).split(".")[0])
+    return bound
 
 
 def _charm_assigns_read_only_property(tree: ast.Module) -> list[str]:

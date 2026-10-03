@@ -54,7 +54,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
 from uuid import uuid4
 
-from . import _charm_mocking, _isolated_serde, _unit_filesystem
+from . import _charm_mocking, _environment, _isolated_serde, _unit_filesystem
 from ._isolated_worker import (
     _charm_exception,
     _charm_traceback,
@@ -540,12 +540,18 @@ class App:
             mocking=mocking,
         )
 
-    def _run_in_worker(self, python_executable: str, extra_sys_path: Sequence[str]) -> None:
+    def _run_in_worker(
+        self,
+        python_executable: str,
+        extra_sys_path: Sequence[str],
+        python_path: Sequence[str] = (),
+    ) -> None:
         """Run the charm in a worker process, with the given interpreter.
 
-        The interpreter has to have the same ``ops`` installed as the test, and
-        everything else the charm needs. ``extra_sys_path`` is prepended to
-        the worker's ``sys.path``.
+        The interpreter has to be able to import the same ``ops`` as the test,
+        either installed or from ``python_path`` (the front of the worker's
+        ``PYTHONPATH``), and has to have everything else the charm needs.
+        ``extra_sys_path`` is prepended to the worker's ``sys.path``.
         """
         assert self._charm_source is not None, 'only a charm on disk can run in a worker'
         self._runner = _IsolatedRunner(
@@ -553,6 +559,7 @@ class App:
                 charm_source=self._charm_source,
                 python_executable=python_executable,
                 extra_sys_path=tuple(extra_sys_path),
+                python_path=tuple(python_path),
                 meta=self._metadata,
                 config=self._config_schema,
                 actions=self._actions,
@@ -938,13 +945,29 @@ class Juju:
                 ``juju deploy --trust``.
             num_units: How many units to deploy. Unit ``0`` is the leader.
             isolated: Run the charm in its own worker process, in a virtual
-                environment built from the charm's declared dependencies.
-                Only for a charm deployed from a path. Building the
-                environment is not implemented yet, so this raises
-                :class:`NotImplementedError`.
+                environment built from the charm's declared dependencies, so
+                that it can need different versions of packages from the test
+                and from other charms. Only for a charm deployed from a path.
+                The dependencies are found from the build plugin in the
+                charm's ``charmcraft.yaml`` (``charm``, ``python`` or
+                ``uv``), along with the dependency groups its mocking
+                configuration names, and installed with ``uv``, which has to
+                be on ``PATH``. The environment is cached under
+                ``$XDG_CACHE_HOME/ops-testing`` (``~/.cache/ops-testing`` by
+                default), so only the first deploy of a charm builds it. The
+                charm uses the test's own ``ops`` and ``ops.testing``.
+
+                * inline: error
+                * isolated: ok
             requirements: A requirements file to build the isolated
-                environment from, for a charm whose dependencies can't be
-                found from its build plugin. Only with ``isolated=True``.
+                environment from instead of the charm's build plugin, for a
+                charm whose dependencies can't be found that way. It is
+                installed as it is, so it has to include whatever the charm's
+                mocking needs too. A relative path is relative to the working
+                directory, as for ``charm``. Only with ``isolated=True``.
+
+                * inline: error
+                * isolated: ok
             mocked: Keyword arguments for the charm's own mocking: the
                 function the charm configures in its ``pyproject.toml`` under
                 ``[tool.ops.testing.mocking]``, or a ``CharmSpec``'s
@@ -960,9 +983,11 @@ class Juju:
             JujuError: if an application of this name already exists,
                 ``num_units`` is not positive, the charm or the template is
                 not accepted, ``isolated`` or ``requirements`` is given
-                where it can't apply, or the charm's mocking can't be set up
-                with ``mocked``.
-            NotImplementedError: if ``isolated`` is true.
+                where it can't apply, the charm's mocking can't be set up
+                with ``mocked``, or the isolated environment can't be built:
+                ``uv`` isn't on ``PATH``, the build plugin isn't supported,
+                the charm's ``uv.lock`` is out of date, or a requirement
+                can't be resolved.
         """
         self._check_open()
         if isinstance(charm, (str, pathlib.Path)):
@@ -973,12 +998,6 @@ class Juju:
                 'isolated= and requirements= need a charm on disk: a charm class or '
                 'CharmSpec runs in the test process. Deploy it from a path.'
             )
-        if isolated:
-            raise NotImplementedError(
-                'isolated=True is not implemented yet: Juju cannot build environments '
-                'for charms. Deploy the charm without isolated=, to run it in the test '
-                'process.'
-            )
         return self._deploy(
             charm,
             app,
@@ -988,6 +1007,8 @@ class Juju:
             num_units=num_units,
             mocked=mocked,
             juju_version=juju_version,
+            isolated=isolated,
+            requirements=requirements,
         )
 
     def _deploy(
@@ -1001,12 +1022,16 @@ class Juju:
         num_units: int = 1,
         mocked: Mapping[str, Any] | None = None,
         juju_version: str = _DEFAULT_JUJU_VERSION,
+        isolated: bool = False,
+        requirements: str | pathlib.Path | None = None,
         python_executable: str | None = None,
         extra_sys_path: Sequence[str] = (),
     ) -> App:
-        """Deploy a charm, running it in a worker process if given an interpreter.
+        """Deploy a charm, running it in a worker process if asked to.
 
         :meth:`deploy` without the checks on its public arguments. With
+        ``isolated``, the charm's environment is built (from ``requirements``
+        if given) and the charm runs in a worker with its interpreter. With
         ``python_executable``, the charm runs in a worker process with that
         interpreter, and ``extra_sys_path`` prepended to the worker's
         ``sys.path``; the interpreter must have the same ``ops`` installed as
@@ -1034,7 +1059,17 @@ class Juju:
             mocked=mocked,
             juju_version=juju_version,
         )
-        if python_executable is not None:
+        if isolated:
+            assert isinstance(charm, (str, pathlib.Path))
+            environment = _environment.build(
+                pathlib.Path(charm).absolute(),
+                app_name,
+                pathlib.Path(requirements).absolute() if requirements is not None else None,
+            )
+            new_app._run_in_worker(
+                environment.python_executable, extra_sys_path, environment.python_path
+            )
+        elif python_executable is not None:
             new_app._run_in_worker(python_executable, extra_sys_path)
         else:
             new_app._run_in_process()

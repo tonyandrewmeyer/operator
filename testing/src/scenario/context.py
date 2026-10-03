@@ -789,6 +789,9 @@ class Context(Generic[CharmType]):
 
         # set by Runtime.exec() in self._run()
         self._output_state: State | None = None
+        # Juju sets this so that it can always tell the charm's own exception
+        # from any other, whatever SCENARIO_BARE_CHARM_ERRORS says.
+        self._wrap_charm_errors = False
 
         # operations (and embedded tasks) from running actions
         self.action_logs: list[str] = []

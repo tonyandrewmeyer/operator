@@ -95,6 +95,37 @@ def context_attributes() -> frozenset[str] | None:
         ctx.close()
 
 
+# The tail of every `_context_attributes` reason, so `retry_hints()` can tell
+# which results it applies to.
+_NO_SUCH_CONTEXT_ATTRIBUTE = "which `testing.Context` does not have"
+
+
+def retry_hints(result: StaticCheckResult) -> list[str]:
+    """What the re-ask says beyond `result.reasons`, which only name what is
+    wrong.
+
+    Told that `ctx.charm_dir` does not exist, the model reaches for another
+    attribute that does not exist either (`ctx.mgr`, `ctx.charm`,
+    `ctx.framework`): live, the re-ask rescued 1 of 4 such tests
+    (`spike-step-5/static-retry/RESULT.md` §7). So when a reason is a missing
+    `Context` attribute, the re-ask also lists the attributes there are, and
+    says how to read something off the charm instead.
+    """
+    if not any(reason.endswith(_NO_SUCH_CONTEXT_ATTRIBUTE) for reason in result.reasons):
+        return []
+    allowed = context_attributes()
+    if allowed is None:
+        return []
+    public = ", ".join(f"`{name}`" for name in sorted(allowed) if not name.startswith("_"))
+    return [
+        f"The public attributes of `testing.Context` are, in full: {public}. None of "
+        "them is the charm or anything on it. To compare something only the charm can "
+        "see (`self.charm_dir`, `self.framework`, `self.model`, `os.getcwd()` during "
+        "the hook), read it in an event handler, store it in a module-level dict, and "
+        "assert on the dict after `ctx.run(...)` returns."
+    ]
+
+
 @functools.cache
 def charm_read_only_properties() -> frozenset[str]:
     """`CharmBase` properties with no setter: assigning one on `self` in a
@@ -364,7 +395,7 @@ def _context_attributes(tree: ast.Module) -> list[str]:
             ):
                 reasons.append(
                     f"line {node.lineno}: the test accesses `{node.value.id}.{node.attr}`, "
-                    f"which `testing.Context` does not have"
+                    f"{_NO_SUCH_CONTEXT_ATTRIBUTE}"
                 )
     return list(dict.fromkeys(reasons))
 

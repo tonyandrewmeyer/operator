@@ -43,7 +43,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from typing import Any, cast
 from unittest import mock
 
-from . import _charmlibs_mocking
+from . import _charmlibs_mocking, _fake_libraries, _unit_filesystem
 from .errors import JujuError
 
 #: The default mocks, by the name a charm uses to switch one off.
@@ -266,6 +266,11 @@ class CharmMocking:
         )
         self._function: Callable[..., contextlib.AbstractContextManager[Any]] | None = None
         self._loaded = False
+        # Each unit's snaps and filesystem outlast its dispatches, as they
+        # would on its machine. A worker serves every unit of its
+        # application, so these are per unit rather than per instance.
+        self._snaps: dict[str, dict[str, dict[str, str]]] = {}
+        self._filesystems: dict[str, _unit_filesystem.UnitFilesystem] = {}
 
     def check(self) -> None:
         """The checks that need no import: an explicitly configured file exists.
@@ -383,10 +388,34 @@ class CharmMocking:
         return self._defaults(unit_name=None, model_name=None)
 
     @contextlib.contextmanager
-    def dispatching(self, unit_name: str, model_name: str) -> Generator[None]:
-        """The scope to run one dispatch in: the defaults, then the charm's own mocking."""
+    def dispatching(
+        self,
+        unit_name: str,
+        model_name: str,
+        *,
+        filesystem_root: str | os.PathLike[str] | None = None,
+        allow: Sequence[str | os.PathLike[str]] = (),
+    ) -> Generator[None]:
+        """The scope to run one dispatch in: the defaults, then the charm's own mocking.
+
+        ``filesystem_root`` is the unit's own filesystem, and ``allow`` the
+        paths outside it that the framework itself writes to, such as the
+        ``Context``'s temporary directory and the sources of mounts. Without a
+        root, file access isn't translated.
+        """
         self.load()
-        with self._defaults(unit_name=unit_name, model_name=model_name):
+        filesystem = None
+        if filesystem_root is not None:
+            key = os.fspath(filesystem_root)
+            filesystem = self._filesystems.get(key)
+            if filesystem is None:
+                filesystem = self._filesystems[key] = _unit_filesystem.UnitFilesystem(key)
+        with self._defaults(
+            unit_name=unit_name,
+            model_name=model_name,
+            filesystem=filesystem,
+            allow=[os.fspath(p) for p in allow],
+        ):
             with contextlib.ExitStack() as libraries:
                 # Each library's own mocking, outside the charm's, so that
                 # the charm's patches win where the two overlap.
@@ -399,7 +428,12 @@ class CharmMocking:
                     yield
 
     def _defaults(
-        self, *, unit_name: str | None, model_name: str | None
+        self,
+        *,
+        unit_name: str | None,
+        model_name: str | None,
+        filesystem: _unit_filesystem.UnitFilesystem | None = None,
+        allow: Sequence[str] = (),
     ) -> contextlib.ExitStack[bool | None]:
         stack = contextlib.ExitStack()
         disabled = self._config.disable
@@ -412,6 +446,14 @@ class CharmMocking:
             stack.enter_context(_unit_hostname(name, model_name))
         if 'network' not in disabled:
             stack.enter_context(_no_outbound_connections())
+        if 'lightkube' not in disabled:
+            stack.enter_context(_fake_libraries.lightkube())
+        if 'k8s-patch-libs' not in disabled:
+            stack.enter_context(_fake_libraries.k8s_patch_libs())
+        if 'snap' not in disabled and unit_name is not None:
+            stack.enter_context(_fake_libraries.snap(self._snaps.setdefault(unit_name, {})))
+        if 'filesystem' not in disabled and filesystem is not None:
+            stack.enter_context(_unit_filesystem.translated(filesystem, allow))
         return stack
 
 

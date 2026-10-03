@@ -24,7 +24,7 @@ from extraction import Extractor
 from extraction_record import build as build_record
 from extraction_record import render as render_record
 from inscope_second_pass import TwoPassExtractor
-from models import Hypothesis, Issue
+from models import Hypothesis, Issue, StaticCheckResult
 from static_test_check import check, check_commands
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -380,6 +380,43 @@ def test_a_failed_check_is_retried_once_with_the_reasons():
     assert "assert captured['cwd'] == captured['charm_dir']" in "\n".join(hypothesis.commands)
     assert extractor.last_test_retried is True
     assert [c.passed for c in extractor.last_test_checks] == [False, True]
+
+
+def test_a_missing_context_attribute_retry_lists_the_ones_there_are():
+    llm = _ScriptedLLM([_extraction(_INVALID_BODY), _extraction(_VALID_BODY)])
+    Extractor(llm).extract(_issue())
+    hint = "The public attributes of `testing.Context` are, in full:"
+    assert hint not in llm.prompts[0]
+    retry = llm.prompts[1]
+    assert hint in retry
+    assert "`charm_root`" in retry and "`run`" in retry
+    # The reasons come first, then the hint, then the instruction.
+    assert retry.index("does not have") < retry.index(hint) < retry.index("Return the whole")
+
+
+def test_retry_hints_only_for_a_missing_context_attribute():
+    other = StaticCheckResult(
+        path="test_x.py", passed=False, reasons=["line 3: the test file has no test function"]
+    )
+    assert static_test_check.retry_hints(other) == []
+    missing = StaticCheckResult(
+        path="test_x.py",
+        passed=False,
+        reasons=["line 9: the test accesses `ctx.mgr`, which `testing.Context` does not have"],
+    )
+    (hint,) = static_test_check.retry_hints(missing)
+    assert "`emitted_events`" in hint
+    assert "`_" not in hint
+
+
+def test_retry_hints_are_off_when_ops_cannot_be_introspected(monkeypatch):
+    monkeypatch.setattr(static_test_check, "context_attributes", lambda: None)
+    missing = StaticCheckResult(
+        path="test_x.py",
+        passed=False,
+        reasons=["line 9: the test accesses `ctx.mgr`, which `testing.Context` does not have"],
+    )
+    assert static_test_check.retry_hints(missing) == []
 
 
 def test_two_failures_keep_the_second_and_stop():

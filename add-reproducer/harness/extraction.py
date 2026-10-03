@@ -358,7 +358,7 @@ Your previous answer was rejected before anything ran: a static check of the
 test file it wrote found these problems:
 
 {reasons}
-
+{hints}
 Return the whole extraction again as JSON, with a test file that does not
 have these problems.
 """
@@ -400,10 +400,11 @@ class Extractor:
         if first_check is None or first_check.passed:
             return hypothesis
         reasons = "\n".join(f"- {reason}" for reason in first_check.reasons)
+        hints = "".join(f"\n{hint}\n" for hint in static_test_check.retry_hints(first_check))
         self.last_test_retried = True
         retried = self._extract_once(
             issue,
-            prompt + _TEST_CHECK_RETRY.format(reasons=reasons),
+            prompt + _TEST_CHECK_RETRY.format(reasons=reasons, hints=hints),
             {"issue_number": issue.number, "retry_after": "static test check failed"},
         )
         # Checked for the record only: the answer is kept either way.

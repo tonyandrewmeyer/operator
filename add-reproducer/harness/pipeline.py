@@ -27,6 +27,7 @@ import classifier
 import extraction_record
 import filter_stage
 import runner_stage
+import static_test_check
 from composer import Composer
 from extraction import ExtractionInvalid
 from inscope_second_pass import TwoPassExtractor
@@ -255,6 +256,38 @@ class Pipeline:
             and branch not in runner_stage.SCRATCH_BRANCHES
         ):
             return PipelineResult(issue.number, "extraction", None, "confidence=low, staying silent", None)
+
+        # A model-written pytest file that fails the static check is not run.
+        # The extractor re-asks once and keeps the second answer whatever its
+        # check says, and until this gate that answer went to the runner. If
+        # it then failed on an exception, rung 1c kept it silent; if it failed
+        # on an assertion it composed "The bug reproduced": two of 11 live
+        # re-asks compared the handler's cwd with `ctx.charm_root` (`None`,
+        # unset), which fails with or without the fix
+        # (`spike-step-5/static-retry/RESULT.md` §12, §13). The check rejects
+        # no valid test in its calibration, so skipping the run loses nothing
+        # and saves a runner job. Only where `commands[]` is what runs, and
+        # only when pytest runs the file: the check's rules are about pytest
+        # files, and a reporter's `python repro.py` script is allowed to have
+        # no test function.
+        if branch in runner_stage.COMMAND_EXECUTING_BRANCHES:
+            test_check = static_test_check.check_commands(hypothesis.commands)
+            if (
+                test_check is not None
+                and not test_check.passed
+                and static_test_check.runs_under_pytest(hypothesis.commands)
+            ):
+                return PipelineResult(
+                    issue.number,
+                    "extraction:test_check_failed",
+                    Outcome.UNRUNNABLE_SYNTHESIS_INVALID,
+                    "the model-written test file "
+                    f"{test_check.path} failed the static check, so it was not run: "
+                    + "; ".join(test_check.reasons),
+                    None,
+                    branch=branch,
+                    hypothesis=hypothesis,
+                )
 
         # Per-issue scratch dir. Every issue used to share one workdir, so a
         # 40-issue batch ran `uv init` in an already-initialised project for

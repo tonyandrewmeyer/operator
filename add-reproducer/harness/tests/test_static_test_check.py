@@ -25,7 +25,7 @@ from extraction_record import build as build_record
 from extraction_record import render as render_record
 from inscope_second_pass import TwoPassExtractor
 from models import Hypothesis, Issue, StaticCheckResult, embedded_test_file, replace_embedded_test_body
-from static_test_check import add_missing_imports, check, check_commands
+from static_test_check import add_missing_imports, check, check_commands, runs_under_pytest
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 CORPUS = FIXTURES / "static_test_check"
@@ -386,6 +386,54 @@ def test_replace_embedded_test_body_keeps_the_heredoc():
     replaced = replace_embedded_test_body(commands, "new\nbody")
     assert replaced == ["uv init --bare .", "cat > test_x.py << 'PYEOF'\nnew\nbody\nPYEOF", "uv run pytest"]
     assert embedded_test_file(replaced).body == "new\nbody"
+
+
+_CHARM_ROOT_BODY = _HEADER + (
+    "def test_x():\n"
+    "    ctx = testing.Context(ops.CharmBase, meta={'name': 'x'})\n"
+    "    ctx.run(ctx.on.start(), testing.State())\n"
+    "    assert os.getcwd() OP READ\n"
+)
+
+
+def _charm_root_body(op: str, read: str) -> str:
+    return _CHARM_ROOT_BODY.replace("OP", op).replace("READ", read)
+
+
+@pytest.mark.parametrize("read", ["ctx.charm_root", "str(ctx.charm_root)", "Path(ctx.charm_root)"])
+@pytest.mark.parametrize("op", ["==", "!="])
+def test_comparing_with_an_unset_charm_root_is_rejected(read, op):
+    body = _charm_root_body(op, read).replace("import os\n", "import os\nfrom pathlib import Path\n")
+    # `Path(...)` against `os.getcwd()` also trips the `str` vs `Path` rule.
+    assert any("`ctx.charm_root` is `None`" in reason for reason in check(body).reasons)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Given one, it is a real directory to compare with.
+        _charm_root_body("==", "str(ctx.charm_root)").replace(
+            "meta={'name': 'x'})", "meta={'name': 'x'}, charm_root='/tmp/r')"
+        ),
+        # Asserting it is unset is fair.
+        _charm_root_body("==", "'x' or ctx.charm_root is None"),
+        # Rebound, so not knowably the unset one.
+        _charm_root_body("==", "str(ctx.charm_root)").replace(
+            "    ctx.run(", "    ctx = make()\n    ctx.run("
+        ).replace("def test_x", "def make():\n    pass\n\n\ndef test_x"),
+    ],
+)
+def test_charm_root_reads_that_can_be_meaningful_pass(body):
+    assert not any("charm_root" in r for r in check(body).reasons)
+
+
+def test_runs_under_pytest():
+    heredoc = "cat > test_x.py << 'PYEOF'\nx = 1\nPYEOF"
+    assert runs_under_pytest([heredoc, "uv run pytest test_x.py -v"])
+    assert runs_under_pytest([heredoc, "uv run pytest"])
+    assert not runs_under_pytest([heredoc, "uv run python test_x.py"])
+    assert not runs_under_pytest([heredoc, "uv run pytest other.py"])
+    assert not runs_under_pytest(["uv run pytest test_x.py", heredoc])
 
 
 def test_no_embedded_test_file_is_not_checked():

@@ -1,0 +1,5 @@
+name: jujuver
+summary: Reports the Juju version it was run against.
+description: |
+  Used by the isolation tests to check that the juju_version given to
+  IsolatedContext reaches the worker subprocess.

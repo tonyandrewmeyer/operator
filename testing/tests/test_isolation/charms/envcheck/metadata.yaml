@@ -1,0 +1,5 @@
+name: envcheck
+summary: Reports its trust and its charm directory.
+description: |
+  Used by the isolation tests to check that app_trusted and charm_root reach
+  the worker subprocess.

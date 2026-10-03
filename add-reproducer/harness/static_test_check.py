@@ -117,23 +117,26 @@ def retry_hints(result: StaticCheckResult) -> list[str]:
     allowed = context_attributes()
     if allowed is None:
         return []
-    public = ", ".join(f"`{name}`" for name in sorted(allowed) if not name.startswith("_"))
-    hint = (
-        f"The public attributes of `testing.Context` are, in full: {public}. None of "
+    public = ", ".join(
+        f"`{name}`" for name in sorted(allowed - _UNLISTED_CONTEXT_ATTRIBUTES) if not name.startswith("_")
+    )
+    return [
+        f"The `testing.Context` attributes a test can use are: {public}. None of "
         "them is the charm or anything on it. To compare something only the charm can "
         "see (`self.charm_dir`, `self.framework`, `self.model`, `os.getcwd()` during "
         "the hook), read it in an event handler, store it in a module-level dict, and "
         "assert on the dict after `ctx.run(...)` returns."
-    )
-    # Listed, `charm_root` reads like the charm's directory, and a test that
-    # compares with it fails whatever the bug: it is the `Context(charm_root=...)`
-    # argument, `None` by default (`spike-step-5/static-retry/RESULT.md` §8).
-    if "charm_root" in allowed:
-        hint += (
-            " `charm_root` is not where the charm runs: it is only the directory "
-            "passed as `Context(charm_root=...)`, and `None` when none was passed."
-        )
-    return [hint]
+    ]
+
+
+# Left off `retry_hints()`'s list. `charm_root` reads like the charm's
+# directory, but it is only the `Context(charm_root=...)` argument, `None` by
+# default, so a test comparing the cwd with it fails whether or not the bug is
+# real. Listed, it was taken in 1 of 7 re-asks; listed with a sentence saying
+# what it is, in 0 of 7, 2 of 11 and 3 of 13 (`spike-step-5/static-retry/
+# RESULT.md` §8, §9, §12, §13). The check still allows it: only the hint
+# leaves it out.
+_UNLISTED_CONTEXT_ATTRIBUTES = frozenset({"charm_root"})
 
 
 @functools.cache

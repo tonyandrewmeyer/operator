@@ -53,13 +53,21 @@ CLIENT = testing.CharmSpec(
 )
 
 
-def run(*, isolated: bool = False) -> list[str]:
-    """Run the scenario, returning every trace entry and every final State, encoded."""
+def run(*, isolated: bool = False, built: bool = False) -> list[str]:
+    """Run the scenario, returning every trace entry and every final State, encoded.
+
+    With ``isolated``, ``webapp`` runs in a worker with this interpreter. With
+    ``built``, it runs in a worker in an environment built for it by
+    ``deploy(isolated=True)``.
+    """
     # The model name and UUID come from the test running it, as in any test.
     with Juju() as juju:
         kwargs: dict[str, Any] = {'python_executable': sys.executable} if isolated else {}
         db = juju._deploy(_CHARMS / 'dbserver', num_units=3)
-        web = juju._deploy(_CHARMS / 'webapp', num_units=3, **kwargs)
+        if built:
+            web = juju.deploy(_CHARMS / 'webapp', num_units=3, isolated=True)
+        else:
+            web = juju._deploy(_CHARMS / 'webapp', num_units=3, **kwargs)
         client = juju.deploy(CLIENT, num_units=2)
         juju.integrate(web, db)
         juju.integrate(client, db)
@@ -90,4 +98,4 @@ def digest(lines: list[str]) -> str:
 
 
 if __name__ == '__main__':
-    print(digest(run(isolated='--isolated' in sys.argv)))
+    print(digest(run(isolated='--isolated' in sys.argv, built='--built' in sys.argv)))

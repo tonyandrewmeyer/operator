@@ -538,8 +538,11 @@ def test_remove_unit_kubernetes_scales_down_by_count(juju: testing.Juju):
     juju.settle()
     juju.remove_unit(app, num_units=1)
     trace = juju.settle()
+    # The departing unit leaves its peer relation before it stops.
     assert [(d.event.name, d.unit_id) for d in trace] == [
         ('replicas_relation_departed', 0),
+        ('replicas_relation_departed', 1),
+        ('replicas_relation_broken', 1),
         ('stop', 1),
         ('remove', 1),
     ]
@@ -569,8 +572,11 @@ def test_remove_unit_machine_removes_the_named_unit(machine_juju: testing.Juju):
     machine_juju.settle()
     machine_juju.remove_unit(app.units[1])
     trace = machine_juju.settle()
+    # The departing unit leaves its peer relation before it stops.
     assert [(d.event.name, d.unit_id) for d in trace] == [
         ('replicas_relation_departed', 0),
+        ('replicas_relation_departed', 1),
+        ('replicas_relation_broken', 1),
         ('stop', 1),
         ('remove', 1),
     ]
@@ -668,6 +674,9 @@ def test_add_unit_while_a_unit_is_leaving_counts_only_the_staying_units(juju: te
     juju.remove_unit(app, num_units=1)
     juju.add_unit(app)
     assert [unit.state.planned_units for unit in app.units] == [2, 2, 2]
+    juju.settle()
+    assert [unit.name for unit in app.units] == ['myapp/0', 'myapp/2']
+    assert [unit.state.planned_units for unit in app.units] == [2, 2]
 
 
 def test_remove_unit_requires_at_least_one_argument(juju: testing.Juju):
@@ -723,9 +732,9 @@ def test_settle_raises_when_juju_does_not_converge(juju: testing.Juju):
 def test_reading_state_does_not_dispatch_anything(juju: testing.Juju):
     """Reading Unit.state never runs charm code; the queue is untouched."""
     app = deploy_mycharm(juju)
-    queued = len(juju._state.queue)
+    queued = juju._state.pending()
     assert app.leader.state.unit_status == testing.UnknownStatus()
-    assert len(juju._state.queue) == queued
+    assert juju._state.pending() == queued
 
 
 def test_settle_returns_the_dispatch_trace(juju: testing.Juju):
@@ -737,6 +746,7 @@ def test_settle_returns_the_dispatch_trace(juju: testing.Juju):
     assert (first.app, first.unit_id, first.unit_name) == (app.name, 0, app.leader.name)
     assert isinstance(first.state_in, testing.State)
     assert isinstance(first.state_out, testing.State)
+    assert first.error is None
 
 
 def test_a_dispatch_s_state_in_is_the_previous_state_out_for_one_unit(juju: testing.Juju):
@@ -1235,6 +1245,7 @@ def test_state_template_leaves_the_juju_owned_fields_to_juju(juju: testing.Juju)
         ('model', testing.State(model=testing.Model(type='lxd'))),
         ('config', testing.State(config={'log_level': 'debug'})),
         ('relations', testing.State(relations={testing.PeerRelation('replicas')})),
+        ('secrets', testing.State(secrets={testing.Secret({'a': 'b'})})),
     ],
 )
 def test_state_template_may_not_set_juju_owned_fields(

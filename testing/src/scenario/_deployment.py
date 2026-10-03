@@ -34,11 +34,10 @@ unit's state rather than being one. The identity it carries (``name``,
 :class:`State`, which stops two applications under the same ``Juju`` from
 disagreeing about which model they are in.
 
-.. note::
-    Cross-application operations (``integrate`` and the event propagation
-    between related applications) are not in this layer yet. What is here is
-    the single-application half: everything an application does on its own,
-    including its peer relation.
+Applications are related with ``integrate`` and unrelated with
+``remove_relation``. Whatever a unit writes to a relation databag, and the
+secrets it grants over a relation, reach the units on the other side, along
+with the events Juju would fire for them there.
 """
 
 from __future__ import annotations
@@ -55,27 +54,38 @@ import tempfile
 import types
 import unicodedata
 from collections import deque
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
 from uuid import UUID, uuid4, uuid5
 
 from . import _charm_mocking, _isolated_serde
-from ._isolated_worker import _load_charm_type
-from ._isolation import IsolatedContext, _load_charm_spec
+from . import state as _state_module
+from ._isolated_worker import (
+    _charm_exception,
+    _charm_traceback,
+    _load_charm_type,
+    _secret_ids,
+)
+from ._isolation import IsolatedContext, _HookFailedError, _load_charm_spec
 from .context import _DEFAULT_JUJU_VERSION, Context
-from .errors import IsolationError, JujuError, MetadataNotFoundError
+from .errors import IsolationError, JujuError, MetadataNotFoundError, UncaughtCharmError
 from .state import (
+    Address,
+    BindAddress,
     CharmType,
     CloudSpec,
     Container,
+    ErrorStatus,
     Model,
+    Network,
     PeerRelation,
     RawDataBagContents,
+    Relation,
+    RelationBase,
     Secret,
     State,
     _CharmSpec,
     _Event,
-    _next_relation_id,
 )
 
 if TYPE_CHECKING:
@@ -139,9 +149,13 @@ _MODEL_SLUG_LENGTH = 30
 #: alongside it has slot 2, and so on.
 _model_slots: dict[str, set[int]] = {}
 
+#: Events that only say "look again". One already waiting for a unit, about
+#: the same thing, covers a second.
+_COALESCED_SUFFIXES = ('_relation_changed', 'config_changed', 'secret_changed')
+
 #: ``State`` fields that describe a unit's place in the model. :class:`Juju`
 #: sets these itself, so a ``state_template`` may not.
-_JUJU_OWNED_FIELDS = ('leader', 'planned_units', 'model', 'config', 'relations')
+_JUJU_OWNED_FIELDS = ('leader', 'planned_units', 'model', 'config', 'relations', 'secrets')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -174,6 +188,13 @@ class Dispatch:
 
     state_out: State
     """The :class:`State` the charm produced."""
+
+    error: str | None = None
+    """The charm's traceback, if it raised while handling the event.
+
+    The charm's changes are discarded, as Juju discards a failed hook's, so
+    :attr:`state_out` is :attr:`state_in` in error status.
+    """
 
     _charm: _CharmForContext | None = dataclasses.field(default=None, repr=False, compare=False)
 
@@ -293,9 +314,13 @@ def _teardown_events(app: App, unit_id: int) -> list[tuple[_Event, _Rebind | Non
 
 
 class _Runner:
-    """Executes a single event for one unit of one application."""
+    """Executes a single event for one unit of one application.
 
-    def run(self, unit_id: int, event: _Event, state: State) -> State:
+    ``secret_seed`` decides the IDs of any secrets the charm creates in this
+    dispatch, so that they are the same on every run.
+    """
+
+    def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
         raise NotImplementedError
 
     def close(self) -> None:
@@ -305,7 +330,7 @@ class _Runner:
 class _NotStarted(_Runner):
     """The runner of an application that :class:`Juju` hasn't started yet."""
 
-    def run(self, unit_id: int, event: _Event, state: State) -> State:
+    def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
         raise JujuError('This application has not been started by Juju.deploy().')
 
     def close(self) -> None:
@@ -360,11 +385,19 @@ class _InProcessRunner(_Runner):
                 app_trusted=self._app_trusted,
                 charm_root=self._charm_roots.get(unit_id),
             )
+            self._contexts[unit_id]._wrap_charm_errors = True
         return self._contexts[unit_id]
 
-    def run(self, unit_id: int, event: _Event, state: State) -> State:
-        with self._mocking.dispatching(f'{self._app_name}/{unit_id}', state.model.name):
-            return self._context(unit_id).run(event, state)
+    def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
+        with (
+            self._mocking.dispatching(f'{self._app_name}/{unit_id}', state.model.name),
+            _secret_ids(secret_seed),
+        ):
+            try:
+                return self._context(unit_id).run(event, state)
+            except UncaughtCharmError as e:
+                cause = _charm_exception(e)
+                raise _HookFailedError(_charm_traceback(e), cause) from cause
 
     def close(self) -> None:
         self._contexts.clear()
@@ -383,9 +416,9 @@ class _IsolatedRunner(_Runner):
         self._ctx = ctx
         self._charm_roots = charm_roots
 
-    def run(self, unit_id: int, event: _Event, state: State) -> State:
+    def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
         self._ctx.charm_root = self._charm_roots.get(unit_id)
-        return self._ctx._run_as(unit_id, event, state)
+        return self._ctx._run_as(unit_id, event, state, secret_seed=secret_seed)
 
     def close(self) -> None:
         self._ctx.close()
@@ -512,12 +545,15 @@ class App:
         self._context_source: _CharmForContext | None = None
         self._leader_id = 0
         self._units: dict[int, Unit] = {}
+        # Units that remove_unit has started taking down: they leave their
+        # relations, so nothing new is sent to them.
+        self._dying: set[int] = set()
         self._next_unit_id = 0
         # One relation ID per peer endpoint: a peer relation is a single
         # relation that every unit is a member of, so the ID must agree across
         # units even though each unit holds its own view of the databags.
         self._peer_ids: dict[str, int] = {
-            endpoint: _next_relation_id() for endpoint in self._peer_endpoints
+            endpoint: juju._new_relation_id() for endpoint in self._peer_endpoints
         }
 
     def _for_context(self) -> _CharmForContext:
@@ -655,6 +691,21 @@ class App:
         return tuple(peers)
 
     @property
+    def _relation_endpoints(self) -> dict[str, tuple[str, Mapping[str, Any]]]:
+        """Each ``provides`` and ``requires`` endpoint, with its role and metadata."""
+        endpoints: dict[str, tuple[str, Mapping[str, Any]]] = {}
+        for role in ('provides', 'requires'):
+            declared: dict[str, Any] = self._metadata.get(role) or {}
+            for endpoint, spec in declared.items():
+                endpoints[endpoint] = (role, spec or {})
+        return endpoints
+
+    @property
+    def _live_units(self) -> tuple[Unit, ...]:
+        """This application's units, leaving out those being removed."""
+        return tuple(u for u in self.units if u.id not in self._dying)
+
+    @property
     def _container_names(self) -> tuple[str, ...]:
         containers: dict[str, Any] = self._metadata.get('containers') or {}
         return tuple(containers)
@@ -718,8 +769,9 @@ class _Rebind(NamedTuple):
     to look up here, and the object is bound at dispatch time instead.
     """
 
-    kind: Literal['relation', 'container']
-    name: str
+    kind: Literal['relation', 'container', 'secret']
+    key: int | str
+    """The relation ID, the container name, or the secret ID."""
 
 
 class _Queued(NamedTuple):
@@ -729,6 +781,59 @@ class _Queued(NamedTuple):
     unit_id: int
     event: _Event | _RemoveUnit
     rebind: _Rebind | None = None
+
+
+class _End(NamedTuple):
+    """One side of a relation between two applications."""
+
+    app: App
+    endpoint: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _Integration:
+    """A relation between two applications, as :meth:`Juju.integrate` made it.
+
+    Each unit on either side holds its own view of the relation, as a
+    :class:`Relation` in its :class:`State` with this ID, from its
+    ``relation-created`` on. This records which
+    applications and endpoints the relation joins, so that what one side
+    writes can be carried to the other.
+    """
+
+    id: int
+    ends: tuple[_End, _End]
+    interface: str
+
+    def local(self, app: App) -> _End:
+        return self.ends[0] if self.ends[0].app is app else self.ends[1]
+
+    def remote(self, app: App) -> _End:
+        return self.ends[1] if self.ends[0].app is app else self.ends[0]
+
+    def __str__(self) -> str:
+        (a, ea), (b, eb) = self.ends
+        return f'{a.name}:{ea} {b.name}:{eb}'
+
+
+@dataclasses.dataclass
+class _UserSecret:
+    """A secret the test added with :meth:`Juju.add_secret`."""
+
+    id: str
+    name: str
+    info: str | None
+    # Each revision's content, oldest first.
+    revisions: list[dict[str, str]]
+    # The names of the applications it's granted to.
+    grants: set[str] = dataclasses.field(default_factory=set[str])
+
+    def as_source(self) -> Secret:
+        """The secret as its owner would hold it, for :func:`_reader_copy`."""
+        secret = Secret(dict(self.revisions[-1]), id=self.id, description=self.info)
+        object.__setattr__(secret, '_tracked_revision', len(self.revisions))
+        object.__setattr__(secret, '_latest_revision', len(self.revisions))
+        return secret
 
 
 class _JujuState:
@@ -742,9 +847,41 @@ class _JujuState:
 
     def __init__(self) -> None:
         self.apps: dict[str, App] = {}
-        self.queue: deque[_Queued] = deque()
+        # One queue per application, in the order the applications were
+        # deployed; settle() takes from them in turn (see Juju._next_queued).
+        self.queues: dict[str, deque[_Queued]] = {}
+        self.turn = 0
         self.trace: list[Dispatch] = []
         self.closed = False
+        # Relation IDs are per model in Juju, so they are per Juju here,
+        # rather than drawn from the process-wide counter Relation uses: that
+        # keeps them the same however many other tests ran first.
+        self.next_relation_id = 0
+        self.integrations: dict[int, _Integration] = {}
+        # Relations removed before a unit's relation-created ran, keyed by
+        # application name, unit ID and relation ID. Each such unit still
+        # runs the whole sequence, from relation-created to relation-broken.
+        self.closing: dict[tuple[str, int, int], _Integration] = {}
+        # Every dispatch under this Juju, counted from 0; it seeds the IDs of
+        # the secrets a dispatch creates.
+        self.dispatches = 0
+        # The secret IDs that each unit, keyed by application name and unit
+        # ID, can read because another application granted them.
+        self.granted: dict[tuple[str, int], set[str]] = {}
+        # For each secret ID, the highest revision that secret-remove has
+        # been queued for.
+        self.removable_revisions: dict[str, int] = {}
+        # Secrets the test added, as a user would with juju add-secret, by ID.
+        self.user_secrets: dict[str, _UserSecret] = {}
+        # Units whose charm raised, keyed by application name and unit ID,
+        # with what it raised. Like a unit in a failed hook in Juju, each
+        # gets no more events: those queued for it wait in ``held``.
+        self.failed: dict[tuple[str, int], _HookFailedError] = {}
+        self.held: dict[tuple[str, int], list[_Queued]] = {}
+
+    def pending(self) -> int:
+        """How many entries are queued, across every application."""
+        return sum(len(queue) for queue in self.queues.values())
 
 
 class Juju:
@@ -758,11 +895,13 @@ class Juju:
     handle::
 
         web = juju.deploy('./charms/myapp', num_units=2)
-        db = juju.deploy(testing.CharmSpec(MyDatabaseCharm, meta={'name': 'db'}))
+        db = juju.deploy(testing.CharmSpec(MyDatabaseCharm, meta=DB_META))
+        juju.integrate(web, db)
 
     Each operation queues the events Juju would emit for it. Nothing runs until
-    :meth:`settle` drains the queue, so most tests are a sequence of
-    operations, a ``settle()``, and then assertions::
+    :meth:`settle` drains the queue, along with whatever the charms' own
+    changes cause on their peers and on related applications, so most tests
+    are a sequence of operations, a ``settle()``, and then assertions::
 
         juju.config(web, {'log_level': 'debug'})
         juju.settle()
@@ -857,6 +996,11 @@ class Juju:
     def _check_open(self) -> None:
         if self._state.closed:
             raise JujuError('This Juju has been closed.')
+
+    def _new_relation_id(self) -> int:
+        relation_id = self._state.next_relation_id
+        self._state.next_relation_id += 1
+        return relation_id
 
     # Operations
     def deploy(
@@ -1015,6 +1159,7 @@ class Juju:
         else:
             new_app._run_in_process()
         self._state.apps[app_name] = new_app
+        self._state.queues[app_name] = deque()
 
         for _ in range(num_units):
             self._add_unit(new_app)
@@ -1023,9 +1168,13 @@ class Juju:
     def add_unit(self, app: App) -> Unit:
         """Add a unit to an application, as ``juju add-unit`` would.
 
-        The new unit's startup events are queued. If the application has a
-        peer relation, the units that were already there see the new unit join
-        it.
+        :meth:`settle` runs the new unit's startup events. If the application
+        has a peer relation, the units that were already there see the new
+        unit join it. If it is related to other applications, the new unit
+        gets ``relation-created`` for each relation after ``install``, and has
+        the relation in its :class:`State` from then on, and once it has
+        started, ``relation-joined`` and ``relation-changed`` for each unit on
+        the other side. Those units see the new unit join too.
 
         Returns:
             The new :class:`Unit`.
@@ -1055,6 +1204,12 @@ class Juju:
         (:attr:`Juju.type`), not by which arguments happen to be passed: the
         wrong form for the substrate is rejected with a message naming the
         right one.
+
+        Every unit related to a removed unit, peers and units of related
+        applications alike, sees ``relation-departed`` for it. The removed
+        unit gets ``relation-departed`` for each unit it is related to and
+        ``relation-broken`` for each of its relations, then ``stop`` and
+        ``remove``.
 
         Args:
             *app_or_unit: For the Kubernetes form, one or more :class:`App`
@@ -1137,6 +1292,11 @@ class Juju:
     def _remove_one_unit(self, app: App, unit_id: int, doomed_ids: Collection[int] = ()) -> None:
         """Enqueue the departure and teardown sequence for one unit.
 
+        Every unit related to the departing one sees it depart, peers and
+        units of integrated applications alike. The departing unit then
+        leaves each of its relations (``relation-departed`` for each unit on
+        the other side, then ``relation-broken``), and is stopped and removed.
+
         Args:
             app: The application the unit belongs to.
             unit_id: The unit being removed.
@@ -1148,7 +1308,8 @@ class Juju:
                 by the time this one dispatches.
         """
         departing = app._units[unit_id]
-        remaining = [u for u in app.units if u is not departing and u.id not in doomed_ids]
+        remaining = [u for u in app._live_units if u is not departing and u.id not in doomed_ids]
+        app._dying.add(unit_id)
 
         # The peers see the unit leave before it is torn down.
         for endpoint in app._peer_endpoints:
@@ -1164,12 +1325,150 @@ class Juju:
                             relation_remote_unit_id=unit_id,
                             relation_departed_unit_id=unit_id,
                         ),
-                        rebind=_Rebind('relation', endpoint),
+                        rebind=_Rebind('relation', relation.id),
                     )
+        # So do the units on the other side of each integration that have
+        # seen it join.
+        for integration in self._integrations_of(app):
+            remote = integration.remote(app).app
+            for other in remote._live_units:
+                view = _relation_by_id(other._state, integration.id)
+                if isinstance(view, Relation) and unit_id in view.remote_units_data:
+                    self._enqueue(
+                        remote,
+                        other.id,
+                        _Event(
+                            f'{view.endpoint}_relation_departed',
+                            relation=view,
+                            relation_remote_unit_id=unit_id,
+                            relation_departed_unit_id=unit_id,
+                        ),
+                        rebind=_Rebind('relation', view.id),
+                    )
+        for relation in sorted(departing._state.relations, key=lambda r: r.id):
+            self._enqueue_leaving(app, departing, relation, departing_unit_id=unit_id)
         for event, rebind in _teardown_events(app, unit_id):
             self._enqueue(app, unit_id, event, rebind)
 
-        self._state.queue.append(_Queued(app, unit_id, _RemoveUnit()))
+        self._state.queues[app.name].append(_Queued(app, unit_id, _RemoveUnit()))
+
+    def _enqueue_leaving(
+        self,
+        app: App,
+        unit: Unit,
+        relation: RelationBase,
+        *,
+        departing_unit_id: int | None = None,
+    ) -> None:
+        """Enqueue a unit's side of leaving a relation.
+
+        ``relation-departed`` for each unit on the other side that it has seen
+        join, then ``relation-broken``. ``departing_unit_id`` is the unit
+        being removed, if a unit removal is why it is leaving; for a removed
+        relation, each remote unit is the departing one.
+        """
+        for remote_id in sorted(_remote_ids(relation)):
+            self._enqueue(
+                app,
+                unit.id,
+                _Event(
+                    f'{relation.endpoint}_relation_departed',
+                    relation=relation,
+                    relation_remote_unit_id=remote_id,
+                    relation_departed_unit_id=(
+                        remote_id if departing_unit_id is None else departing_unit_id
+                    ),
+                ),
+                rebind=_Rebind('relation', relation.id),
+            )
+        self._enqueue(
+            app,
+            unit.id,
+            _Event(f'{relation.endpoint}_relation_broken', relation=relation),
+            rebind=_Rebind('relation', relation.id),
+        )
+
+    # User secrets
+    def add_secret(self, name: str, content: Mapping[str, Any], *, info: str | None = None) -> str:
+        """Add a secret as a user would, matching ``juju add-secret``.
+
+        The secret isn't visible to any application until it's granted with
+        :meth:`grant_secret`. It's usually passed to a charm through a config
+        option of type ``secret``.
+
+        Args:
+            name: The secret's name, unique in the model.
+            content: The secret's content.
+            info: A description of the secret.
+
+        Returns:
+            The secret's URI. It's derived from the model UUID and how many
+            secrets the test has added, so it's the same on every run.
+
+        Raises:
+            JujuError: if the name is already used, or the content is empty.
+        """
+        self._check_open()
+        if any(s.name == name for s in self._state.user_secrets.values()):
+            raise JujuError(f'A secret named {name!r} already exists.')
+        if not content:
+            raise JujuError('A secret needs some content.')
+        with _secret_ids(f'{self.uuid}/user-secrets/{len(self._state.user_secrets)}'):
+            secret_id = _state_module._generate_secret_id()
+        self._state.user_secrets[secret_id] = _UserSecret(
+            secret_id, name, info, [{k: str(v) for k, v in content.items()}]
+        )
+        return secret_id
+
+    def grant_secret(self, identifier: str, app: App | Iterable[App]) -> None:
+        """Let an application read a secret the test added, matching ``juju grant-secret``.
+
+        Args:
+            identifier: The secret's URI or name.
+            app: The application, or applications, to grant it to.
+        """
+        self._check_open()
+        secret = self._user_secret(identifier)
+        apps = [app] if isinstance(app, App) else list(app)
+        for each in apps:
+            self._check_deployed(each)
+        secret.grants.update(each.name for each in apps)
+        self._sync_secrets()
+
+    def update_secret(self, identifier: str, content: Mapping[str, str]) -> None:
+        """Add a new revision of a secret the test added, matching ``juju update-secret``.
+
+        Each unit tracking the secret gets ``secret-changed``.
+
+        Args:
+            identifier: The secret's URI or name.
+            content: The new content.
+        """
+        self._check_open()
+        secret = self._user_secret(identifier)
+        if not content:
+            raise JujuError('A secret needs some content.')
+        secret.revisions.append({k: str(v) for k, v in content.items()})
+        self._sync_secrets()
+
+    def remove_secret(self, identifier: str) -> None:
+        """Remove a secret the test added, matching ``juju remove-secret``.
+
+        It's removed from every unit's :class:`State`.
+
+        Args:
+            identifier: The secret's URI or name.
+        """
+        self._check_open()
+        secret = self._user_secret(identifier)
+        del self._state.user_secrets[secret.id]
+        self._sync_secrets()
+
+    def _user_secret(self, identifier: str) -> _UserSecret:
+        for secret in self._state.user_secrets.values():
+            if identifier in (secret.id, secret.name):
+                return secret
+        raise JujuError(f'No secret {identifier!r} was added with add_secret().')
 
     def config(self, app: App, config: Mapping[str, Any]) -> None:
         """Change an application's configuration, as ``juju config`` would.
@@ -1182,6 +1481,250 @@ class Juju:
         for unit in app.units:
             unit._state = dataclasses.replace(unit._state, config=dict(app._config))
             self._enqueue(app, unit.id, _Event('config_changed'))
+
+    def integrate(self, app1: App | tuple[App, str], app2: App | tuple[App, str]) -> None:
+        """Relate two applications, as ``juju integrate`` would.
+
+        Where only one pair of endpoints can match, the applications are
+        enough::
+
+            juju.integrate(web, db)
+
+        Otherwise, name the endpoint on either side with an ``(App, endpoint)``
+        tuple, the object form of ``juju integrate web:db db:database``::
+
+            juju.integrate((web, 'db'), db)
+
+        The relation is in the model straight away. :meth:`settle` runs
+        ``relation-created`` on each unit on both sides before anything else
+        that's waiting for that unit (straight after ``install``, for a unit
+        that hasn't been installed yet), and the relation is in a unit's
+        :class:`State` from its ``relation-created`` on, as in Juju. Then it
+        runs ``relation-joined`` and ``relation-changed`` on each unit for
+        each unit on the other side.
+
+        Either side can be a charm on disk or a :class:`CharmSpec`, running in
+        the test process or in a worker process.
+
+        Raises:
+            JujuError: if no pair of endpoints matches, more than one does,
+                or the two are already related through that pair. The
+                message names the candidates.
+        """
+        self._check_open()
+        end1, end2, interface = self._match_endpoints(app1, app2)
+        integration = _Integration(self._new_relation_id(), (end1, end2), interface)
+        self._state.integrations[integration.id] = integration
+
+        # A unit enters the relation, and gets it in its State, when its
+        # relation-created is dispatched (see _enter_relation_event).
+        for end in integration.ends:
+            for unit in end.app._live_units:
+                self._enqueue_created(end.app, unit.id, integration)
+        for end in integration.ends:
+            remote = integration.remote(end.app).app
+            for unit in end.app._live_units:
+                for other in remote._live_units:
+                    self._enqueue_joined(end.app, unit, integration, other.id)
+
+    def remove_relation(self, app1: App | tuple[App, str], app2: App | tuple[App, str]) -> None:
+        """Remove a relation between two applications, as ``juju remove-relation`` would.
+
+        Takes the applications, or ``(App, endpoint)`` tuples, the same way as
+        :meth:`integrate`. Each unit sees ``relation-departed`` for each unit
+        on the other side, then ``relation-broken``; the relation leaves a
+        unit's :class:`State` once ``relation-broken`` has been dispatched
+        there. Secrets granted over the relation stop being readable on the
+        other side when it is removed.
+
+        If this comes before the :meth:`settle` that would run a unit's
+        ``relation-created``, that unit still runs the whole sequence, from
+        ``relation-created`` to ``relation-broken``. (In Juju this depends on
+        timing: a unit that hadn't yet noticed the relation runs none of it.)
+
+        Raises:
+            JujuError: if the applications aren't related through a matching
+                pair of endpoints, or are related through more than one.
+        """
+        self._check_open()
+        (a1, ep1), (a2, ep2) = _split_end(app1), _split_end(app2)
+        self._check_deployed(a1)
+        self._check_deployed(a2)
+        candidates: list[_Integration] = []
+        for integration in self._state.integrations.values():
+            for (x, ex), (y, ey) in (integration.ends, integration.ends[::-1]):
+                if (
+                    x is a1
+                    and y is a2
+                    and ep1 in (None, ex)
+                    and ep2 in (None, ey)
+                    and integration not in candidates
+                ):
+                    candidates.append(integration)
+        if len(candidates) != 1:
+            related = [str(i) for i in self._state.integrations.values()]
+            if not candidates:
+                raise JujuError(
+                    f'{_end_name(a1, ep1)} and {_end_name(a2, ep2)} are not related. '
+                    f'Relations: {", ".join(related) or "none"}.'
+                )
+            raise JujuError(
+                f'{a1.name} and {a2.name} are related more than once: '
+                f'{", ".join(str(c) for c in candidates)}. Pass (App, endpoint) tuples '
+                'to say which relation to remove.'
+            )
+        integration = candidates[0]
+        # From here on, nothing new is carried across, and no unit joins.
+        del self._state.integrations[integration.id]
+        for end in integration.ends:
+            remote_ids = [u.id for u in integration.remote(end.app).app._live_units]
+            for unit in end.app._live_units:
+                view = _relation_by_id(unit._state, integration.id)
+                if view is None:
+                    # Its relation-created hasn't run yet. It still runs, as
+                    # do the relation-joined and relation-changed already
+                    # waiting, so the unit leaves every remote unit it will
+                    # have seen join.
+                    self._state.closing[end.app.name, unit.id, integration.id] = integration
+                    view = dataclasses.replace(
+                        self._relation_view(integration, end.app),
+                        remote_units_data={remote_id: {} for remote_id in remote_ids},
+                    )
+                self._enqueue_leaving(end.app, unit, view)
+
+    def _match_endpoints(
+        self, app1: App | tuple[App, str], app2: App | tuple[App, str]
+    ) -> tuple[_End, _End, str]:
+        """Find the one pair of endpoints that ``integrate`` should relate."""
+        (a1, ep1), (a2, ep2) = _split_end(app1), _split_end(app2)
+        self._check_deployed(a1)
+        self._check_deployed(a2)
+        if a1 is a2:
+            raise JujuError(f'Cannot relate {a1.name} to itself; use a peer endpoint for that.')
+        endpoints1, endpoints2 = a1._relation_endpoints, a2._relation_endpoints
+        for app, endpoint, endpoints in ((a1, ep1, endpoints1), (a2, ep2, endpoints2)):
+            if endpoint is not None and endpoint not in endpoints:
+                raise JujuError(
+                    f'{app.name} has no provides or requires endpoint {endpoint!r}. '
+                    f'It has: {_list_endpoints(app)}.'
+                )
+        pairs: list[tuple[str, str, str]] = []
+        for e1, (role1, spec1) in sorted(endpoints1.items()):
+            if ep1 is not None and e1 != ep1:
+                continue
+            for e2, (role2, spec2) in sorted(endpoints2.items()):
+                if ep2 is not None and e2 != ep2:
+                    continue
+                if role1 != role2 and spec1.get('interface') == spec2.get('interface'):
+                    pairs.append((e1, e2, cast('str', spec1.get('interface'))))
+        if not pairs:
+            raise JujuError(
+                f'No endpoints of {_end_name(a1, ep1)} and {_end_name(a2, ep2)} match: '
+                'a provides endpoint relates to a requires endpoint with the same '
+                f'interface. {a1.name} has: {_list_endpoints(a1)}; '
+                f'{a2.name} has: {_list_endpoints(a2)}.'
+            )
+        if len(pairs) > 1:
+            candidates = ', '.join(f'{a1.name}:{e1} {a2.name}:{e2}' for e1, e2, _ in pairs)
+            raise JujuError(
+                f'{a1.name} and {a2.name} can be related more than one way: {candidates}. '
+                'Pass (App, endpoint) tuples to choose.'
+            )
+        e1, e2, interface = pairs[0]
+        for app, endpoint in ((a1, e1), (a2, e2)):
+            if app._relation_endpoints[endpoint][1].get('scope') == 'container':
+                raise JujuError(
+                    f'{app.name}:{endpoint} is a subordinate (container-scoped) endpoint, '
+                    'and Juju here does not deploy subordinates.'
+                )
+        for integration in self._state.integrations.values():
+            if {(end.app.name, end.endpoint) for end in integration.ends} == {
+                (a1.name, e1),
+                (a2.name, e2),
+            }:
+                raise JujuError(f'{a1.name}:{e1} and {a2.name}:{e2} are already related.')
+        return _End(a1, e1), _End(a2, e2), interface
+
+    def _check_deployed(self, app: App) -> None:
+        if self._state.apps.get(app.name) is not app:
+            raise JujuError(f'{app.name} is not deployed in this Juju.')
+
+    def _integrations_of(self, app: App) -> list[_Integration]:
+        """The live relations between ``app`` and other applications, by ID."""
+        return [
+            integration
+            for _, integration in sorted(self._state.integrations.items())
+            if any(end.app is app for end in integration.ends)
+        ]
+
+    def _relation_view(self, integration: _Integration, app: App) -> Relation:
+        """A new unit's view of a relation: no remote units joined yet.
+
+        The application databags on both sides are already readable, so they
+        start as each side's leader has them.
+        """
+        local = integration.local(app)
+        remote = integration.remote(app)
+        return Relation(
+            endpoint=local.endpoint,
+            interface=integration.interface,
+            id=integration.id,
+            local_app_data=_app_databag(app, integration.id),
+            remote_app_name=remote.app.name,
+            remote_app_data=_app_databag(remote.app, integration.id),
+            remote_units_data={},
+        )
+
+    def _enqueue_joined(
+        self, app: App, unit: Unit, integration: _Integration, remote_id: int
+    ) -> None:
+        """Queue ``relation-joined`` then ``relation-changed`` for one remote unit.
+
+        The remote unit's databag is added to this unit's view when the
+        ``relation-joined`` is dispatched, not before.
+        """
+        endpoint = integration.local(app).endpoint
+        view = _relation_by_id(unit._state, integration.id) or self._relation_view(
+            integration, app
+        )
+        for suffix in ('relation_joined', 'relation_changed'):
+            self._enqueue(
+                app,
+                unit.id,
+                _Event(
+                    f'{endpoint}_{suffix}',
+                    relation=view,
+                    relation_remote_unit_id=remote_id,
+                ),
+                rebind=_Rebind('relation', integration.id),
+            )
+
+    def _enqueue_created(self, app: App, unit_id: int, integration: _Integration) -> None:
+        """Put ``relation-created`` ahead of everything else waiting for a unit.
+
+        Juju's uniter enters a new relation and runs ``relation-created`` as
+        the unit's very next hook, ahead of leadership, ``config-changed``,
+        ``start`` and other relation hooks, but only once the unit is
+        installed. So it goes after the unit's ``install`` if that is still
+        waiting, and after any other ``relation-created`` already placed there.
+        """
+        queue = self._state.queues[app.name]
+        index = len(queue)
+        for i, waiting in enumerate(queue):
+            if waiting.unit_id != unit_id:
+                continue
+            if isinstance(waiting.event, _Event) and (
+                waiting.event.name == 'install' or waiting.event.name.endswith('_relation_created')
+            ):
+                index = i + 1
+                continue
+            index = i
+            break
+        event = _Event(
+            f'{integration.local(app).endpoint}_relation_created',
+            relation=self._relation_view(integration, app),
+        )
+        queue.insert(index, _Queued(app, unit_id, event, _Rebind('relation', integration.id)))
 
     # Convergence
     def settle(self) -> list[Dispatch]:
@@ -1201,18 +1744,30 @@ class Juju:
             The events dispatched, in order, each with the unit it went to and
             that unit's :class:`State` afterwards.
 
+        If a charm raises, the unit goes into error status, as it would in
+        Juju after a failed hook: the charm's changes from that dispatch are
+        discarded, and the unit gets no more events. There's no automatic
+        retry. The rest of the model carries on settling, and once it has,
+        this raises :class:`JujuError`. The model is left as it is, so a test
+        that expects the failure can catch the error and assert on the unit's
+        status.
+
         Raises:
             JujuError: if the model does not converge. The same event reaching
                 the same unit with the same :class:`State` twice is a loop,
                 and is reported as soon as it happens; otherwise, the limit
                 grows with the number of units in the model. The message ends
-                with the last events dispatched.
+                with the last events dispatched. Also raised, after settling,
+                if a charm raised: the message names each unit put in error,
+                with the charm's traceback, and the error is chained to the
+                first exception.
         """
         self._check_open()
         self._state.trace = []
+        already_failed = set(self._state.failed)
         seen: set[tuple[str, int, str, str]] = set()
         dispatched = 0
-        while self._state.queue:
+        while (queued := self._next_queued()) is not None:
             limit = _SETTLE_DISPATCHES_PER_UNIT * max(1, self._unit_count())
             if dispatched >= limit:
                 raise JujuError(
@@ -1220,7 +1775,7 @@ class Juju:
                     'that write a new value to a databag on every event.'
                     f'{self._trace_tail()}'
                 )
-            entry = self._next_dispatch()
+            entry = self._next_dispatch(queued)
             if entry is None:
                 continue
             app, unit, event = entry
@@ -1235,6 +1790,12 @@ class Juju:
                 seen.add(key)
             self._dispatch(app, unit, event)
             dispatched += 1
+        failed = [(k, e) for k, e in self._state.failed.items() if k not in already_failed]
+        if failed:
+            details = '\n'.join(f'{app}/{unit_id}:\n{e.traceback}' for (app, unit_id), e in failed)
+            raise JujuError(
+                f'{len(failed)} unit(s) went into error status while settling.\n{details}'
+            ) from (failed[0][1].cause or failed[0][1])
         return list(self._state.trace)
 
     def _unit_count(self) -> int:
@@ -1248,22 +1809,58 @@ class Juju:
         lines = [f'  {d.event.name} on {d.unit_name}' for d in tail]
         return '\nLast events dispatched:\n' + '\n'.join(lines) if lines else ''
 
-    def _next_dispatch(self) -> tuple[App, Unit, _Event] | None:
-        """Pop the next queue entry, returning the charm invocation it holds, if any.
+    def _next_queued(self) -> _Queued | None:
+        """Take the next entry from the queues, one application at a time.
 
-        A ``_RemoveUnit`` marker, and an event whose rebind target vanished
-        before dispatch, carry no charm invocation of their own; both are
-        consumed here and ``None`` is returned.
+        Each application has its own queue, which runs in order, and the
+        applications take turns, in the order they were deployed, one entry
+        each. Within one application that is the order the events were
+        caused in; across applications it is the closest a single thread gets
+        to Juju running every unit agent at once.
         """
-        app, unit_id, event, rebind = self._state.queue.popleft()
+        queues = list(self._state.queues.values())
+        for offset in range(len(queues)):
+            index = (self._state.turn + offset) % len(queues)
+            if queues[index]:
+                self._state.turn = index + 1
+                return queues[index].popleft()
+        return None
+
+    def _next_dispatch(self, queued: _Queued) -> tuple[App, Unit, _Event] | None:
+        """Prepare a queue entry for dispatch, returning the charm invocation it holds, if any.
+
+        A ``_RemoveUnit`` marker carries no charm invocation of its own, and
+        neither does an event that no longer applies by the time its turn
+        comes (its relation or container went away, or the remote unit it is
+        about left first). Those are consumed here, and ``None`` is returned.
+        """
+        app, unit_id, event, rebind = queued
+        if (app.name, unit_id) in self._state.failed:
+            self._state.held.setdefault((app.name, unit_id), []).append(queued)
+            return None
         if isinstance(event, _RemoveUnit):
             del app._units[unit_id]
+            app._dying.discard(unit_id)
             app._drop_charm_root(unit_id)
             self._drop_peer(app, unit_id)
+            self._state.granted.pop((app.name, unit_id), None)
+            for key in [k for k in self._state.closing if k[:2] == (app.name, unit_id)]:
+                del self._state.closing[key]
             if unit_id == app._leader_id:
                 self._elect_leader(app)
+            self._sync_secrets()
             return None
-        unit = app._units[unit_id]
+        unit = app._units.get(unit_id)
+        if unit is None:
+            return None
+        if (
+            rebind is not None
+            and rebind.kind == 'relation'
+            and not self._enter_relation_event(app, unit, event, cast('int', rebind.key))
+        ):
+            return None
+        if rebind is not None and rebind.kind == 'secret' and event.secret_revision is not None:
+            _stop_owner_tracking(unit, cast('str', rebind.key), event.secret_revision)
         if rebind is not None:
             rebound = _rebind(unit._state, rebind)
             if rebound is None:
@@ -1282,12 +1879,9 @@ class Juju:
         application data, status and secrets the old leader left, which every
         unit already has.
         """
-        leaving = {
-            q.unit_id
-            for q in self._state.queue
-            if q.app is app and isinstance(q.event, _RemoveUnit)
-        }
-        candidates = sorted(uid for uid in app._units if uid not in leaving) or sorted(app._units)
+        candidates = sorted(uid for uid in app._units if uid not in app._dying) or sorted(
+            app._units
+        )
         if not candidates:
             return
         app._leader_id = candidates[0]
@@ -1295,21 +1889,161 @@ class Juju:
         leader._state = dataclasses.replace(leader._state, leader=True)
         self._enqueue(app, leader.id, _Event('leader_elected'))
 
+    def _enter_relation_event(self, app: App, unit: Unit, event: _Event, relation_id: int) -> bool:
+        """Bring a unit's view of a relation up to the moment of a relation event.
+
+        Returns whether the event should still be dispatched. Juju changes
+        which remote units a unit sees as the relation events reach it: a
+        remote unit is in the relation from its ``relation-joined`` on, and
+        out of it from its ``relation-departed``, and by ``relation-broken``
+        none are left.
+        """
+        name = event.name
+        remote_id = event.relation_remote_unit_id
+        closing = self._state.closing.get((app.name, unit.id, relation_id))
+        view = _relation_by_id(unit._state, relation_id)
+        if view is None:
+            # The unit enters the relation at its relation-created, and only
+            # then has it in its State. A unit that is leaving never enters.
+            integration = self._state.integrations.get(relation_id) or closing
+            if (
+                not name.endswith('_relation_created')
+                or integration is None
+                or unit.id in app._dying
+            ):
+                return False
+            unit._state = self._with_addresses(
+                app,
+                unit.id,
+                _with_relation(unit._state, self._relation_view(integration, app)),
+            )
+            return True
+        if name.endswith('_relation_departed'):
+            if closing is not None and remote_id not in _remote_ids(view):
+                # It never saw that unit join.
+                return False
+            if remote_id is not None:
+                unit._state = _with_relation(unit._state, _without_remote(view, remote_id))
+            return True
+        if name.endswith('_relation_broken'):
+            unit._state = _with_relation(unit._state, _without_remote(view, None))
+            return True
+        if isinstance(view, PeerRelation):
+            return unit.id not in app._dying
+        if not isinstance(view, Relation):
+            return True
+        # A relation removed before this unit entered it still runs its whole
+        # sequence here (see remove_relation).
+        integration = self._state.integrations.get(relation_id) or closing
+        if name.endswith('_relation_created'):
+            return True
+        # The relation is being removed, or this unit is leaving it.
+        if integration is None or unit.id in app._dying:
+            return False
+        remote_app = integration.remote(app).app
+        if name.endswith('_relation_joined'):
+            assert remote_id is not None
+            remote_unit = remote_app._units.get(remote_id)
+            if remote_unit is None or remote_id in remote_app._dying:
+                return False
+            remote_view = _relation_by_id(remote_unit._state, relation_id)
+            if remote_view is None:
+                # The remote unit hasn't entered the relation yet (or has
+                # already left it). Its databag holds what Juju writes there.
+                remote_view = _relation_by_id(
+                    self._with_addresses(
+                        remote_app,
+                        remote_id,
+                        _with_relation(
+                            remote_unit._state,
+                            self._relation_view(integration, remote_app),
+                        ),
+                    ),
+                    relation_id,
+                )
+            data = dict(remote_view.local_unit_data) if remote_view is not None else {}
+            units_data = {**view.remote_units_data, remote_id: data}
+            unit._state = _with_relation(
+                unit._state,
+                dataclasses.replace(view, remote_units_data=dict(sorted(units_data.items()))),
+            )
+            return True
+        if name.endswith('_relation_changed'):
+            return remote_id is None or remote_id in view.remote_units_data
+        return True
+
     def _dispatch(self, app: App, unit: Unit, event: _Event) -> None:
         state_in = unit._state
-        state_out = app._runner.run(unit.id, event, state_in)
+        seed = f'{self.uuid}/{unit.name}/{self._state.dispatches}'
+        self._state.dispatches += 1
+        try:
+            state_out = app._runner.run(unit.id, event, state_in, seed)
+        except _HookFailedError as e:
+            self._fail(app, unit, event, e, state_in)
+            return
+        if not unit.is_leader:
+            _check_no_app_data_writes(unit, state_in, state_out)
         unit._state = state_out
         self._state.trace.append(
             Dispatch(event, app.name, unit.id, state_in, state_out, _charm=app._for_context())
         )
+        if event.name.endswith('_relation_broken') and event.relation is not None:
+            self._leave_relation(unit, event.relation.id)
+            self._state.closing.pop((app.name, unit.id, event.relation.id), None)
+        if unit.id in app._dying:
+            # A unit that is leaving doesn't publish anything new.
+            return
         self._propagate_peers(app, unit)
+        self._propagate_relations(app, unit)
         self._propagate_app_secrets(app, unit)
+        self._propagate_app_status(app, unit)
+        self._sync_secrets()
+
+    def _fail(
+        self, app: App, unit: Unit, event: _Event, error: _HookFailedError, state_in: State
+    ) -> None:
+        """Put a unit in error after its charm raised, as Juju does for a failed hook.
+
+        Nothing the charm did in the dispatch is kept, and nothing is
+        propagated to other units.
+        """
+        hook = event.name.replace('_', '-')
+        unit._state = dataclasses.replace(
+            unit._state, unit_status=ErrorStatus(f'hook failed: "{hook}"')
+        )
+        self._state.failed[app.name, unit.id] = error
+        self._state.trace.append(
+            Dispatch(
+                event,
+                app.name,
+                unit.id,
+                state_in,
+                unit._state,
+                error.traceback,
+                _charm=app._for_context(),
+            )
+        )
+
+    def _leave_relation(self, unit: Unit, relation_id: int) -> None:
+        """Take a relation out of a unit's state after its ``relation-broken``.
+
+        Grants of the unit's own secrets over the relation go with it, as
+        they do in Juju.
+        """
+        state = _without_relation(unit._state, relation_id)
+        secrets: list[Secret] = []
+        for secret in state.secrets:
+            if relation_id in secret.remote_grants:
+                grants = {k: v for k, v in secret.remote_grants.items() if k != relation_id}
+                secret = _replace_secret(secret, remote_grants=grants)
+            secrets.append(secret)
+        unit._state = dataclasses.replace(state, secrets=frozenset(secrets))
 
     # Units and peer relations
     def _add_unit(self, app: App) -> Unit:
         unit_id = app._next_unit_id
         app._next_unit_id += 1
-        existing = app.units
+        existing = app._live_units
 
         app._make_charm_root(unit_id)
         unit = Unit(app, unit_id, self._initial_state(app, unit_id))
@@ -1330,7 +2064,7 @@ class Juju:
                     continue
                 peers_data = dict(relation.peers_data)
                 peers_data[unit_id] = dict(joining.local_unit_data) if joining else {}
-                peer._state = _with_peer_relation(
+                peer._state = _with_relation(
                     peer._state,
                     dataclasses.replace(relation, peers_data=peers_data),
                 )
@@ -1343,15 +2077,41 @@ class Juju:
                             relation=relation,
                             relation_remote_unit_id=unit_id,
                         ),
-                        rebind=_Rebind('relation', endpoint),
+                        rebind=_Rebind('relation', relation.id),
                     )
 
-        for event, rebind in _startup_events(app, unit_id):
+        # The units of related applications see the newcomer join too.
+        integrations = self._integrations_of(app)
+        for integration in integrations:
+            remote = integration.remote(app).app
+            for other in remote._live_units:
+                self._enqueue_joined(remote, other, integration, unit_id)
+
+        # The new unit enters its relations to other applications right after
+        # install, as Juju runs relation-created before the unit starts, and
+        # sees the remote units join once it has started. It only has each
+        # relation in its State from its relation-created.
+        startup = _startup_events(app, unit_id)
+        created = [
+            (
+                _Event(
+                    f'{integration.local(app).endpoint}_relation_created',
+                    relation=self._relation_view(integration, app),
+                ),
+                _Rebind('relation', integration.id),
+            )
+            for integration in integrations
+        ]
+        startup[1:1] = created
+        for event, rebind in startup:
             self._enqueue(app, unit_id, event, rebind)
+        for integration in integrations:
+            for other in integration.remote(app).app._live_units:
+                self._enqueue_joined(app, unit, integration, other.id)
         return unit
 
     def _initial_state(self, app: App, unit_id: int) -> State:
-        relations: list[PeerRelation] = []
+        relations: list[RelationBase] = []
         for endpoint in app._peer_endpoints:
             # A unit joining an existing application can read what its peers
             # have already published, so seed its view from theirs rather than
@@ -1360,7 +2120,7 @@ class Juju:
             peers_data: dict[int, RawDataBagContents] = {}
             app_data: RawDataBagContents = {}
             for peer_id, peer in app._units.items():
-                if peer_id == unit_id:
+                if peer_id == unit_id or peer_id in app._dying:
                     continue
                 existing = _peer_relation(peer._state, endpoint)
                 if existing is None:
@@ -1385,7 +2145,7 @@ class Juju:
             for secret in leader_state.secrets:
                 if secret.owner == 'app' and secret.id not in template_ids:
                     secrets.append(secret)
-        return dataclasses.replace(
+        state = dataclasses.replace(
             app._state_template,
             config=dict(app._config),
             relations=frozenset(relations),
@@ -1395,6 +2155,51 @@ class Juju:
             model=self._as_model(),
             planned_units=self._planned_units(app) + 1,
         )
+        return self._with_addresses(app, unit_id, state)
+
+    def _with_addresses(self, app: App, unit_id: int, state: State) -> State:
+        """Fill in the addresses Juju gives a unit: its networks, and what it writes to relations.
+
+        Each binding the test's template doesn't set gets a network with the
+        unit's own address, derived from the model and unit names (and agreeing
+        with the hostname default). Juju writes ``ingress-address``,
+        ``egress-subnets`` and ``private-address`` into each of the unit's
+        relation databags, from the network for that relation's endpoint.
+        """
+        address = _charm_mocking.unit_address(self.name, f'{app.name}/{unit_id}')
+        networks = {n.binding_name: n for n in state.networks}
+        for binding in _bindings(app._metadata):
+            if binding not in networks:
+                networks[binding] = Network(
+                    binding,
+                    [BindAddress([Address(address)])],
+                    ingress_addresses=[address],
+                    egress_subnets=[f'{address}/32'],
+                )
+        relations: list[RelationBase] = []
+        for relation in state.relations:
+            network = networks.get(relation.endpoint)
+            if network is None:
+                relations.append(relation)
+                continue
+            bind: Sequence[Address] = (
+                network.bind_addresses[0].addresses if network.bind_addresses else []
+            )
+            written: dict[str, str] = {
+                'egress-subnets': ','.join(network.egress_subnets),
+                'ingress-address': network.ingress_addresses[0]
+                if network.ingress_addresses
+                else address,
+                'private-address': str(bind[0].value) if bind else address,
+            }
+            if any(relation.local_unit_data.get(k) != v for k, v in written.items()):
+                relation = dataclasses.replace(
+                    relation, local_unit_data={**relation.local_unit_data, **written}
+                )
+            relations.append(relation)
+        return dataclasses.replace(
+            state, networks=frozenset(networks.values()), relations=frozenset(relations)
+        )
 
     def _planned_units(self, app: App) -> int:
         """How many units the application is meant to have.
@@ -1403,12 +2208,7 @@ class Juju:
         before its teardown: Juju marks it as dying straight away, and ops
         leaves dying units out of ``planned_units()``.
         """
-        leaving = {
-            q.unit_id
-            for q in self._state.queue
-            if q.app is app and isinstance(q.event, _RemoveUnit)
-        }
-        return len(app._units.keys() - leaving)
+        return len(app._units.keys() - app._dying)
 
     def _update_planned_units(self, app: App) -> None:
         planned_units = self._planned_units(app)
@@ -1424,7 +2224,7 @@ class Juju:
                     continue
                 peers_data = dict(relation.peers_data)
                 del peers_data[unit_id]
-                peer._state = _with_peer_relation(
+                peer._state = _with_relation(
                     peer._state,
                     dataclasses.replace(relation, peers_data=peers_data),
                 )
@@ -1444,7 +2244,7 @@ class Juju:
             source_relation = _peer_relation(source._state, endpoint)
             if source_relation is None:
                 continue
-            for peer in app.units:
+            for peer in app._live_units:
                 if peer is source:
                     continue
                 relation = _peer_relation(peer._state, endpoint)
@@ -1461,7 +2261,7 @@ class Juju:
                     changed = True
                 if not changed:
                     continue
-                peer._state = _with_peer_relation(
+                peer._state = _with_relation(
                     peer._state,
                     dataclasses.replace(
                         relation,
@@ -1477,8 +2277,74 @@ class Juju:
                         relation=relation,
                         relation_remote_unit_id=source.id,
                     ),
-                    rebind=_Rebind('relation', endpoint),
+                    rebind=_Rebind('relation', relation.id),
                 )
+
+    def _propagate_relations(self, app: App, source: Unit) -> None:
+        """Carry a unit's relation databag writes to the other side of each relation.
+
+        What the unit wrote to its own databag reaches each remote unit that
+        has seen it join, and what the leader wrote to the application
+        databag reaches every remote unit, and the rest of its own
+        application. A remote unit whose view changed sees
+        ``relation-changed``; its own application's units see nothing, as in
+        Juju.
+        """
+        for integration in self._integrations_of(app):
+            relation = _relation_by_id(source._state, integration.id)
+            if not isinstance(relation, Relation):
+                continue
+            if source.is_leader:
+                for peer in app._live_units:
+                    view = _relation_by_id(peer._state, integration.id)
+                    if (
+                        peer is not source
+                        and isinstance(view, Relation)
+                        and view.local_app_data != relation.local_app_data
+                    ):
+                        peer._state = _with_relation(
+                            peer._state,
+                            dataclasses.replace(
+                                view, local_app_data=dict(relation.local_app_data)
+                            ),
+                        )
+            remote = integration.remote(app).app
+            for other in remote._live_units:
+                view = _relation_by_id(other._state, integration.id)
+                if not isinstance(view, Relation):
+                    continue
+                changes: dict[str, Any] = {}
+                about: int | None = None
+                units_data = view.remote_units_data
+                if source.id in units_data and units_data[source.id] != relation.local_unit_data:
+                    changes['remote_units_data'] = {
+                        **units_data,
+                        source.id: dict(relation.local_unit_data),
+                    }
+                    about = source.id
+                if source.is_leader and view.remote_app_data != relation.local_app_data:
+                    changes['remote_app_data'] = dict(relation.local_app_data)
+                    if about is None and units_data:
+                        # Juju fires relation-changed for an application
+                        # databag change with no remote unit, which a
+                        # Scenario event can't express. It names the writer
+                        # if this unit has seen it join, or else the
+                        # lowest-numbered unit it has seen.
+                        about = source.id if source.id in units_data else min(units_data)
+                if not changes:
+                    continue
+                other._state = _with_relation(other._state, dataclasses.replace(view, **changes))
+                if about is not None:
+                    self._enqueue(
+                        remote,
+                        other.id,
+                        _Event(
+                            f'{view.endpoint}_relation_changed',
+                            relation=view,
+                            relation_remote_unit_id=about,
+                        ),
+                        rebind=_Rebind('relation', integration.id),
+                    )
 
     def _propagate_app_secrets(self, app: App, source: Unit) -> None:
         """Share the leader's view of the application's own secrets with the other units.
@@ -1491,13 +2357,118 @@ class Juju:
         if not source.is_leader:
             return
         owned: list[Secret] = [s for s in source._state.secrets if s.owner == 'app']
-        for peer in app.units:
+        for peer in app._live_units:
             if peer is source:
                 continue
             others = [s for s in peer._state.secrets if s.owner != 'app']
             secrets = frozenset(others + owned)
             if secrets != peer._state.secrets:
                 peer._state = dataclasses.replace(peer._state, secrets=secrets)
+
+    def _propagate_app_status(self, app: App, source: Unit) -> None:
+        """Give every unit the application status the leader set.
+
+        Juju fires nothing when a status changes, and only the leader can
+        read the application status, so this is for the test's sake: each
+        unit's :class:`State` agrees on the application's status.
+        """
+        if not source.is_leader:
+            return
+        for peer in app._live_units:
+            if peer is not source and peer._state.app_status != source._state.app_status:
+                peer._state = dataclasses.replace(peer._state, app_status=source._state.app_status)
+
+    def _sync_secrets(self) -> None:
+        """Bring each unit's view of other applications' secrets up to date.
+
+        A secret granted over a relation, to the application on the other side
+        or to one of its units, is readable there for as long as the grant
+        and the relation last. A new revision with new content updates the
+        readers' latest content and queues ``secret-changed`` on them. Once
+        no reader still tracks an old revision, the owner gets
+        ``secret-remove`` for it.
+        """
+        owned: list[tuple[App, Unit, Secret]] = []
+        for app in self._state.apps.values():
+            for unit in app._live_units:
+                for secret in sorted(unit._state.secrets, key=lambda s: s.id):
+                    if secret.owner == 'unit' or (secret.owner == 'app' and unit.is_leader):
+                        owned.append((app, unit, secret))
+
+        wanted: dict[tuple[str, int], dict[str, Secret]] = {}
+        for app, _, secret in owned:
+            for relation_id, grantees in sorted(secret.remote_grants.items()):
+                integration = self._state.integrations.get(relation_id)
+                if integration is None or all(end.app is not app for end in integration.ends):
+                    continue
+                remote = integration.remote(app).app
+                for unit in remote._live_units:
+                    if remote.name in grantees or unit.name in grantees:
+                        wanted.setdefault((remote.name, unit.id), {})[secret.id] = secret
+        for user_secret in self._state.user_secrets.values():
+            source = user_secret.as_source()
+            for app_name in sorted(user_secret.grants):
+                for unit in self._state.apps[app_name]._live_units:
+                    wanted.setdefault((app_name, unit.id), {})[source.id] = source
+
+        readers: dict[str, list[Secret]] = {}
+        for app in self._state.apps.values():
+            for unit in app.units:
+                key = (app.name, unit.id)
+                granted = self._state.granted.get(key, set())
+                want = wanted.get(key, {})
+                secrets = {s.id: s for s in unit._state.secrets}
+                changed: list[str] = []
+                for secret_id in sorted(granted - want.keys()):
+                    if secrets.pop(secret_id, None) is not None:
+                        changed.append(secret_id)
+                now_granted: set[str] = set()
+                notify: list[str] = []
+                for secret_id, source in sorted(want.items()):
+                    current = secrets.get(secret_id)
+                    if current is not None and secret_id not in granted:
+                        # The test put a secret with this ID in the unit's
+                        # State itself; leave it alone.
+                        continue
+                    now_granted.add(secret_id)
+                    if current is None:
+                        secrets[secret_id] = _reader_copy(source, None)
+                        changed.append(secret_id)
+                    elif current._latest_revision != source._latest_revision:
+                        secrets[secret_id] = _reader_copy(source, current)
+                        changed.append(secret_id)
+                        if current.latest_content != source.latest_content:
+                            notify.append(secret_id)
+                    readers.setdefault(secret_id, []).append(secrets[secret_id])
+                if now_granted:
+                    self._state.granted[key] = now_granted
+                else:
+                    self._state.granted.pop(key, None)
+                if changed:
+                    unit._state = dataclasses.replace(
+                        unit._state, secrets=frozenset(secrets.values())
+                    )
+                for secret_id in notify:
+                    self._enqueue(
+                        app,
+                        unit.id,
+                        _Event('secret_changed', secret=secrets[secret_id]),
+                        rebind=_Rebind('secret', secret_id),
+                    )
+
+        for app, unit, secret in owned:
+            latest = secret._latest_revision
+            tracked = [s._tracked_revision for s in readers.get(secret.id, [])]
+            done = self._state.removable_revisions.get(secret.id, 0)
+            unused_below = min([latest, *tracked])
+            for revision in range(done + 1, unused_below):
+                self._enqueue(
+                    app,
+                    unit.id,
+                    _Event('secret_remove', secret=secret, secret_revision=revision),
+                    rebind=_Rebind('secret', secret.id),
+                )
+            self._state.removable_revisions[secret.id] = max(done, unused_below - 1)
 
     def _enqueue(
         self,
@@ -1506,7 +2477,24 @@ class Juju:
         event: _Event,
         rebind: _Rebind | None = None,
     ) -> None:
-        self._state.queue.append(_Queued(app, unit_id, event, rebind))
+        """Queue an event for a unit.
+
+        A ``*-changed`` event that is already waiting for the same unit, about
+        the same thing, isn't queued twice: the one waiting will see the
+        latest data when it runs. Juju coalesces these the same way.
+        """
+        queue = self._state.queues[app.name]
+        if event.name.endswith(_COALESCED_SUFFIXES):
+            for waiting in queue:
+                if (
+                    waiting.unit_id == unit_id
+                    and isinstance(waiting.event, _Event)
+                    and waiting.event.name == event.name
+                    and waiting.rebind == rebind
+                    and waiting.event.relation_remote_unit_id == event.relation_remote_unit_id
+                ):
+                    return
+        queue.append(_Queued(app, unit_id, event, rebind))
 
     # Teardown
     def close(self) -> None:
@@ -1520,7 +2508,7 @@ class Juju:
             for unit_id in list(app._charm_roots):
                 app._drop_charm_root(unit_id)
         self._state.apps.clear()
-        self._state.queue.clear()
+        self._state.queues.clear()
         self._state.closed = True
         if self._slot is not None:
             key, slot = self._slot
@@ -1594,6 +2582,25 @@ def _claim_model_identity() -> tuple[str, str, tuple[str, int]]:
     return name, uuid, (identity, slot)
 
 
+def _bindings(metadata: Mapping[str, Any]) -> list[str]:
+    """Every network binding a charm has.
+
+    That's its endpoints other than subordinate ones, its extra bindings, and
+    ``juju-info``.
+    """
+    bindings = {'juju-info'}
+    for kind in ('requires', 'provides', 'peers'):
+        endpoints = cast('Mapping[str, Any]', metadata.get(kind) or {})
+        for endpoint, spec in endpoints.items():
+            scope = (
+                cast('Mapping[str, Any]', spec).get('scope') if isinstance(spec, Mapping) else None
+            )
+            if scope != 'container':
+                bindings.add(endpoint)
+    bindings.update(metadata.get('extra-bindings') or {})
+    return sorted(bindings)
+
+
 def _class_sources(charm_type: type[Any]) -> list[pathlib.Path]:
     """The file a charm class is defined in, to find the charmlibs libraries it uses."""
     try:
@@ -1637,7 +2644,8 @@ def _check_state_template(template: State) -> None:
             raise JujuError(
                 f'state_template may not set {name}: Juju sets it for each unit. '
                 'Use config= for configuration; relations come from the '
-                "charm's peer endpoints."
+                "charm's peer endpoints and integrate(), and secrets from the "
+                'charms themselves and add_secret().'
             )
 
 
@@ -1739,12 +2747,17 @@ def _merged_config(
     return merged
 
 
-def _rebind(state: State, rebind: _Rebind) -> PeerRelation | Container | None:
+def _rebind(state: State, rebind: _Rebind) -> RelationBase | Container | Secret | None:
     """Look up the object an event should carry, in the state it will run against."""
     if rebind.kind == 'relation':
-        return _peer_relation(state, rebind.name)
+        return _relation_by_id(state, cast('int', rebind.key))
+    if rebind.kind == 'secret':
+        for secret in state.secrets:
+            if secret.id == rebind.key:
+                return secret
+        return None
     for container in state.containers:
-        if container.name == rebind.name:
+        if container.name == rebind.key:
             return container
     return None
 
@@ -1756,8 +2769,127 @@ def _peer_relation(state: State, endpoint: str) -> PeerRelation | None:
     return None
 
 
-def _with_peer_relation(state: State, relation: PeerRelation) -> State:
+def _relation_by_id(state: State, relation_id: int) -> RelationBase | None:
+    for relation in state.relations:
+        if relation.id == relation_id:
+            return relation
+    return None
+
+
+def _with_relation(state: State, relation: RelationBase) -> State:
     """A copy of ``state`` with ``relation`` replacing the one with its ID."""
     relations = [r for r in state.relations if r.id != relation.id]
     relations.append(relation)
     return dataclasses.replace(state, relations=frozenset(relations))
+
+
+def _without_relation(state: State, relation_id: int) -> State:
+    relations = [r for r in state.relations if r.id != relation_id]
+    return dataclasses.replace(state, relations=frozenset(relations))
+
+
+def _remote_ids(relation: RelationBase) -> list[int]:
+    """The units on the other side of a relation that this view has seen join."""
+    if isinstance(relation, PeerRelation):
+        return list(relation.peers_data)
+    if isinstance(relation, Relation):
+        return list(relation.remote_units_data)
+    return []
+
+
+def _without_remote(relation: RelationBase, remote_id: int | None) -> RelationBase:
+    """A view of the relation without one remote unit, or without any if ``None``."""
+    if isinstance(relation, PeerRelation):
+        peers = {k: v for k, v in relation.peers_data.items() if remote_id not in (None, k)}
+        return dataclasses.replace(relation, peers_data=peers)
+    if isinstance(relation, Relation):
+        units = {k: v for k, v in relation.remote_units_data.items() if remote_id not in (None, k)}
+        return dataclasses.replace(relation, remote_units_data=units)
+    return relation
+
+
+def _app_databag(app: App, relation_id: int) -> dict[str, str]:
+    """An application's databag in a relation, as its leader has it."""
+    leader = app._units.get(app._leader_id)
+    view = _relation_by_id(leader._state, relation_id) if leader is not None else None
+    return dict(view.local_app_data) if view is not None else {}
+
+
+def _check_no_app_data_writes(unit: Unit, state_in: State, state_out: State) -> None:
+    """Fail a dispatch where a unit that isn't the leader changed application data.
+
+    The charm can't do this through ops, which raises first. Juju refuses it
+    too, so a ``State`` that shows it means the charm went around ops.
+    """
+    for relation in state_out.relations:
+        before = _relation_by_id(state_in, relation.id)
+        if before is not None and before.local_app_data != relation.local_app_data:
+            raise JujuError(
+                f'{unit.name} is not the leader, but its application databag in '
+                f'{relation.endpoint}:{relation.id} changed. Juju only lets the leader '
+                'write application data.'
+            )
+
+
+def _stop_owner_tracking(unit: Unit, secret_id: str, revision: int) -> None:
+    """Move an owner off a revision it is about to be told to remove.
+
+    Juju sends ``secret-remove`` once no reader of the secret tracks the
+    revision; what the owner itself last read doesn't count. Scenario refuses
+    to remove the revision the owner tracks, so the owner's view moves to the
+    latest revision first.
+    """
+    secrets: list[Secret] = []
+    for secret in unit._state.secrets:
+        if secret.id == secret_id and secret._tracked_revision <= revision:
+            secret = _replace_secret(secret, tracked_content=dict(secret.latest_content))
+            object.__setattr__(secret, '_tracked_revision', secret._latest_revision)
+        secrets.append(secret)
+    unit._state = dataclasses.replace(unit._state, secrets=frozenset(secrets))
+
+
+def _replace_secret(secret: Secret, **changes: Any) -> Secret:
+    """``dataclasses.replace`` for a secret, keeping the revisions it tracks."""
+    new = dataclasses.replace(secret, **changes)
+    object.__setattr__(new, '_tracked_revision', secret._tracked_revision)
+    object.__setattr__(new, '_latest_revision', secret._latest_revision)
+    return new
+
+
+def _reader_copy(source: Secret, current: Secret | None) -> Secret:
+    """What a unit that was granted ``source`` sees of it.
+
+    A new reader starts out tracking the latest revision. An existing one
+    keeps the revision (and content) it tracks, and its own label, and learns
+    the latest.
+    """
+    copy = Secret(
+        dict(source.latest_content if current is None else current.tracked_content),
+        latest_content=dict(source.latest_content),
+        id=source.id,
+        label=None if current is None else current.label,
+    )
+    tracked = source._latest_revision if current is None else current._tracked_revision
+    object.__setattr__(copy, '_tracked_revision', tracked)
+    object.__setattr__(copy, '_latest_revision', source._latest_revision)
+    return copy
+
+
+def _split_end(end: App | tuple[App, str]) -> tuple[App, str | None]:
+    if isinstance(end, App):
+        return end, None
+    app, endpoint = end
+    return app, endpoint
+
+
+def _end_name(app: App, endpoint: str | None) -> str:
+    return app.name if endpoint is None else f'{app.name}:{endpoint}'
+
+
+def _list_endpoints(app: App) -> str:
+    endpoints = app._relation_endpoints
+    listed = [
+        f'{name} ({role} {spec.get("interface")})'
+        for name, (role, spec) in sorted(endpoints.items())
+    ]
+    return ', '.join(listed) or 'no provides or requires endpoints'

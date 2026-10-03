@@ -25,6 +25,7 @@ from scenario.state import (
     Container,
     DeferredEvent,
     MaintenanceStatus,
+    Model,
     Mount,
     Notice,
     PeerRelation,
@@ -636,3 +637,11 @@ def test_bool_dict_key_is_rejected():
     state = State(stored_states={StoredState(name='s', content=cast('dict[str, Any]', {True: 1}))})
     with pytest.raises(TypeError, match='keys must be all str or all int'):
         _encode_state(state)
+
+
+def test_sets_encode_the_same_whatever_order_they_were_built_in():
+    names = [f'name{i}' for i in range(20)]
+    model = Model('m', uuid='00000000-0000-4000-8000-000000000000')
+    forwards = State(model=model, stored_states={StoredState(n) for n in names})
+    backwards = State(model=model, stored_states={StoredState(n) for n in reversed(names)})
+    assert forwards._to_json() == backwards._to_json()

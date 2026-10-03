@@ -161,8 +161,10 @@ def _load_charm_spec(
     return meta, config, actions
 
 
-def _child_environ() -> dict[str, str]:
+def _child_environ(python_path: Sequence[str] = ()) -> dict[str, str]:
     """Build the environment for the worker subprocess.
+
+    ``python_path`` goes at the front of the worker's ``PYTHONPATH``.
 
     In a source checkout the ``scenario`` package is importable from
     ``testing/src``, which is not on the worker's ``sys.path``, so that
@@ -174,11 +176,14 @@ def _child_environ() -> dict[str, str]:
     """
     child = dict(os.environ)
     scenario_src = pathlib.Path(__file__).resolve().parent.parent
-    if _is_installed_layout(scenario_src):
+    parts = list(python_path)
+    if not _is_installed_layout(scenario_src):
+        parts.append(str(scenario_src))
+    if not parts:
         return child
 
     existing = child.get('PYTHONPATH', '')
-    parts = [str(scenario_src)] + ([existing] if existing else [])
+    parts += [existing] if existing else []
     child['PYTHONPATH'] = os.pathsep.join(parts)
     return child
 
@@ -530,6 +535,9 @@ class IsolatedContext:
         extra_sys_path: Directories prepended to the worker's ``sys.path``
             before the charm is imported. A lightweight alternative to a full
             venv for offline tests.
+        python_path: Directories put at the front of the worker's
+            ``PYTHONPATH``, so they are importable before the worker itself
+            starts.
         meta: Charm metadata dict (``metadata.yaml`` format). If omitted,
             read from the charm's ``charmcraft.yaml`` (or, for older charms,
             ``metadata.yaml``).
@@ -587,6 +595,7 @@ class IsolatedContext:
         python_executable: str | None = None,
         extra_sys_path: Sequence[str] = (),
         *,
+        python_path: Sequence[str] = (),
         meta: Mapping[str, Any] | None = None,
         config: Mapping[str, Any] | None = None,
         actions: Mapping[str, Any] | None = None,
@@ -637,7 +646,7 @@ class IsolatedContext:
         self.dispatch_timeout = dispatch_timeout
         self._spawn_per_event = spawn_per_event
         self._idle_timeout = idle_timeout
-        self._child_env = _child_environ()
+        self._child_env = _child_environ(python_path)
         self._worker: _PersistentWorker | None = None
 
     def _build_request(

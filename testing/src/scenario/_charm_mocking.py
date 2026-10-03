@@ -180,17 +180,16 @@ def check_mocking_json(mocking: Mapping[str, Any]) -> None:
 _REQUIREMENT_NAME = re.compile(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)')
 
 
-def _check_dependency_groups(
-    charm_root: pathlib.Path, groups: Sequence[str], charm_name: str
-) -> None:
-    """Check that every package in the charm's mocking dependency groups is installed.
+def group_requirements(
+    pyproject: Mapping[str, Any], groups: Sequence[str], charm_name: str
+) -> list[tuple[str, str]]:
+    """The requirements in each of the named dependency groups, with the group named.
+
+    ``include-group`` entries are followed.
 
     Raises:
-        JujuError: naming the group and the first missing package.
+        JujuError: if ``pyproject.toml`` doesn't declare one of the groups.
     """
-    if not groups:
-        return
-    pyproject = _read_pyproject(charm_root) or {}
     declared: dict[str, list[Any]] = pyproject.get('dependency-groups', {})
 
     def requirements(group: str, seen: frozenset[str]) -> Iterator[str]:
@@ -207,20 +206,37 @@ def _check_dependency_groups(
                 continue
             yield str(entry)
 
-    for group in groups:
-        for requirement in requirements(group, frozenset({group})):
-            match = _REQUIREMENT_NAME.match(requirement)
-            if match is None:
-                continue
-            name = match.group(1)
-            try:
-                importlib.metadata.distribution(name)
-            except importlib.metadata.PackageNotFoundError:
-                raise JujuError(
-                    f'{charm_name}: the mocking needs {name} (from the {group!r} '
-                    'dependency group), which is not installed in the environment the '
-                    'charm runs in. Install it there.'
-                ) from None
+    return [
+        (group, requirement)
+        for group in groups
+        for requirement in requirements(group, frozenset({group}))
+    ]
+
+
+def _check_dependency_groups(
+    charm_root: pathlib.Path, groups: Sequence[str], charm_name: str
+) -> None:
+    """Check that every package in the charm's mocking dependency groups is installed.
+
+    Raises:
+        JujuError: naming the group and the first missing package.
+    """
+    if not groups:
+        return
+    pyproject = _read_pyproject(charm_root) or {}
+    for group, requirement in group_requirements(pyproject, groups, charm_name):
+        match = _REQUIREMENT_NAME.match(requirement)
+        if match is None:
+            continue
+        name = match.group(1)
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            raise JujuError(
+                f'{charm_name}: the mocking needs {name} (from the {group!r} '
+                'dependency group), which is not installed in the environment the '
+                'charm runs in. Install it there.'
+            ) from None
 
 
 def _add_charm_paths(charm_root: pathlib.Path) -> None:

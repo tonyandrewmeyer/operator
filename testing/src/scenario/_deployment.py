@@ -53,12 +53,13 @@ import shutil
 import tempfile
 import types
 import unicodedata
+import weakref
 from collections import deque
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
 from uuid import UUID, uuid4, uuid5
 
-from . import _charm_mocking, _isolated_serde
+from . import _charm_mocking, _isolated_serde, _unit_filesystem
 from . import state as _state_module
 from ._isolated_worker import (
     _charm_exception,
@@ -357,6 +358,8 @@ class _InProcessRunner(_Runner):
         juju_version: str,
         app_trusted: bool,
         charm_roots: Mapping[int, pathlib.Path],
+        unit_roots: Mapping[int, pathlib.Path],
+        workload_roots: Mapping[int, pathlib.Path],
         mocking: _charm_mocking.CharmMocking,
     ):
         self._charm_type = charm_type
@@ -367,6 +370,8 @@ class _InProcessRunner(_Runner):
         self._juju_version = juju_version
         self._app_trusted = app_trusted
         self._charm_roots = charm_roots
+        self._unit_roots = unit_roots
+        self._workload_roots = workload_roots
         self._mocking = mocking
         self._contexts: dict[int, Context[CharmBase]] = {}
 
@@ -386,15 +391,24 @@ class _InProcessRunner(_Runner):
                 charm_root=self._charm_roots.get(unit_id),
             )
             self._contexts[unit_id]._wrap_charm_errors = True
+            self._contexts[unit_id]._workload_root = self._workload_roots.get(unit_id)
         return self._contexts[unit_id]
 
     def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
+        ctx = self._context(unit_id)
         with (
-            self._mocking.dispatching(f'{self._app_name}/{unit_id}', state.model.name),
+            # Juju runs every hook in the unit's charm directory.
+            _unit_filesystem.working_directory(self._charm_roots.get(unit_id)),
+            self._mocking.dispatching(
+                f'{self._app_name}/{unit_id}',
+                state.model.name,
+                filesystem_root=self._unit_roots.get(unit_id),
+                allow=_unit_filesystem.framework_paths(ctx, state),
+            ),
             _secret_ids(secret_seed),
         ):
             try:
-                return self._context(unit_id).run(event, state)
+                return ctx.run(event, state)
             except UncaughtCharmError as e:
                 cause = _charm_exception(e)
                 raise _HookFailedError(_charm_traceback(e), cause) from cause
@@ -412,12 +426,22 @@ class _IsolatedRunner(_Runner):
     per unit, so it travels with each request too.
     """
 
-    def __init__(self, ctx: IsolatedContext, charm_roots: Mapping[int, pathlib.Path]):
+    def __init__(
+        self,
+        ctx: IsolatedContext,
+        charm_roots: Mapping[int, pathlib.Path],
+        unit_roots: Mapping[int, pathlib.Path],
+        workload_roots: Mapping[int, pathlib.Path],
+    ):
         self._ctx = ctx
         self._charm_roots = charm_roots
+        self._unit_roots = unit_roots
+        self._workload_roots = workload_roots
 
     def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
         self._ctx.charm_root = self._charm_roots.get(unit_id)
+        self._ctx.filesystem_root = self._unit_roots.get(unit_id)
+        self._ctx.workload_root = self._workload_roots.get(unit_id)
         return self._ctx._run_as(unit_id, event, state, secret_seed=secret_seed)
 
     def close(self) -> None:
@@ -467,6 +491,44 @@ class Unit:
         dispatch whatever the operations so far have queued, then assert.
         """
         return self._state
+
+    @property
+    def filesystem(self) -> pathlib.Path:
+        """The root of this unit's own filesystem.
+
+        What the charm writes outside its charm directory lands under this
+        root, rather than on the test machine: ``/etc/nginx/nginx.conf``
+        is at ``unit.filesystem / 'etc/nginx/nginx.conf'``. The unit's copy of
+        the charm is in here too, where Juju would put it. Like
+        ``Container.get_filesystem()``, this is for asserting on what the
+        charm wrote. It isn't part of :attr:`state`, and it persists until the
+        ``Juju`` is closed, even after the unit has been removed.
+        """
+        return self._app._unit_roots[self._id]
+
+    def container_filesystem(self, container: str) -> pathlib.Path:
+        """The root of the filesystem of one of this unit's workload containers.
+
+        What the charm pushes into the container lands under this root:
+        ``/etc/grafana/grafana.ini`` in the ``grafana`` container is at
+        ``unit.container_filesystem('grafana') / 'etc/grafana/grafana.ini'``.
+        The files are kept from one dispatch to the next, as they are in a
+        real pod, and each unit has its own. Storage that the metadata mounts
+        into the container, and any ``Mount`` in the application's
+        ``state_template``, appear at their locations. Like
+        :attr:`filesystem`, this is for asserting on what the charm wrote. It
+        persists until the ``Juju`` is closed, even after the unit has been
+        removed.
+
+        Raises:
+            JujuError: if the charm's metadata has no container with this name.
+        """
+        if container not in self._app._container_names:
+            raise JujuError(
+                f'{self._app.name} has no container {container!r}; its containers are: '
+                f'{", ".join(self._app._container_names) or "none"}.'
+            )
+        return self._app._workload_roots[self._id] / 'containers' / container
 
     def to_context(self) -> Context[CharmBase]:
         """A new :class:`~ops.testing.Context` for this unit's charm.
@@ -527,9 +589,13 @@ class App:
         self._charm_source = (
             pathlib.Path(charm) if isinstance(charm, (str, pathlib.Path)) else None
         )
-        # Each unit gets its own charm directory (see _make_charm_root). The
-        # runners read this mapping when they dispatch, so it is shared.
+        # Each unit gets its own filesystem root, and its own copy of the
+        # charm inside it (see _make_unit_root). The runners read these
+        # mappings when they dispatch, so they are shared.
+        self._unit_roots: dict[int, pathlib.Path] = {}
         self._charm_roots: dict[int, pathlib.Path] = {}
+        # And a directory for its containers' and storages' filesystems.
+        self._workload_roots: dict[int, pathlib.Path] = {}
         self._meta = dict(meta)
         self._metadata, self._config_schema, self._actions = _split_meta(meta)
         self._config = _merged_config(self._config_schema, config)
@@ -597,6 +663,8 @@ class App:
             juju_version=self._juju_version,
             app_trusted=self._trust,
             charm_roots=self._charm_roots,
+            unit_roots=self._unit_roots,
+            workload_roots=self._workload_roots,
             mocking=mocking,
         )
 
@@ -622,6 +690,8 @@ class App:
                 mocking=self._mocked,
             ),
             self._charm_roots,
+            self._unit_roots,
+            self._workload_roots,
         )
         # The mocking itself loads in the worker; the parent reports the
         # configuration problems it can see without importing anything.
@@ -721,28 +791,28 @@ class App:
         containers.extend(from_template.values())
         return containers
 
-    def _make_charm_root(self, unit_id: int) -> None:
-        """Give a unit of an on-disk charm its own charm directory.
+    def _make_unit_root(self, unit_id: int) -> None:
+        """Give a unit its own filesystem root, and its own copy of the charm.
 
-        Juju gives each unit its own copy of the charm. Here the directory
-        links to each top-level entry of the charm source, so the charm finds
-        the files it ships, while the metadata files that ``Context`` writes
-        into its charm directory land in the unit's directory rather than in
-        the source tree.
+        Juju gives each unit its own copy of the charm, so a charm on disk is
+        copied into the unit's root, where Juju would put it. That's the
+        unit's charm directory, so the metadata files that ``Context`` writes
+        there land in the copy rather than in the source tree, and so does
+        anything the charm writes into its own directory.
         """
-        if self._charm_source is None:
-            return
-        root = pathlib.Path(tempfile.mkdtemp(prefix=f'ops-testing-{self._name}-{unit_id}-'))
-        for entry in self._charm_source.resolve().iterdir():
-            if entry.name in {'metadata.yaml', 'config.yaml', 'actions.yaml'}:
-                continue
-            (root / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
-        self._charm_roots[unit_id] = root
-
-    def _drop_charm_root(self, unit_id: int) -> None:
-        root = self._charm_roots.pop(unit_id, None)
-        if root is not None:
-            shutil.rmtree(root, ignore_errors=True)
+        root, charm_dir = _unit_filesystem.make_unit_root(
+            self._juju._filesystems_parent(),
+            self._name,
+            unit_id,
+            meta=self._meta,
+            charm_source=self._charm_source,
+        )
+        self._unit_roots[unit_id] = root
+        self._workload_roots[unit_id] = _unit_filesystem.make_workload_root(
+            self._juju._filesystems_parent(), self._name, unit_id, self._container_names
+        )
+        if charm_dir is not None:
+            self._charm_roots[unit_id] = charm_dir
 
     def __repr__(self) -> str:
         return f'<App {self._name} ({len(self._units)} units)>'
@@ -966,6 +1036,9 @@ class Juju:
         self.type: Literal['kubernetes', 'lxd'] = type
         self.cloud_spec = cloud_spec
         self._state = _JujuState()
+        # Every unit's filesystem root, created with the first unit.
+        self._filesystems: pathlib.Path | None = None
+        self._filesystems_finalizer: weakref.finalize[Any, Any] | None = None
 
     @property
     def apps(self) -> Mapping[str, App]:
@@ -992,6 +1065,15 @@ class Juju:
             type=self.type,
             cloud_spec=self.cloud_spec,
         )
+
+    def _filesystems_parent(self) -> pathlib.Path:
+        """The directory that holds each unit's filesystem root, until :meth:`close`."""
+        if self._filesystems is None:
+            self._filesystems = pathlib.Path(tempfile.mkdtemp(prefix='ops-testing-juju-'))
+            self._filesystems_finalizer = weakref.finalize(
+                self, shutil.rmtree, str(self._filesystems), True
+            )
+        return self._filesystems
 
     def _check_open(self) -> None:
         if self._state.closed:
@@ -1841,7 +1923,6 @@ class Juju:
         if isinstance(event, _RemoveUnit):
             del app._units[unit_id]
             app._dying.discard(unit_id)
-            app._drop_charm_root(unit_id)
             self._drop_peer(app, unit_id)
             self._state.granted.pop((app.name, unit_id), None)
             for key in [k for k in self._state.closing if k[:2] == (app.name, unit_id)]:
@@ -2045,7 +2126,7 @@ class Juju:
         app._next_unit_id += 1
         existing = app._live_units
 
-        app._make_charm_root(unit_id)
+        app._make_unit_root(unit_id)
         unit = Unit(app, unit_id, self._initial_state(app, unit_id))
         app._units[unit_id] = unit
 
@@ -2498,15 +2579,15 @@ class Juju:
 
     # Teardown
     def close(self) -> None:
-        """Tear down every application's worker process.
+        """Tear down every application's worker process, and every unit's filesystem.
 
-        Safe to call more than once. In-process applications have nothing to
-        tear down.
+        Safe to call more than once. Assert on :attr:`Unit.filesystem` before
+        closing.
         """
         for app in self._state.apps.values():
             app._runner.close()
-            for unit_id in list(app._charm_roots):
-                app._drop_charm_root(unit_id)
+        if self._filesystems_finalizer is not None:
+            self._filesystems_finalizer()
         self._state.apps.clear()
         self._state.queues.clear()
         self._state.closed = True

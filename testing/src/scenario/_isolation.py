@@ -626,6 +626,12 @@ class IsolatedContext:
         self.juju_version = juju_version
         self.app_trusted = app_trusted
         self.charm_root = charm_root
+        # The unit's own filesystem root, which the filesystem default
+        # translates the charm's file access into. Set per dispatch by Juju.
+        self.filesystem_root: str | pathlib.Path | None = None
+        # The directory that keeps the unit's container and storage
+        # filesystems between dispatches. Set per dispatch by Juju.
+        self.workload_root: str | pathlib.Path | None = None
         self._mocking = dict(mocking) if mocking is not None else None
 
         self.dispatch_timeout = dispatch_timeout
@@ -653,6 +659,8 @@ class IsolatedContext:
             'app_trusted': self.app_trusted,
             'charm_root': None if self.charm_root is None else str(self.charm_root),
             'mocking': self._mocking,
+            'filesystem_root': None if self.filesystem_root is None else str(self.filesystem_root),
+            'workload_root': None if self.workload_root is None else str(self.workload_root),
             'secret_seed': secret_seed,
             'event': _isolated_serde.encode_event(event),
             'state_in': state._to_json(),

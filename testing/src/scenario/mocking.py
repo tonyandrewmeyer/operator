@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import datetime
 import io
+import os
 import shutil
 import uuid
 from collections.abc import Mapping
@@ -813,8 +814,12 @@ class _MockPebbleClient(_TestingPebbleClient):
         self._context = context
         self._container_name = container_name
 
+        if context._workload_root is not None:
+            # Under Juju, the container's filesystem belongs to the unit and
+            # lasts as long as it does, so it's kept from one run to the next.
+            self._keep_filesystem(container_root, mounts, state, context, container_name)
         # wipe just in case
-        if container_root.exists():
+        elif container_root.exists():
             if any(container_root.iterdir()):
                 logger.warning(
                     'Container %r has a non-empty filesystem that will be wiped before this run.'
@@ -826,13 +831,14 @@ class _MockPebbleClient(_TestingPebbleClient):
             # Path.rmdir will fail if root is nonempty
             shutil.rmtree(container_root)
 
-        # initialize simulated filesystem
-        container_root.mkdir(parents=True)
-        for mount in mounts.values():
-            path = Path(mount.location).parts
-            mounting_dir = container_root.joinpath(*path[1:])
-            mounting_dir.parent.mkdir(parents=True, exist_ok=True)
-            mounting_dir.symlink_to(mount.source)
+        if context._workload_root is None:
+            # initialize simulated filesystem
+            container_root.mkdir(parents=True)
+            for mount in mounts.values():
+                path = Path(mount.location).parts
+                mounting_dir = container_root.joinpath(*path[1:])
+                mounting_dir.parent.mkdir(parents=True, exist_ok=True)
+                mounting_dir.symlink_to(mount.source)
 
         self._root = container_root
 
@@ -878,6 +884,49 @@ class _MockPebbleClient(_TestingPebbleClient):
                 )
                 assert check.change_id is not None
                 self._changes[check.change_id] = change
+
+    @staticmethod
+    def _keep_filesystem(
+        container_root: Path,
+        mounts: Mapping[str, Mount],
+        state: State,
+        context: Context[Any],
+        container_name: str,
+    ):
+        """Prepare a container filesystem that is kept from one run to the next.
+
+        The test's mounts are linked in on every run, as are the storage
+        mounts that the charm's metadata declares for the container, which
+        Juju would mount there. Anything else in the container is left as the
+        last run left it.
+        """
+        container_root.mkdir(parents=True, exist_ok=True)
+        sources: dict[str, Path] = {}
+        containers = cast('dict[str, Any]', context._charm_spec.meta.get('containers') or {})
+        container_meta = cast('dict[str, Any]', containers.get(container_name) or {})
+        for mount in cast('list[dict[str, str]]', container_meta.get('mounts') or []):
+            location = mount.get('location')
+            storage = next((s for s in state.storages if s.name == mount.get('storage')), None)
+            if location and storage is not None:
+                sources[location] = context._get_storage_root(storage.name, storage.index)
+        for mount in mounts.values():
+            sources[str(mount.location)] = Path(mount.source)
+        for location, source in sources.items():
+            mounting_dir = container_root.joinpath(*Path(location).parts[1:])
+            if mounting_dir.is_symlink():
+                if Path(os.readlink(mounting_dir)) == source:
+                    continue
+                mounting_dir.unlink()
+            elif mounting_dir.exists():
+                # Something the charm put there before the mount existed.
+                logger.warning(
+                    'Container %r already has %s, so the mount there is left out.',
+                    container_name,
+                    location,
+                )
+                continue
+            mounting_dir.parent.mkdir(parents=True, exist_ok=True)
+            mounting_dir.symlink_to(source)
 
     def get_plan(self) -> pebble.Plan:
         return self._container.plan

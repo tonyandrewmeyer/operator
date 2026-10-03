@@ -42,6 +42,11 @@ A request dict has the keys:
 - ``app_trusted`` (``bool``), ``charm_root`` (``str | None``): as for ``Context``.
 - ``mocking`` (``dict | None``): the keyword arguments for the charm's own
   mocking; ``None`` runs the charm with no mocking at all.
+- ``workload_root`` (``str | None``, optional): the directory that keeps the
+  unit's container and storage filesystems between dispatches; ``None``
+  leaves them in the ``Context``'s own temporary directory, wiped on each run.
+- ``filesystem_root`` (``str | None``, optional): the unit's own filesystem
+  root, for the filesystem default; ``None`` leaves file access alone.
 - ``secret_seed`` (``str | None``, optional): makes the IDs of the secrets the
   charm creates depend only on this string; ``None`` leaves them random.
 - ``event`` (``str``): the JSON wire form of the input ``_Event``.
@@ -194,7 +199,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context, State, _charm_mocking, _isolated_serde
+    from scenario import Context, State, _charm_mocking, _isolated_serde, _unit_filesystem
     from scenario.errors import UncaughtCharmError
 
     charm_source = request['charm_source']
@@ -239,13 +244,24 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         charm_root=request['charm_root'],
     )
     ctx._wrap_charm_errors = True
+    if request.get('workload_root') is not None:
+        ctx._workload_root = pathlib.Path(request['workload_root'])
     try:
-        with _secret_ids(request.get('secret_seed')):
+        with (
+            # Juju runs every hook in the unit's charm directory.
+            _unit_filesystem.working_directory(request['charm_root']),
+            _secret_ids(request.get('secret_seed')),
+        ):
             if mocking is None:
                 state_out = ctx.run(event, state_in)
             else:
                 unit_name = f'{request["app_name"]}/{request["unit_id"]}'
-                with mocking.dispatching(unit_name, state_in.model.name):
+                with mocking.dispatching(
+                    unit_name,
+                    state_in.model.name,
+                    filesystem_root=request.get('filesystem_root'),
+                    allow=_unit_filesystem.framework_paths(ctx, state_in),
+                ):
                     state_out = ctx.run(event, state_in)
     except UncaughtCharmError as e:
         return {'error': _charm_traceback(e), 'hook_failed': True}

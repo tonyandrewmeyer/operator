@@ -184,6 +184,92 @@ def charm_read_only_properties() -> frozenset[str]:
     )
 
 
+# What a test file means by these names when it uses one and imports nothing
+# that binds it. Every name here is one the extraction prompt's own example
+# imports, or the standard library's.
+_KNOWN_IMPORTS = {
+    "ops": "import ops",
+    "testing": "from ops import testing",
+    "pytest": "import pytest",
+    "os": "import os",
+    "pathlib": "import pathlib",
+    "Path": "from pathlib import Path",
+}
+
+
+def add_missing_imports(source: str, donor: str | None = None) -> tuple[str, list[str]]:
+    """`source` with an import added for each name it uses and never binds,
+    where the import is known, and the lines added.
+
+    The re-ask's answer sometimes fixes everything it was told about and
+    returns a test with no `import ops` or `from ops import testing` (3 of
+    18 re-asks, `spike-step-5/static-retry/RESULT.md` §11). The re-ask is
+    bounded at one, so the check catching it lost the test. A name that is
+    used and bound nowhere is a `NameError` whatever it was meant to be, so
+    adding the import cannot break a test that would have worked.
+
+    The import comes from `donor` (the first answer's test file) when it
+    has one binding the name, otherwise from `_KNOWN_IMPORTS`. Names neither
+    knows are left for the check to report.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source, []
+    missing = _undefined_name_lines(tree)
+    if not missing:
+        return source, []
+    donated = _import_lines_by_name(donor)
+    added = []
+    for name in missing:
+        line = donated.get(name) or _KNOWN_IMPORTS.get(name)
+        if line is not None and line not in added:
+            added.append(line)
+    if not added:
+        return source, []
+    # After a module docstring and any `from __future__` import, which
+    # have to come first.
+    at = 0
+    for node in tree.body:
+        is_docstring = (
+            node is tree.body[0]
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        if is_docstring or (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
+            at = node.end_lineno or at
+            continue
+        break
+    lines = source.splitlines(keepends=True)
+    block = "".join(f"{line}\n" for line in added)
+    return "".join(lines[:at]) + block + "".join(lines[at:]), added
+
+
+def _import_lines_by_name(source: str | None) -> dict[str, str]:
+    """{name: an import statement binding only that name}, for each
+    module-level import in `source`."""
+    if not source:
+        return {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    found: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = (alias.asname or alias.name).split(".")[0]
+                found.setdefault(name, ast.unparse(ast.Import(names=[alias])))
+        elif isinstance(node, ast.ImportFrom) and node.module != "__future__":
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                statement = ast.ImportFrom(module=node.module, names=[alias], level=node.level)
+                found.setdefault(alias.asname or alias.name, ast.unparse(statement))
+    return found
+
+
 def check_commands(commands: list[str]) -> StaticCheckResult | None:
     """Check the test file a heredoc in `commands[]` writes, or `None` when
     there is none (nothing to check: the synthesiser may still write one)."""
@@ -389,6 +475,15 @@ def _undefined_names(tree: ast.Module) -> list[str]:
     loose about scope (a binding anywhere counts), so it only fires on a
     name that cannot resolve at all: a missing import is a `NameError` at
     import time, never a reproduction."""
+    return [
+        f"line {line}: `{name}` is used but never imported or defined"
+        for name, line in _undefined_name_lines(tree).items()
+    ]
+
+
+def _undefined_name_lines(tree: ast.Module) -> dict[str, int]:
+    """{name: first line it is read on}, for `_undefined_names()`, in line
+    order; empty when the file has a `*` import."""
     bound: set[str] = set(dir(builtins)) | _MODULE_DUNDERS
     loads: dict[str, int] = {}
     for node in ast.walk(tree):
@@ -400,7 +495,7 @@ def _undefined_names(tree: ast.Module) -> list[str]:
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 if alias.name == "*":
-                    return []
+                    return {}
                 bound.add((alias.asname or alias.name).split(".")[0])
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bound.add(node.name)
@@ -414,11 +509,11 @@ def _undefined_names(tree: ast.Module) -> list[str]:
             bound.add(node.name)
         elif isinstance(node, ast.MatchMapping) and node.rest:
             bound.add(node.rest)
-    return [
-        f"line {line}: `{name}` is used but never imported or defined"
+    return {
+        name: line
         for name, line in sorted(loads.items(), key=lambda item: item[1])
         if name not in bound
-    ]
+    }
 
 
 def _context_attributes(tree: ast.Module) -> list[str]:

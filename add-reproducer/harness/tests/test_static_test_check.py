@@ -24,8 +24,8 @@ from extraction import Extractor
 from extraction_record import build as build_record
 from extraction_record import render as render_record
 from inscope_second_pass import TwoPassExtractor
-from models import Hypothesis, Issue, StaticCheckResult
-from static_test_check import check, check_commands
+from models import Hypothesis, Issue, StaticCheckResult, embedded_test_file, replace_embedded_test_body
+from static_test_check import add_missing_imports, check, check_commands
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 CORPUS = FIXTURES / "static_test_check"
@@ -348,6 +348,46 @@ def test_the_testing_rule_is_off_when_ops_cannot_be_imported(monkeypatch):
     assert check(body).passed
 
 
+def test_missing_imports_are_added_from_the_known_list():
+    body = "captured = {}\n\ndef test_x():\n    ctx = testing.Context(ops.CharmBase)\n"
+    repaired, added = add_missing_imports(body)
+    assert added == ["from ops import testing", "import ops"]
+    assert repaired.startswith("from ops import testing\nimport ops\ncaptured = {}\n")
+    assert check(repaired).passed
+
+
+def test_missing_imports_prefer_the_donor_s_spelling():
+    donor = "import ops\nfrom ops import testing as t\nimport pytest\n"
+    _, added = add_missing_imports("def test_x():\n    t.State()\n    pytest.fail()\n", donor)
+    assert added == ["from ops import testing as t", "import pytest"]
+
+
+def test_an_unknown_missing_name_is_left_for_the_check():
+    body = "def test_x():\n    assert helper() and os.sep\n"
+    repaired, added = add_missing_imports(body)
+    assert added == ["import os"]
+    (reason,) = check(repaired).reasons
+    assert "`helper` is used but never imported" in reason
+
+
+def test_missing_imports_go_after_a_docstring_and_future_import():
+    body = '"""Doc."""\nfrom __future__ import annotations\n\ndef test_x():\n    os.sep\n'
+    repaired, _ = add_missing_imports(body)
+    assert repaired.splitlines()[:3] == ['"""Doc."""', "from __future__ import annotations", "import os"]
+
+
+@pytest.mark.parametrize("body", [_HEADER + "def test_x():\n    os.sep\n", "def test_x(:\n"])
+def test_nothing_is_added_when_nothing_is_missing_or_it_does_not_parse(body):
+    assert add_missing_imports(body) == (body, [])
+
+
+def test_replace_embedded_test_body_keeps_the_heredoc():
+    commands = ["uv init --bare .", "cat > test_x.py << 'PYEOF'\nold\nPYEOF", "uv run pytest"]
+    replaced = replace_embedded_test_body(commands, "new\nbody")
+    assert replaced == ["uv init --bare .", "cat > test_x.py << 'PYEOF'\nnew\nbody\nPYEOF", "uv run pytest"]
+    assert embedded_test_file(replaced).body == "new\nbody"
+
+
 def test_no_embedded_test_file_is_not_checked():
     assert check_commands(["uv init --bare .", "uv run pytest test_x.py"]) is None
 
@@ -479,6 +519,43 @@ def test_retry_hints_are_off_when_ops_cannot_be_introspected(monkeypatch):
     assert static_test_check.retry_hints(missing) == []
 
 
+_NO_IMPORTS_BODY = _VALID_BODY.replace("import ops\nfrom ops import testing\n", "")
+
+
+def test_a_first_answer_missing_only_imports_is_repaired_not_re_asked():
+    llm = _ScriptedLLM([_extraction(_NO_IMPORTS_BODY)])
+    extractor = Extractor(llm)
+    hypothesis = extractor.extract(_issue())
+    assert len(llm.prompts) == 1
+    (only,) = extractor.last_test_checks
+    assert only.passed
+    assert only.added_imports == ["import ops", "from ops import testing"]
+    # The runner gets the file that was checked.
+    assert embedded_test_file(hypothesis.commands).body.startswith(
+        "import ops\nfrom ops import testing\nimport os\n"
+    )
+
+
+def test_a_re_ask_that_drops_its_imports_gets_the_first_answer_s_back():
+    def spell_os(body):
+        return body.replace("import os\n", "import os as system\n").replace("os.getcwd", "system.getcwd")
+
+    first = spell_os(_INVALID_BODY)
+    second = spell_os(_VALID_BODY).replace("import os as system\nimport ops\nfrom ops import testing\n", "")
+    llm = _ScriptedLLM([_extraction(first), _extraction(second)])
+    extractor = Extractor(llm)
+    hypothesis = extractor.extract(_issue())
+    assert len(llm.prompts) == 2
+    first_check, second_check = extractor.last_test_checks
+    assert not first_check.passed and first_check.added_imports == []
+    assert second_check.passed
+    # `system` is only knowable from the first answer.
+    assert second_check.added_imports == ["import ops", "import os as system", "from ops import testing"]
+    assert "import os as system\n" in embedded_test_file(hypothesis.commands).body
+    record = build_record(2045, extractor=extractor, hypothesis=hypothesis, llm=llm)
+    assert "    + added `import os as system`" in render_record(record)
+
+
 def test_two_failures_keep_the_second_and_stop():
     second = _INVALID_BODY.replace("str(ctx.charm_dir)", "ctx.charm.cwd")
     llm = _ScriptedLLM([_extraction(_INVALID_BODY), _extraction(second)])
@@ -545,7 +622,7 @@ def test_the_record_for_a_passing_first_answer():
     test_check = build_record(2045, extractor=extractor, hypothesis=hypothesis, llm=llm)["test_check"]
     assert test_check == {
         "ran": True,
-        "checks": [{"path": "test_cwd.py", "passed": True, "reasons": []}],
+        "checks": [{"path": "test_cwd.py", "passed": True, "reasons": [], "added_imports": []}],
         "retried": False,
         "both_failed": False,
     }

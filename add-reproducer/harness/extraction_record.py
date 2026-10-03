@@ -178,6 +178,7 @@ def render(record: dict) -> list[str]:
         for index, check in enumerate(test_check.get("checks") or [], start=1):
             verdict = "passed" if check.get("passed") else "failed"
             lines.append(f"  test check {index}: {verdict} ({check.get('path')})")
+            lines.extend(f"    + added `{line}`" for line in check.get("added_imports") or [])
             lines.extend(f"    - {reason}" for reason in check.get("reasons") or [])
         lines.append(
             f"  test check: retried={test_check.get('retried')} "

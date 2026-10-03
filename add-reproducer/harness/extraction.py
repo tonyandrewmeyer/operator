@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import static_test_check
 from filter_stage import extract_ci_run_url
-from models import Hypothesis, Issue, StaticCheckResult
+from models import (
+    Hypothesis,
+    Issue,
+    StaticCheckResult,
+    embedded_test_file,
+    replace_embedded_test_body,
+)
 from seams.llm import LLMSeam
 
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
@@ -399,6 +405,7 @@ class Extractor:
         first_check = self._check(hypothesis)
         if first_check is None or first_check.passed:
             return hypothesis
+        first_test = embedded_test_file(hypothesis.commands)
         reasons = "\n".join(f"- {reason}" for reason in first_check.reasons)
         hints = "".join(f"\n{hint}\n" for hint in static_test_check.retry_hints(first_check))
         self.last_test_retried = True
@@ -408,7 +415,7 @@ class Extractor:
             {"issue_number": issue.number, "retry_after": "static test check failed"},
         )
         # Checked for the record only: the answer is kept either way.
-        self._check(retried)
+        self._check(retried, donor=first_test.body if first_test else None)
         return retried
 
     def _extract_once(self, issue: Issue, prompt: str, context: dict) -> Hypothesis:
@@ -420,12 +427,22 @@ class Extractor:
         hypothesis.moving_parts.ci_run_url = extract_ci_run_url(issue.body)
         return hypothesis
 
-    def _check(self, hypothesis: Hypothesis) -> StaticCheckResult | None:
+    def _check(self, hypothesis: Hypothesis, donor: str | None = None) -> StaticCheckResult | None:
+        """Add any missing imports the harness can supply to the embedded
+        test file (from `donor`, the first answer's test, when there is one),
+        then check it. The imports go into `hypothesis.commands`, so the
+        runner and the composer see the file that was checked."""
         if not hypothesis.in_scope:
             return None
-        result = static_test_check.check_commands(hypothesis.commands)
-        if result is not None:
-            self.last_test_checks.append(result)
+        test_file = embedded_test_file(hypothesis.commands)
+        if test_file is None:
+            return None
+        body, added = static_test_check.add_missing_imports(test_file.body, donor)
+        if added:
+            hypothesis.commands = replace_embedded_test_body(hypothesis.commands, body)
+        result = static_test_check.check(body, path=test_file.path)
+        result.added_imports = added
+        self.last_test_checks.append(result)
         return result
 
     @staticmethod

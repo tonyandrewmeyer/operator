@@ -257,6 +257,18 @@ def embedded_test_file(commands: list[str]) -> "TestFile | None":
     return None
 
 
+def replace_embedded_test_body(commands: list[str], body: str) -> list[str]:
+    """`commands` with the body of the heredoc `embedded_test_file()` reads
+    replaced by `body`; unchanged if there is no such heredoc."""
+    out = list(commands)
+    for i, command in enumerate(out):
+        match = _HEREDOC_RE.search(command)
+        if match:
+            out[i] = command[: match.start("body")] + body + command[match.end("body") :]
+            break
+    return out
+
+
 @dataclass
 class StaticCheckResult:
     """`static_test_check.check()`'s verdict on an embedded test file.
@@ -269,9 +281,17 @@ class StaticCheckResult:
     path: str | None
     passed: bool
     reasons: list[str] = field(default_factory=list)
+    # Import lines the harness added before checking, for names the file
+    # used and never imported (`static_test_check.add_missing_imports()`).
+    added_imports: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"path": self.path, "passed": self.passed, "reasons": list(self.reasons)}
+        return {
+            "path": self.path,
+            "passed": self.passed,
+            "reasons": list(self.reasons),
+            "added_imports": list(self.added_imports),
+        }
 
 
 @dataclass

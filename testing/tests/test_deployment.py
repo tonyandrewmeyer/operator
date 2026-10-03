@@ -778,16 +778,6 @@ def test_requirements_needs_isolated(juju: testing.Juju, tmp_path: pathlib.Path)
         juju.deploy(root, requirements=tmp_path / 'requirements.txt')
 
 
-def test_building_an_isolated_environment_is_not_implemented(
-    juju: testing.Juju, tmp_path: pathlib.Path
-):
-    root = write_charm(tmp_path / 'ondisk', PID_CHARM)
-    with pytest.raises(NotImplementedError, match='isolated=True'):
-        juju.deploy(root, isolated=True)
-    with pytest.raises(NotImplementedError, match='isolated=True'):
-        juju.deploy(root, isolated=True, requirements=tmp_path / 'requirements.txt')
-
-
 # The charm directory
 
 

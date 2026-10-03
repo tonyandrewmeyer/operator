@@ -321,8 +321,11 @@ def test_remove_unit_kubernetes_scales_down_by_count(juju: testing.Juju):
     juju.settle()
     juju.remove_unit(app, num_units=1)
     trace = juju.settle()
+    # The departing unit leaves its peer relation before it stops.
     assert [(d.event.name, d.unit.id) for d in trace] == [
         ('replicas_relation_departed', 0),
+        ('replicas_relation_departed', 1),
+        ('replicas_relation_broken', 1),
         ('stop', 1),
         ('remove', 1),
     ]
@@ -352,8 +355,11 @@ def test_remove_unit_machine_removes_the_named_unit(machine_juju: testing.Juju):
     machine_juju.settle()
     machine_juju.remove_unit(app.units[1])
     trace = machine_juju.settle()
+    # The departing unit leaves its peer relation before it stops.
     assert [(d.event.name, d.unit.id) for d in trace] == [
         ('replicas_relation_departed', 0),
+        ('replicas_relation_departed', 1),
+        ('replicas_relation_broken', 1),
         ('stop', 1),
         ('remove', 1),
     ]
@@ -451,9 +457,9 @@ def test_settle_raises_when_juju_does_not_converge(juju: testing.Juju):
 def test_reading_state_does_not_dispatch_anything(juju: testing.Juju):
     """Reading Unit.state never runs charm code; the queue is untouched."""
     app = deploy_mycharm(juju)
-    queued = len(juju._state.queue)
+    queued = juju._state.pending()
     assert app.leader.state.unit_status == testing.UnknownStatus()
-    assert len(juju._state.queue) == queued
+    assert juju._state.pending() == queued
 
 
 def test_settle_returns_the_dispatch_trace(juju: testing.Juju):

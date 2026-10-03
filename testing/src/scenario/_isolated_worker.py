@@ -42,6 +42,8 @@ A request dict has the keys:
 - ``app_trusted`` (``bool``), ``charm_root`` (``str | None``): as for ``Context``.
 - ``mocking`` (``dict | None``): the keyword arguments for the charm's own
   mocking; ``None`` runs the charm with no mocking at all.
+- ``secret_seed`` (``str | None``, optional): makes the IDs of the secrets the
+  charm creates depend only on this string; ``None`` leaves them random.
 - ``event`` (``str``): the JSON wire form of the input ``_Event``.
 - ``state_in`` (``str``): the JSON wire form of the input ``State``.
 
@@ -61,6 +63,7 @@ runtime dependencies may differ.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -68,10 +71,47 @@ import os
 import pathlib
 import sys
 import traceback
+import unittest.mock
+from collections.abc import Generator
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     from ops import CharmBase
+
+
+#: The alphabet of a Juju secret ID: an xid, 20 characters of base32hex.
+_XID_ALPHABET = '0123456789abcdefghijklmnopqrstuv'
+
+
+@contextlib.contextmanager
+def _secret_ids(seed: str | None) -> Generator[None]:
+    """Make the IDs of secrets created inside the block depend only on ``seed``.
+
+    Scenario gives a new secret a random ID. Under ``Juju`` that would make
+    the final ``State`` differ from run to run, so each dispatch passes a
+    seed, and the n-th secret it creates gets an ID derived from the seed and
+    n. ``None`` leaves the IDs random.
+    """
+    if seed is None:
+        yield
+        return
+    from scenario import state
+
+    count = 0
+
+    def generate() -> str:
+        nonlocal count
+        digest = hashlib.sha256(f'{seed}/{count}'.encode()).digest()
+        count += 1
+        value = int.from_bytes(digest[:13], 'big')
+        chars: list[str] = []
+        for _ in range(20):
+            value, index = divmod(value, len(_XID_ALPHABET))
+            chars.append(_XID_ALPHABET[index])
+        return f'secret:{"".join(chars)}'
+
+    with unittest.mock.patch.object(state, '_generate_secret_id', generate):
+        yield
 
 
 def _load_charm_type(charm_source: pathlib.Path, module_name: str = 'charm') -> type[CharmBase]:
@@ -196,12 +236,13 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         app_trusted=request['app_trusted'],
         charm_root=request['charm_root'],
     )
-    if mocking is None:
-        state_out = ctx.run(event, state_in)
-    else:
-        unit_name = f'{request["app_name"]}/{request["unit_id"]}'
-        with mocking.dispatching(unit_name, state_in.model.name):
+    with _secret_ids(request.get('secret_seed')):
+        if mocking is None:
             state_out = ctx.run(event, state_in)
+        else:
+            unit_name = f'{request["app_name"]}/{request["unit_id"]}'
+            with mocking.dispatching(unit_name, state_in.model.name):
+                state_out = ctx.run(event, state_in)
     return {'state_out': state_out._to_json()}
 
 

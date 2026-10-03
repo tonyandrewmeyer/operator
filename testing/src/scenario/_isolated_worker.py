@@ -42,6 +42,8 @@ A request dict has the keys:
 - ``app_trusted`` (``bool``), ``charm_root`` (``str | None``): as for ``Context``.
 - ``mocking`` (``dict | None``): the keyword arguments for the charm's own
   mocking; ``None`` runs the charm with no mocking at all.
+- ``filesystem_root`` (``str | None``, optional): the unit's own filesystem
+  root, for the filesystem default; ``None`` leaves file access alone.
 - ``secret_seed`` (``str | None``, optional): makes the IDs of the secrets the
   charm creates depend only on this string; ``None`` leaves them random.
 - ``event`` (``str``): the JSON wire form of the input ``_Event``.
@@ -193,7 +195,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context, State, _charm_mocking, _isolated_serde
+    from scenario import Context, State, _charm_mocking, _isolated_serde, _unit_filesystem
 
     charm_source = request['charm_source']
     mocking_key = f'mocking:{charm_source}'
@@ -241,7 +243,12 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
             state_out = ctx.run(event, state_in)
         else:
             unit_name = f'{request["app_name"]}/{request["unit_id"]}'
-            with mocking.dispatching(unit_name, state_in.model.name):
+            with mocking.dispatching(
+                unit_name,
+                state_in.model.name,
+                filesystem_root=request.get('filesystem_root'),
+                allow=_unit_filesystem.framework_paths(ctx, state_in),
+            ):
                 state_out = ctx.run(event, state_in)
     return {'state_out': state_out._to_json()}
 

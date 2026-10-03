@@ -407,6 +407,8 @@ def test_retry_hints_only_for_a_missing_context_attribute():
     (hint,) = static_test_check.retry_hints(missing)
     assert "`emitted_events`" in hint
     assert "`_" not in hint
+    # Listed bare, `charm_root` invited a test comparing the cwd with `None`.
+    assert "`None` when none was passed" in hint
 
 
 def test_retry_hints_are_off_when_ops_cannot_be_introspected(monkeypatch):

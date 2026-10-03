@@ -531,11 +531,13 @@ def test_a_failed_check_is_retried_once_with_the_reasons():
 def test_a_missing_context_attribute_retry_lists_the_ones_there_are():
     llm = _ScriptedLLM([_extraction(_INVALID_BODY), _extraction(_VALID_BODY)])
     Extractor(llm).extract(_issue())
-    hint = "The public attributes of `testing.Context` are, in full:"
+    hint = "The `testing.Context` attributes a test can use are:"
     assert hint not in llm.prompts[0]
     retry = llm.prompts[1]
     assert hint in retry
-    assert "`charm_root`" in retry and "`run`" in retry
+    assert "`emitted_events`" in retry and "`run`" in retry
+    # Listed, it was read as the charm's directory (RESULT.md §8-§13).
+    assert "charm_root" not in retry.split(hint, 1)[1]
     # The reasons come first, then the hint, then the instruction.
     assert retry.index("does not have") < retry.index(hint) < retry.index("Return the whole")
 
@@ -553,8 +555,7 @@ def test_retry_hints_only_for_a_missing_context_attribute():
     (hint,) = static_test_check.retry_hints(missing)
     assert "`emitted_events`" in hint
     assert "`_" not in hint
-    # Listed bare, `charm_root` invited a test comparing the cwd with `None`.
-    assert "`None` when none was passed" in hint
+    assert "charm_root" not in hint
 
 
 def test_retry_hints_are_off_when_ops_cannot_be_introspected(monkeypatch):

@@ -17,6 +17,7 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
+from scenario import _charm_mocking
 
 import ops
 from ops import testing
@@ -432,7 +433,7 @@ def test_the_defaults_keep_the_charm_off_the_host(tmp_path: pathlib.Path, isolat
     assert result['system'] == 0
     assert result['hostname'] == 'probe-1'
     assert result['fqdn'] == 'probe-1.mymodel'
-    assert result['address'] == '192.0.2.0'
+    assert result['address'] == _charm_mocking.unit_address('mymodel', 'probe/1')
     assert result['home'] is None
     assert result['unit'] == 'probe/1'
     assert '127.0.0.1:9' in result['network']

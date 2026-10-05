@@ -67,11 +67,14 @@ from ._isolation import IsolatedContext, _HookFailedError, _load_charm_spec
 from .context import _DEFAULT_JUJU_VERSION, Context
 from .errors import IsolationError, JujuError, MetadataNotFoundError, UncaughtCharmError
 from .state import (
+    Address,
+    BindAddress,
     CharmType,
     CloudSpec,
     Container,
     ErrorStatus,
     Model,
+    Network,
     PeerRelation,
     RawDataBagContents,
     Relation,
@@ -1539,7 +1542,9 @@ class Juju:
         for end in integration.ends:
             for unit in end.app._live_units:
                 view = self._relation_view(integration, end.app)
-                unit._state = _with_relation(unit._state, view)
+                unit._state = self._with_addresses(
+                    end.app, unit.id, _with_relation(unit._state, view)
+                )
         for end in integration.ends:
             for unit in end.app._live_units:
                 view = _relation_by_id(unit._state, integration.id)
@@ -2093,7 +2098,7 @@ class Juju:
             for secret in leader_state.secrets:
                 if secret.owner == 'app' and secret.id not in template_ids:
                     secrets.append(secret)
-        return dataclasses.replace(
+        state = dataclasses.replace(
             app._state_template,
             config=dict(app._config),
             relations=frozenset(relations),
@@ -2102,6 +2107,51 @@ class Juju:
             leader=unit_id == app._leader_id,
             model=self._as_model(),
             planned_units=len(app._units) + 1,
+        )
+        return self._with_addresses(app, unit_id, state)
+
+    def _with_addresses(self, app: App, unit_id: int, state: State) -> State:
+        """Fill in the addresses Juju gives a unit: its networks, and what it writes to relations.
+
+        Each binding the test's template doesn't set gets a network with the
+        unit's own address, derived from the model and unit names (and agreeing
+        with the hostname default). Juju writes ``ingress-address``,
+        ``egress-subnets`` and ``private-address`` into each of the unit's
+        relation databags, from the network for that relation's endpoint.
+        """
+        address = _charm_mocking.unit_address(self.name, f'{app.name}/{unit_id}')
+        networks = {n.binding_name: n for n in state.networks}
+        for binding in _bindings(app._metadata):
+            if binding not in networks:
+                networks[binding] = Network(
+                    binding,
+                    [BindAddress([Address(address)])],
+                    ingress_addresses=[address],
+                    egress_subnets=[f'{address}/32'],
+                )
+        relations: list[RelationBase] = []
+        for relation in state.relations:
+            network = networks.get(relation.endpoint)
+            if network is None:
+                relations.append(relation)
+                continue
+            bind: Sequence[Address] = (
+                network.bind_addresses[0].addresses if network.bind_addresses else []
+            )
+            written: dict[str, str] = {
+                'egress-subnets': ','.join(network.egress_subnets),
+                'ingress-address': network.ingress_addresses[0]
+                if network.ingress_addresses
+                else address,
+                'private-address': str(bind[0].value) if bind else address,
+            }
+            if any(relation.local_unit_data.get(k) != v for k, v in written.items()):
+                relation = dataclasses.replace(
+                    relation, local_unit_data={**relation.local_unit_data, **written}
+                )
+            relations.append(relation)
+        return dataclasses.replace(
+            state, networks=frozenset(networks.values()), relations=frozenset(relations)
         )
 
     def _drop_peer(self, app: App, unit_id: int) -> None:
@@ -2406,6 +2456,25 @@ class Juju:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _bindings(metadata: Mapping[str, Any]) -> list[str]:
+    """Every network binding a charm has.
+
+    That's its endpoints other than subordinate ones, its extra bindings, and
+    ``juju-info``.
+    """
+    bindings = {'juju-info'}
+    for kind in ('requires', 'provides', 'peers'):
+        endpoints = cast('Mapping[str, Any]', metadata.get(kind) or {})
+        for endpoint, spec in endpoints.items():
+            scope = (
+                cast('Mapping[str, Any]', spec).get('scope') if isinstance(spec, Mapping) else None
+            )
+            if scope != 'container':
+                bindings.add(endpoint)
+    bindings.update(metadata.get('extra-bindings') or {})
+    return sorted(bindings)
 
 
 def _class_sources(charm_type: type[Any]) -> list[pathlib.Path]:

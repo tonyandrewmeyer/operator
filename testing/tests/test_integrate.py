@@ -11,6 +11,7 @@ import sys
 from typing import Any, cast
 
 import pytest
+from scenario import _charm_mocking
 from scenario._deployment import Juju
 
 import ops
@@ -876,3 +877,48 @@ def test_user_secret_errors(juju: testing.Juju):
         juju.update_secret('nope', {'k': 'v'})
     with pytest.raises(testing.errors.JujuError, match='needs some content'):
         juju.add_secret('b', {})
+
+
+# Addresses
+
+
+def test_each_unit_has_its_own_address_in_relation_data_and_networks(juju: testing.Juju):
+    prov = juju.deploy(provider(), num_units=2)
+    req = juju.deploy(requirer())
+    juju.integrate(prov, req)
+    juju.settle()
+    seen = relation(req.leader).remote_units_data
+    addresses = {
+        unit_id: _charm_mocking.unit_address(juju.name, f'provider/{unit_id}')
+        for unit_id in (0, 1)
+    }
+    assert addresses[0] != addresses[1]
+    for unit_id, address in addresses.items():
+        assert seen[unit_id]['ingress-address'] == address
+        assert seen[unit_id]['private-address'] == address
+        assert seen[unit_id]['egress-subnets'] == f'{address}/32'
+    (network,) = [n for n in prov.units[1].state.networks if n.binding_name == 'db']
+    assert network.ingress_addresses == [addresses[1]]
+
+
+def test_a_template_network_is_what_juju_writes_to_relation_data(juju: testing.Juju):
+    template = testing.State(
+        networks={
+            testing.Network(
+                'db',
+                [testing.BindAddress([testing.Address('192.0.2.7')])],
+                ingress_addresses=['203.0.113.7'],
+                egress_subnets=['203.0.113.0/24'],
+            )
+        }
+    )
+    prov = juju.deploy(provider(), state_template=template)
+    req = juju.deploy(requirer())
+    juju.integrate(prov, req)
+    juju.settle()
+    assert relation(req.leader).remote_units_data[0] == {
+        'name': 'provider/0',
+        'ingress-address': '203.0.113.7',
+        'private-address': '192.0.2.7',
+        'egress-subnets': '203.0.113.0/24',
+    }

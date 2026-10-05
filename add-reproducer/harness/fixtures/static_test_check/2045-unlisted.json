@@ -1,0 +1,72 @@
+[
+ {
+  "label": "unlisted",
+  "run": 11,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    expected_path = str(ctx.charm_spec.charm_dir)\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == expected_path\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    expected_path = str(ctx.charm_spec.charm_dir)\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == expected_path"
+  },
+  "retried": true,
+  "checks": [
+   {
+    "path": "test_cwd.py",
+    "passed": false,
+    "reasons": [
+     "line 18: the test accesses `ctx.charm_dir`, which `testing.Context` does not have"
+    ],
+    "added_imports": []
+   },
+   {
+    "path": "test_cwd.py",
+    "passed": true,
+    "reasons": [],
+    "added_imports": []
+   }
+  ],
+  "calls": 2,
+  "cost": 0.0029072
+ },
+ {
+  "label": "unlisted",
+  "run": 14,
+  "in_scope": true,
+  "confidence": "high",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == str(ctx.charm_spec.charm_dir)\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == str(ctx.charm_spec.charm_dir)"
+  },
+  "retried": true,
+  "checks": [
+   {
+    "path": "test_cwd.py",
+    "passed": false,
+    "reasons": [
+     "line 16: the test accesses `ctx.charm_dir`, which `testing.Context` does not have"
+    ],
+    "added_imports": []
+   },
+   {
+    "path": "test_cwd.py",
+    "passed": true,
+    "reasons": [],
+    "added_imports": []
+   }
+  ],
+  "calls": 2,
+  "cost": 0.00288673
+ }
+]

@@ -313,6 +313,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _module_level_run(tree, context_names)
     reasons += _undefined_names(tree)
     reasons += _context_attributes(tree)
+    reasons += _attribute_chains(tree)
     reasons += _testing_names(tree)
     reasons += _unset_charm_root(tree)
     reasons += _charm_assigns_read_only_property(tree)
@@ -555,6 +556,474 @@ def _context_attributes(tree: ast.Module) -> list[str]:
                     f"line {node.lineno}: the test accesses `{node.value.id}.{node.attr}`, "
                     f"{_NO_SUCH_CONTEXT_ATTRIBUTE}"
                 )
+    return list(dict.fromkeys(reasons))
+
+
+# -- attribute chains ------------------------------------------------------
+#
+# `ctx.charm_spec.charm_dir` passes `_context_attributes()`, which only looks
+# one attribute deep: `charm_spec` is a real `Context` attribute, and the
+# `AttributeError` is one level down (2 of 14 re-asks,
+# `spike-step-5/static-retry/RESULT.md` §14). These helpers follow such a
+# chain through the types the installed `ops` declares, and give up, which
+# lets the test through, at the first step whose type is not certain.
+
+
+def _resolve_annotation(annotation: object, namespace: dict, _depth: int = 0) -> type | None:
+    """The one class an annotation means, or `None` if it is not exactly one.
+
+    `Optional[X]` and `X | None` are `X` (a `None` fails on any attribute
+    anyway). `Any`, other unions, type variables, `type[...]`, `Literal`, a
+    string that does not evaluate, and an abstract class or protocol (the
+    value may be any concrete class that implements it) are all `None`. A
+    generic class is its origin: its attributes do not depend on the type
+    arguments.
+    """
+    import types
+    import typing
+
+    if isinstance(annotation, typing.ForwardRef):
+        annotation = annotation.__forward_arg__
+    if isinstance(annotation, str):
+        try:
+            annotation = eval(annotation, dict(namespace))  # noqa: S307 - ops's own annotations.
+        except Exception:
+            return None
+        # A quoted annotation under `from __future__ import annotations` is
+        # a string of a string.
+        if isinstance(annotation, str):
+            return _resolve_annotation(annotation, namespace, _depth + 1) if _depth < 2 else None
+    origin = typing.get_origin(annotation)
+    if origin is typing.Union or origin is types.UnionType:
+        members = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
+        return _resolve_annotation(members[0], namespace, _depth) if len(members) == 1 else None
+    if origin is typing.Annotated:
+        return _resolve_annotation(typing.get_args(annotation)[0], namespace, _depth)
+    if origin is not None:
+        annotation = origin
+    if not isinstance(annotation, type) or annotation is type or annotation is type(None):
+        return None
+    if inspect.isabstract(annotation) or getattr(annotation, "_is_protocol", False):
+        return None
+    if annotation.__module__ in {"typing", "collections.abc", "abc"}:
+        return None
+    return annotation
+
+
+def _module_namespace(obj: object) -> dict:
+    import sys
+
+    module = sys.modules.get(getattr(obj, "__module__", ""), None)
+    return vars(module) if module is not None else {}
+
+
+@functools.cache
+def _class_tree(cls: type) -> ast.ClassDef | None:
+    try:
+        source = inspect.getsource(cls)
+    except (OSError, TypeError):
+        return None
+    try:
+        tree = ast.parse(inspect.cleandoc("\n" + source) if source[:1].isspace() else source)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == cls.__name__:
+            return node
+    return None
+
+
+def _self_stores(cls_tree: ast.ClassDef) -> set[str] | None:
+    """Attribute names the class's methods set on their first argument, or
+    `None` if one sets a name it does not spell out (`setattr(self, name,
+    ...)`, `self.__dict__`, `vars(self)`)."""
+    stores: set[str] = set()
+    for method in ast.walk(cls_tree):
+        if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) or not method.args.args:
+            continue
+        me = method.args.args[0].arg
+        for node in ast.walk(method):
+            if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+                return None
+            if isinstance(node, ast.Call):
+                func = ast.unparse(node.func)
+                if func == "vars":
+                    return None
+                if func in {"setattr", "object.__setattr__"} or func.endswith(".__setattr__"):
+                    if len(node.args) < 2:
+                        return None
+                    name = node.args[1]
+                    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                        return None
+                    stores.add(name.value)
+            if (
+                isinstance(node, ast.Attribute)
+                and not isinstance(node.ctx, ast.Load)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == me
+            ):
+                stores.add(node.attr)
+    return stores
+
+
+def _own_instance_attributes(cls: type) -> frozenset[str] | None:
+    """`cls`'s contribution to what its instances can have."""
+    import typing
+
+    if cls is object or cls is typing.Generic:
+        return frozenset()
+    names = set(vars(cls)) | set(vars(cls).get("__annotations__", {}))
+    slots = vars(cls).get("__slots__", ())
+    names.update([slots] if isinstance(slots, str) else slots)
+    if cls.__module__ == "builtins":
+        return frozenset(names)
+    tree = _class_tree(cls)
+    if tree is None:
+        return None
+    stores = _self_stores(tree)
+    if stores is None:
+        return None
+    return frozenset(names | stores)
+
+
+def _subclasses(cls: type) -> list[type]:
+    seen: list[type] = []
+    stack = [cls]
+    while stack:
+        klass = stack.pop()
+        if klass in seen:
+            continue
+        seen.append(klass)
+        try:
+            stack.extend(type.__subclasses__(klass))
+        except TypeError:
+            return []
+    return seen
+
+
+@functools.cache
+def instance_attributes(cls: type) -> frozenset[str] | None:
+    """Every attribute an instance of `cls` (or of any subclass loaded now)
+    can have, or `None` when that is not knowable.
+
+    `dir()` misses dataclass fields with no default and anything set in a
+    method, so those come from the class's annotations and its source. Not
+    knowable: a `__getattr__` or `__getattribute__` anywhere, a method that
+    sets an attribute by a computed name, or a class whose source cannot be
+    read that is not a builtin.
+    """
+    classes = _subclasses(cls)
+    if not classes:
+        return None
+    names: set[str] = set()
+    for klass in classes:
+        for base in klass.__mro__:
+            if base is not object and ("__getattr__" in vars(base) or "__getattribute__" in vars(base)):
+                return None
+            own = _own_instance_attributes(base)
+            if own is None:
+                return None
+            names |= own
+        names |= set(dir(klass))
+    return frozenset(names)
+
+
+def _getter_returns_self_attribute(func: object) -> str | None:
+    """`x` when a property's getter is, after its docstring, `return self.x`."""
+    func = inspect.unwrap(func)  # type: ignore[arg-type]
+    try:
+        source = inspect.getsource(func)  # type: ignore[arg-type]
+        tree = ast.parse(inspect.cleandoc("\n" + source) if source[:1].isspace() else source)
+    except (OSError, TypeError, SyntaxError):
+        return None
+    if not tree.body or not isinstance(tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    function = tree.body[0]
+    body = list(function.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    if (
+        len(body) == 1
+        and isinstance(body[0], ast.Return)
+        and isinstance(body[0].value, ast.Attribute)
+        and isinstance(body[0].value.value, ast.Name)
+        and function.args.args
+        and body[0].value.value.id == function.args.args[0].arg
+    ):
+        return body[0].value.attr
+    return None
+
+
+def _assigned_type(cls: type, name: str) -> type | None:
+    """The class of `self.<name>` from what `cls`'s methods assign to it,
+    when every assignment agrees: `self.x: T = ...`, `self.x = T(...)`, or
+    `self.x = local`, where every binding of `local` in that method is
+    annotated with or constructs the same `T` (a parameter counts by its
+    annotation)."""
+    found: set[type | None] = set()
+    for base in cls.__mro__:
+        if base is object:
+            continue
+        tree = _class_tree(base)
+        if tree is None:
+            if base.__module__ == "builtins":
+                continue
+            return None
+        namespace = _module_namespace(base)
+        for method in ast.walk(tree):
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) or not method.args.args:
+                continue
+            me = method.args.args[0].arg
+            for node in ast.walk(method):
+                if not (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == name
+                    and not isinstance(node.ctx, ast.Load)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == me
+                ):
+                    continue
+                statement = _simple_assignment_to(method, node)
+                if statement is None:
+                    # Unpacking, a loop target, `+=`, `del`: not typed.
+                    return None
+                if isinstance(statement, ast.AnnAssign):
+                    found.add(_resolve_annotation(ast.unparse(statement.annotation), namespace))
+                else:
+                    found.add(_value_type(statement.value, method, namespace))
+    if len(found) != 1:
+        return None
+    return next(iter(found))
+
+
+def _simple_assignment_to(scope: ast.AST, target: ast.AST) -> ast.Assign | ast.AnnAssign | None:
+    """The statement in `scope` whose one, whole target is `target`."""
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and node.targets[0] is target:
+            return node
+        if isinstance(node, ast.AnnAssign) and node.target is target and node.value is not None:
+            return node
+    return None
+
+
+def _value_type(value: ast.AST, method: ast.FunctionDef | ast.AsyncFunctionDef, namespace: dict) -> type | None:
+    if isinstance(value, ast.Call) and isinstance(value.func, (ast.Name, ast.Attribute)):
+        try:
+            called = eval(ast.unparse(value.func), dict(namespace))  # noqa: S307 - ops's own source.
+        except Exception:
+            return None
+        return _resolve_annotation(called, namespace) if isinstance(called, type) else None
+    if not isinstance(value, ast.Name):
+        return None
+    local = value.id
+    kinds: set[type | None] = set()
+    args = method.args
+    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+        if arg.arg == local:
+            if arg.annotation is None:
+                return None
+            kinds.add(_resolve_annotation(ast.unparse(arg.annotation), namespace))
+    for vararg in (args.vararg, args.kwarg):
+        if vararg is not None and vararg.arg == local:
+            return None
+    for node in ast.walk(method):
+        if not (isinstance(node, ast.Name) and node.id == local and not isinstance(node.ctx, ast.Load)):
+            continue
+        statement = _simple_assignment_to(method, node)
+        if statement is None:
+            return None
+        if isinstance(statement, ast.AnnAssign):
+            kinds.add(_resolve_annotation(ast.unparse(statement.annotation), namespace))
+        elif isinstance(statement.value, ast.Call):
+            kinds.add(_value_type(statement.value, method, namespace))
+        else:
+            return None
+    if len(kinds) != 1:
+        return None
+    return next(iter(kinds))
+
+
+@functools.cache
+def attribute_type(cls: type, name: str, _depth: int = 0) -> type | None:
+    """The one class `instance_of_cls.<name>` is, from the installed code's
+    own declarations, or `None` when it is not certain.
+
+    In order: a property's return annotation (or, with none, a getter that
+    is only `return self.x`, followed to `x`); a class-level annotation,
+    which includes dataclass fields; what the class's methods assign to
+    `self.<name>`. A method, or anything else, is `None`.
+    """
+    if _depth > 3:
+        return None
+    for base in cls.__mro__:
+        own = vars(base)
+        annotations = own.get("__annotations__", {})
+        value = own.get(name, inspect.Parameter.empty)
+        if isinstance(value, (property, functools.cached_property)):
+            getter = value.fget if isinstance(value, property) else value.func
+            if getter is None:
+                return None
+            returns = getattr(inspect.unwrap(getter), "__annotations__", {}).get("return")
+            if returns is not None:
+                return _resolve_annotation(returns, _module_namespace(inspect.unwrap(getter)))
+            followed = _getter_returns_self_attribute(getter)
+            if followed is None or followed == name:
+                return None
+            return attribute_type(cls, followed, _depth + 1)
+        if name in annotations:
+            return _resolve_annotation(annotations[name], _module_namespace(base))
+        if value is not inspect.Parameter.empty:
+            return None
+    return _assigned_type(cls, name)
+
+
+@functools.cache
+def _chain_root_types() -> dict[str, type] | None:
+    """{"context": Context, "manager": what `Context.__call__` returns}, or
+    `None` if `ops.testing` cannot be read.
+
+    Not `State`: its `__init__` sets the status fields by a computed name,
+    so `instance_attributes()` cannot know what it has and would let every
+    chain through anyway.
+    """
+    testing = testing_module()
+    if testing is None:
+        return None
+    try:
+        context = testing.Context
+        roots = {"context": context}
+        returns = inspect.unwrap(context.__call__).__annotations__.get("return")
+        manager = _resolve_annotation(returns, _module_namespace(context)) if returns is not None else None
+    except Exception:
+        return None
+    if manager is not None:
+        roots["manager"] = manager
+    return roots
+
+
+def _type_name(cls: type) -> str:
+    return cls.__qualname__
+
+
+def _binding_counts(scope: ast.AST) -> dict[str, int]:
+    counts: dict[str, int] = {}
+
+    def add(name: str) -> None:
+        counts[name] = counts.get(name, 0) + 1
+
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        args = scope.args
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]:
+            if arg is not None:
+                add(arg.arg)
+    for node in _own_nodes(scope):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            # Bound somewhere else too, so never "exactly once".
+            for name in node.names:
+                counts[name] = counts.get(name, 0) + 2
+    return counts
+
+
+def _chain_roots(tree: ast.Module, roots: dict[str, type]):
+    """Yield (scope, {name: (root type, checked from depth)}).
+
+    A `Context`-bound name is checked from the second attribute (the first
+    is `_context_attributes()`'s). A `with ctx(...) as mgr:` target is
+    checked from the first, only in the scope that binds it, and only when
+    nothing else in that scope binds it.
+    """
+    for scope, context_names in _context_scopes(tree):
+        found: dict[str, tuple[type, int]] = {name: (roots["context"], 1) for name in context_names}
+        counts = _binding_counts(scope)
+        for node in _own_nodes(scope):
+            if isinstance(node, (ast.With, ast.AsyncWith)) and "manager" in roots:
+                for item in node.items:
+                    if (
+                        isinstance(item.context_expr, ast.Call)
+                        and isinstance(item.context_expr.func, ast.Name)
+                        and item.context_expr.func.id in context_names
+                        and isinstance(item.optional_vars, ast.Name)
+                        and counts.get(item.optional_vars.id) == 1
+                    ):
+                        found[item.optional_vars.id] = (roots["manager"], 0)
+        if found:
+            yield scope, found
+
+
+def _attribute_chains(tree: ast.Module) -> list[str]:
+    """`ctx.a.b`, where `b` is not an attribute of what `ctx.a` is.
+
+    Each step's type comes from the installed `ops` (`attribute_type()`),
+    and the chain is only followed while it is a plain attribute chain whose
+    every type is certain: a call, a subscript, `Any`, a union, a type
+    variable, or a class whose attributes are not knowable stops it, and the
+    test is let through. So is any attribute name the file itself assigns
+    anywhere, and any class the file subclasses.
+    """
+    if context_attributes() is None:
+        return []
+    roots = _chain_root_types()
+    if roots is None:
+        return []
+    assigned = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load)
+    }
+    subclassed = {
+        ast.unparse(base).rsplit(".", 1)[-1]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        for base in node.bases
+    }
+    reasons = []
+    for scope, found in _chain_roots(tree, roots):
+        for node in _own_nodes(scope):
+            if not (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)):
+                continue
+            chain: list[str] = []
+            root: ast.AST = node
+            while isinstance(root, ast.Attribute):
+                chain.insert(0, root.attr)
+                root = root.value
+            if not isinstance(root, ast.Name) or root.id not in found:
+                continue
+            current, start = found[root.id]
+            for depth, attr in enumerate(chain):
+                if depth >= start:
+                    if attr in assigned or any(
+                        klass.__name__ in subclassed for klass in _subclasses(current)
+                    ):
+                        break
+                    allowed = instance_attributes(current)
+                    if allowed is None:
+                        break
+                    if attr not in allowed:
+                        spelled = ".".join([root.id, *chain[: depth + 1]])
+                        if depth == 0:
+                            reasons.append(
+                                f"line {node.lineno}: the test reads `{spelled}`; `{root.id}` is a "
+                                f"`{_type_name(current)}`, which has no `{attr}`"
+                            )
+                        else:
+                            reasons.append(
+                                f"line {node.lineno}: the test reads `{spelled}`; `{chain[depth - 1]}` "
+                                f"is a `{_type_name(current)}`, which has no `{attr}`"
+                            )
+                        break
+                if depth == len(chain) - 1:
+                    break
+                following = attribute_type(current, attr)
+                if following is None:
+                    break
+                current = following
     return list(dict.fromkeys(reasons))
 
 

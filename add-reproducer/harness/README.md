@@ -28,8 +28,9 @@ does.
    When the extraction is in scope and writes a test file with a heredoc,
    `static_test_check.py` reads that file's AST (never runs it) for shapes
    that cannot reproduce anything: no `test_` function, a run at module
-   level, a `testing.Context` attribute the installed `ops` does not have,
-   a `str` compared with a `Path`, and a few more. If it fails, the
+   level, a `testing.Context` attribute the installed `ops` does not have
+   (followed down a chain such as `ctx.charm_spec.charm_dir` while each
+   step's type is certain), a `str` compared with a `Path`, and a few more. If it fails, the
    extraction is asked again once, with the reasons; the second answer is
    kept whatever it says, and both verdicts go in the extraction record.
 4. **scope second opinion** (`inscope_second_pass.py`) - a second, narrower

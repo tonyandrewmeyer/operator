@@ -1,10 +1,12 @@
 """The static check on an extraction's embedded test file, and the one re-ask
 it triggers (`spike-step-5/static-retry/RESULT.md`).
 
-The calibration corpus is the 33 saved `#2045` extractions under
+The calibration corpus is the 35 saved `#2045` extractions under
 `fixtures/static_test_check/`: 32 from `spike-step-5/assert-choice/` (8 per
-prompt version) and the one live dispatch at `7888bb13`. The verdicts below
-are that RESULT's table. `assert-choice/RESULT.md` read five of the 33 tests
+prompt version), the one live dispatch at `7888bb13`, and the two re-asks
+from `live/retry-unlisted-2045.json` (§14) that read
+`ctx.charm_spec.charm_dir`, which only the attribute-chain rule (§15)
+rejects. The verdicts below are that RESULT's tables. `assert-choice/RESULT.md` read five of the 33 tests
 as valid (after2 runs 1 and 3, after3 runs 1, 2 and 7); every one of them
 must pass, because a false rejection costs a reproduction.
 
@@ -15,6 +17,7 @@ scripted LLM seam.
 from __future__ import annotations
 
 import json
+import typing
 from pathlib import Path
 
 import pytest
@@ -26,6 +29,8 @@ from extraction_record import render as render_record
 from inscope_second_pass import TwoPassExtractor
 from models import Hypothesis, Issue, StaticCheckResult, embedded_test_file, replace_embedded_test_body
 from static_test_check import add_missing_imports, check, check_commands, runs_under_pytest
+
+_T = typing.TypeVar("_T")
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 CORPUS = FIXTURES / "static_test_check"
@@ -79,6 +84,8 @@ EXPECTED = {
     ("after3", 6): (False, False, ["`ctx.charm_dir`"]),
     ("after3", 7): (True, True, []),
     ("dispatch", 0): (False, False, ["`ctx.charm_dir`", "`ctx.charm`"]),
+    ("unlisted", 11): (False, False, ["`ctx.charm_spec.charm_dir`; `charm_spec` is a `_CharmSpec`"]),
+    ("unlisted", 14): (False, False, ["`ctx.charm_spec.charm_dir`; `charm_spec` is a `_CharmSpec`"]),
 }
 
 
@@ -89,8 +96,8 @@ def _corpus():
             yield pytest.param(version, record, id=f"{version}-{record['run']}")
 
 
-def test_the_corpus_is_the_33_extractions():
-    assert len(list(_corpus())) == 33 == len(EXPECTED)
+def test_the_corpus_is_the_35_extractions():
+    assert len(list(_corpus())) == 35 == len(EXPECTED)
 
 
 @pytest.mark.parametrize(("version", "record"), list(_corpus()))
@@ -209,6 +216,203 @@ def test_a_parameter_named_ctx_is_not_tracked():
 def test_a_module_level_context_is_seen_inside_the_test():
     body = _HEADER + "ctx = testing.Context(ops.CharmBase)\n\ndef test_x():\n    ctx.charm_dir\n"
     assert "`ctx.charm_dir`" in check(body).reasons[0]
+
+
+# -- attribute chains ------------------------------------------------------
+
+
+def _chain_body(*lines: str) -> str:
+    return _HEADER + "def test_x():\n    ctx = testing.Context(ops.CharmBase, meta={'name': 'x'})\n" + "".join(
+        f"    {line}\n" for line in lines
+    )
+
+
+def test_a_two_level_miss_is_rejected():
+    result = check(_chain_body("ctx.charm_spec.charm_dir"))
+    assert result.reasons == [
+        "line 7: the test reads `ctx.charm_spec.charm_dir`; `charm_spec` is a `_CharmSpec`, "
+        "which has no `charm_dir`"
+    ]
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        "ctx.charm_spec.meta",
+        "ctx.charm_spec.charm_type",
+        "ctx.charm_spec.config",
+        "ctx.on.start",
+        "ctx.on.config_changed",
+        "ctx.action_results",
+    ],
+)
+def test_a_two_level_hit_passes(read):
+    assert check(_chain_body(read)).passed
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        # A method call: what it returns is not followed.
+        "ctx.charm_spec.get_all_relations().nothing_here",
+        "ctx.on.start().nothing_here",
+        # A subscript.
+        "ctx.juju_log[0].nothing_here",
+        "ctx.charm_spec.meta['name'].nothing_here",
+        # `str | pathlib.Path | None`: two classes, so neither.
+        "ctx.charm_root.nothing_here",
+        # `type[CharmType]`: a class object, whose attributes are the charm's.
+        "ctx.charm_spec.charm_type.nothing_here",
+        # `Mapping[str, Any]`: abstract, so any mapping.
+        "ctx.charm_spec.meta.nothing_here",
+        # `list[JujuLogLine]`, whose element type does not resolve; `list`
+        # has subclasses whose attributes are not knowable.
+        "ctx.juju_log.nothing_here",
+    ],
+)
+def test_an_unresolvable_step_passes(read):
+    assert check(_chain_body(read)).passed, check(_chain_body(read)).reasons
+
+
+def test_a_chain_on_an_attribute_the_file_assigns_is_not_checked():
+    assert check(_chain_body("ctx.charm_spec.charm_dir = '.'", "ctx.charm_spec.charm_dir")).passed
+
+
+def test_a_chain_on_a_class_the_file_subclasses_is_not_checked():
+    body = _chain_body("ctx.charm_spec.charm_dir") + (
+        "\n\nfrom scenario.state import _CharmSpec\n\n\nclass Spec(_CharmSpec):\n    charm_dir = '.'\n"
+    )
+    assert check(body).passed
+
+
+def test_a_with_target_is_checked_from_its_first_attribute():
+    result = check(_chain_body("with ctx(ctx.on.start(), testing.State()) as mgr:", "    mgr.charm_dir"))
+    assert result.reasons == [
+        "line 8: the test reads `mgr.charm_dir`; `mgr` is a `Manager`, which has no `charm_dir`"
+    ]
+
+
+def test_a_with_target_s_real_attributes_pass():
+    body = _chain_body(
+        "with ctx(ctx.on.start(), testing.State()) as mgr:",
+        "    mgr.charm.framework.charm_dir",
+        "    mgr.run()",
+    )
+    assert check(body).passed
+
+
+def test_a_with_target_bound_twice_is_not_checked():
+    body = _chain_body(
+        "with ctx(ctx.on.start(), testing.State()) as mgr:",
+        "    pass",
+        "mgr = object()",
+        "mgr.charm_dir",
+    )
+    assert check(body).passed
+
+
+def test_the_chain_rule_is_off_when_ops_cannot_be_introspected(monkeypatch):
+    monkeypatch.setattr(static_test_check, "context_attributes", lambda: None)
+    assert check(_chain_body("ctx.charm_spec.charm_dir")).passed
+
+
+def test_retry_hints_leave_a_chain_reason_as_it_is():
+    """The hint lists `Context`'s attributes; `charm_spec` came from that list
+    (§14), so a chain reason is sent on its own."""
+    result = check(_chain_body("ctx.charm_spec.charm_dir"))
+    assert static_test_check.retry_hints(result) == []
+
+
+class _Leaf:
+    def __init__(self):
+        self.value = 1
+
+
+class _Other:
+    pass
+
+
+class _Node:
+    """Annotations of every shape `attribute_type()` has to decide on."""
+
+    plain: _Leaf
+    optional: _Leaf | None
+    old_optional: "typing.Optional[_Leaf]"
+    union: _Leaf | _Other
+    anything: typing.Any
+    unresolvable: "NoSuchName"  # noqa: F821
+    variable: _T
+
+    def __init__(self, leaf: _Leaf):
+        self.assigned = _Leaf()
+        self.from_parameter = leaf
+
+    @property
+    def annotated_property(self) -> _Leaf:
+        return _Leaf()
+
+    @property
+    def followed_property(self):
+        """Only `return self.x`, so `x`'s type."""
+        return self.assigned
+
+    @property
+    def opaque_property(self):
+        return _Leaf() if self else None
+
+    def method(self) -> _Leaf:
+        return _Leaf()
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("plain", _Leaf),
+        ("optional", _Leaf),
+        ("old_optional", _Leaf),
+        ("assigned", _Leaf),
+        ("from_parameter", _Leaf),
+        ("annotated_property", _Leaf),
+        ("followed_property", _Leaf),
+        ("union", None),
+        ("anything", None),
+        ("unresolvable", None),
+        ("variable", None),
+        ("opaque_property", None),
+        ("method", None),
+        ("missing", None),
+    ],
+)
+def test_attribute_type(name, expected):
+    assert static_test_check.attribute_type(_Node, name) is expected
+
+
+def test_instance_attributes_include_what_methods_set():
+    allowed = static_test_check.instance_attributes(_Leaf)
+    assert allowed is not None and "value" in allowed and "other" not in allowed
+
+
+def test_instance_attributes_are_unknowable_with_a_getattr():
+    class Dynamic:
+        def __getattr__(self, name):
+            return name
+
+    assert static_test_check.instance_attributes(Dynamic) is None
+
+
+def test_instance_attributes_are_unknowable_with_a_computed_setattr():
+    class Computed:
+        def __init__(self, name):
+            setattr(self, name, 1)
+
+    assert static_test_check.instance_attributes(Computed) is None
+
+
+def test_instance_attributes_of_context_match_the_throwaway():
+    """Two independent readings of the installed `Context` agree."""
+    roots = static_test_check._chain_root_types()
+    assert roots is not None
+    assert static_test_check.instance_attributes(roots["context"]) == static_test_check.context_attributes()
 
 
 def test_str_on_both_sides_passes():

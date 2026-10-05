@@ -503,6 +503,27 @@ def test_pebble_custom_notice_in_charm(monkeypatch: pytest.MonkeyPatch):
     ctx.run(ctx.on.pebble_custom_notice(container=container, notice=notices[-1]), state)
 
 
+class SelfNotifyingCharm(ops.CharmBase):
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.config_changed, self._on_config_changed)
+
+    def _on_config_changed(self, _: ops.EventBase):
+        container = self.unit.get_container('foo')
+        container.pebble.notify(ops.pebble.NoticeType.CUSTOM, 'example.com/charm-said')
+
+
+def test_charm_notify_reaches_the_output_state():
+    """A notice the charm itself records is kept, as Pebble keeps it."""
+    ctx = Context(SelfNotifyingCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    container = Container('foo', can_connect=True, notices=[Notice('example.com/seeded')])
+    state_out = ctx.run(ctx.on.config_changed(), state=State(containers={container}))
+    assert [notice.key for notice in state_out.get_container('foo').notices] == [
+        'example.com/seeded',
+        'example.com/charm-said',
+    ]
+
+
 class CheckFailedCharm(ops.CharmBase):
     infos: list[ops.LazyCheckInfo]
 

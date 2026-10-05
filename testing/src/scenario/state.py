@@ -1087,6 +1087,22 @@ class Notice:
         object.__setattr__(self, 'repeat_after', repeat_after)
         object.__setattr__(self, 'expire_after', expire_after)
 
+    @classmethod
+    def _from_ops(cls, notice: pebble.Notice) -> Notice:
+        return cls(
+            key=notice.key,
+            id=notice.id,
+            user_id=notice.user_id,
+            type=notice.type,
+            first_occurred=notice.first_occurred,
+            last_occurred=notice.last_occurred,
+            last_repeated=notice.last_repeated,
+            occurrences=notice.occurrences,
+            last_data=notice.last_data,
+            repeat_after=notice.repeat_after,
+            expire_after=notice.expire_after,
+        )
+
     def _to_ops(self) -> pebble.Notice:
         return pebble.Notice(
             id=self.id,

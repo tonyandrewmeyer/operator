@@ -87,7 +87,7 @@ def run(*, isolated: bool = False, built: bool = False) -> list[str]:
 
 def _encode_trace(trace: list[testing.Dispatch]) -> list[str]:
     return [
-        f'{d.unit.name} {_isolated_serde.encode_event(d.event)} {d.state._to_json()}'
+        f'{d.unit_name} {_isolated_serde.encode_event(d.event)} {d.state_out._to_json()}'
         for d in trace
     ]
 

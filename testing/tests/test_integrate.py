@@ -72,7 +72,7 @@ def relation_events(trace: list[testing.Dispatch], unit: testing.Unit) -> list[t
     return [
         (d.event.name, d.event.relation_remote_unit_id)
         for d in trace
-        if d.unit is unit and d.event.relation is not None
+        if d.unit_name == unit.name and d.event.relation is not None
     ]
 
 
@@ -317,7 +317,9 @@ def test_add_unit_joins_the_new_unit_to_related_applications(juju: testing.Juju)
     juju.settle()
     new = juju.add_unit(prov)
     trace = juju.settle()
-    assert [(d.event.name, d.event.relation_remote_unit_id) for d in trace if d.unit is new] == [
+    assert [
+        (d.event.name, d.event.relation_remote_unit_id) for d in trace if d.unit_name == new.name
+    ] == [
         ('install', None),
         ('db_relation_created', None),
         ('leader_settings_changed', None),
@@ -351,7 +353,7 @@ def test_remove_unit_departs_it_from_related_applications(juju: testing.Juju):
     departing = [
         (d.event.name, d.event.relation_remote_unit_id)
         for d in trace
-        if d.unit.name == 'provider/1'
+        if d.unit_name == 'provider/1'
     ]
     assert departing == [
         ('db_relation_departed', 0),
@@ -496,7 +498,7 @@ def test_a_unit_in_error_gets_no_more_events_and_the_rest_settle(juju: testing.J
 
     juju.config(failing, {'x': 'y'})
     trace = juju.settle()  # Doesn't raise: no unit went into error this time.
-    assert [d for d in trace if d.unit is failing.leader] == []
+    assert [d for d in trace if d.unit_name == failing.leader.name] == []
     assert failing.leader.state.unit_status == testing.ErrorStatus('hook failed: "install"')
 
 
@@ -505,7 +507,7 @@ def test_the_trace_records_the_charm_s_traceback(juju: testing.Juju):
     with pytest.raises(testing.errors.JujuError):
         juju.settle()
     (dispatch,) = [d for d in juju._state.trace if d.error is not None]
-    assert dispatch.unit is failing.leader
+    assert dispatch.unit_name == failing.leader.name
     assert dispatch.event.name == 'install'
     assert dispatch.error is not None
     assert 'RuntimeError: install went wrong' in dispatch.error
@@ -584,7 +586,7 @@ def test_applications_take_turns(juju: testing.Juju):
     juju.deploy(provider())
     juju.deploy(requirer())
     trace = juju.settle()
-    assert [d.unit.name for d in trace[:4]] == [
+    assert [d.unit_name for d in trace[:4]] == [
         'provider/0',
         'requirer/0',
         'provider/0',
@@ -639,13 +641,13 @@ def test_new_secret_content_reaches_the_other_side(
     juju.config(db, {'password': 'second'})
     trace = juju.settle()
     for unit in web.units:
-        assert ('secret_changed', unit.name) in [(d.event.name, d.unit.name) for d in trace]
+        assert ('secret_changed', unit.name) in [(d.event.name, d.unit_name) for d in trace]
         assert 'password=second' in unit.state.unit_status.message
         (secret,) = unit.state.secrets
         assert secret.tracked_content == secret.latest_content == {'password': 'second'}
     # Once every reader tracks revision 2, the owner is told revision 1 is unused.
     removes = [d for d in trace if d.event.name == 'secret_remove']
-    assert [(d.unit.name, d.event.secret_revision) for d in removes] == [('dbserver/0', 1)]
+    assert [(d.unit_name, d.event.secret_revision) for d in removes] == [('dbserver/0', 1)]
     assert db.leader.state.unit_status == testing.ActiveStatus('removed revision 1')
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import importlib.util
+import itertools
 import os
 import pathlib
 import shutil
@@ -196,13 +197,13 @@ def test_deploy_emits_the_juju_startup_sequence(juju: testing.Juju):
         'config_changed',
         'start',
     ]
-    assert all(dispatch.unit is app.leader for dispatch in trace)
+    assert all(dispatch.unit_name == app.leader.name for dispatch in trace)
 
 
 def test_non_leader_units_get_leader_settings_changed(juju: testing.Juju):
     deploy_mycharm(juju, num_units=2)
     trace = juju.settle()
-    follower_events = [d.event.name for d in trace if d.unit.id == 1]
+    follower_events = [d.event.name for d in trace if d.unit_id == 1]
     assert 'leader_settings_changed' in follower_events
     assert 'leader_elected' not in follower_events
 
@@ -258,7 +259,7 @@ def test_config_emits_config_changed_on_every_unit(juju: testing.Juju):
     juju.settle()
     juju.config(app, {'log_level': 'debug'})
     trace = juju.settle()
-    assert [(d.event.name, d.unit.id) for d in trace] == [
+    assert [(d.event.name, d.unit_id) for d in trace] == [
         ('config_changed', 0),
         ('config_changed', 1),
     ]
@@ -288,7 +289,7 @@ def test_add_unit_runs_the_startup_sequence_for_the_new_unit(juju: testing.Juju)
     unit = juju.add_unit(app)
     trace = juju.settle()
     assert unit.id == 1
-    assert [d.event.name for d in trace if d.unit.id == 1] == [
+    assert [d.event.name for d in trace if d.unit_id == 1] == [
         'install',
         'leader_settings_changed',
         'config_changed',
@@ -303,7 +304,7 @@ def test_add_unit_makes_existing_peers_see_relation_joined(juju: testing.Juju):
     juju.settle()
     juju.add_unit(app)
     trace = juju.settle()
-    assert [d.event.name for d in trace if d.unit.id == 0] == [
+    assert [d.event.name for d in trace if d.unit_id == 0] == [
         'replicas_relation_joined',
         'replicas_relation_changed',
     ]
@@ -329,7 +330,7 @@ def test_remove_unit_kubernetes_scales_down_by_count(juju: testing.Juju):
     juju.remove_unit(app, num_units=1)
     trace = juju.settle()
     # The departing unit leaves its peer relation before it stops.
-    assert [(d.event.name, d.unit.id) for d in trace] == [
+    assert [(d.event.name, d.unit_id) for d in trace] == [
         ('replicas_relation_departed', 0),
         ('replicas_relation_departed', 1),
         ('replicas_relation_broken', 1),
@@ -363,7 +364,7 @@ def test_remove_unit_machine_removes_the_named_unit(machine_juju: testing.Juju):
     machine_juju.remove_unit(app.units[1])
     trace = machine_juju.settle()
     # The departing unit leaves its peer relation before it stops.
-    assert [(d.event.name, d.unit.id) for d in trace] == [
+    assert [(d.event.name, d.unit_id) for d in trace] == [
         ('replicas_relation_departed', 0),
         ('replicas_relation_departed', 1),
         ('replicas_relation_broken', 1),
@@ -473,17 +474,47 @@ def test_settle_returns_the_dispatch_trace(juju: testing.Juju):
     app = deploy_mycharm(juju)
     trace = juju.settle()
     assert all(isinstance(d, testing.Dispatch) for d in trace)
-    event, unit, state, error = trace[0]
-    assert event.name == 'install'
-    assert unit is app.leader
-    assert isinstance(state, testing.State)
-    assert error is None
+    first = trace[0]
+    assert first.event.name == 'install'
+    assert (first.app, first.unit_id, first.unit_name) == (app.name, 0, app.leader.name)
+    assert isinstance(first.state_in, testing.State)
+    assert isinstance(first.state_out, testing.State)
+    assert first.error is None
+
+
+def test_a_dispatch_s_state_in_is_the_previous_state_out_for_one_unit(juju: testing.Juju):
+    deploy_mycharm(juju)
+    trace = juju.settle()
+    for before, after in itertools.pairwise(trace):
+        assert after.state_in == before.state_out
+
+
+def test_dispatches_compare_by_value_and_hold_no_live_handles(juju: testing.Juju):
+    app = deploy_mycharm(juju)
+    trace = juju.settle()
+    install = trace[0]
+    assert install == dataclasses.replace(install)
+    juju.config(app, {'log_level': 'debug'})
+    juju.settle()
+    # The record still describes the unit as it was.
+    assert install.state_out.config != app.leader.state.config
+    assert juju.apps[install.app] is app
+
+
+def test_dispatch_to_context_runs_the_dispatch_again(juju: testing.Juju):
+    deploy_mycharm(juju)
+    trace = juju.settle()
+    start = trace[-1]
+    assert start.event.name == 'start'
+    ctx = start.to_context()
+    state_out = ctx.run(start.event, start.state_in)
+    assert state_out.unit_status == start.state_out.unit_status
 
 
 def test_settle_trace_states_are_post_dispatch_snapshots(juju: testing.Juju):
     deploy_mycharm(juju)
     trace = juju.settle()
-    assert trace[-1].state.unit_status == testing.ActiveStatus('start:info')
+    assert trace[-1].state_out.unit_status == testing.ActiveStatus('start:info')
 
 
 def test_settle_is_a_no_op_when_the_queue_is_empty(juju: testing.Juju):
@@ -496,7 +527,7 @@ def test_settle_is_deterministic():
     def run() -> list[str]:
         with testing.Juju(model_name='m') as j:
             j.deploy(spec(PublishingCharm, config=None), app='myapp', num_units=3)
-            return [f'{dispatch.event.name}@{dispatch.unit.name}' for dispatch in j.settle()]
+            return [f'{dispatch.event.name}@{dispatch.unit_name}' for dispatch in j.settle()]
 
     first = run()
     assert first  # guard against the trace being empty and the check vacuous

@@ -48,6 +48,7 @@ import inspect
 import pathlib
 import shutil
 import tempfile
+import types
 import weakref
 from collections import deque
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -143,24 +144,120 @@ _COALESCED_SUFFIXES = ('_relation_changed', 'config_changed', 'secret_changed')
 _JUJU_OWNED_FIELDS = ('leader', 'planned_units', 'model', 'config', 'relations')
 
 
-class Dispatch(NamedTuple):
-    """One event dispatched to one unit, as recorded in a settle trace."""
+@dataclasses.dataclass(frozen=True)
+class Dispatch:
+    """One event dispatched to one unit, as recorded in a settle trace.
+
+    It's a record of the event as it happened, with no live handles: it
+    describes the unit as it was at that point, however the model has moved
+    on since, and two ``Dispatch`` objects compare by value. The application
+    itself is ``juju.apps[dispatch.app]``, and the model is
+    ``dispatch.state_in.model``.
+    """
 
     event: _Event
     """The event that was dispatched."""
 
-    unit: Unit
-    """The unit it was dispatched to."""
+    app: str
+    """The name of the application the unit belongs to."""
 
-    state: State
-    """The unit's :class:`State` *after* the charm handled the event."""
+    unit_id: int
+    """The unit's ID, as in ``myapp/2``."""
+
+    state_in: State
+    """The :class:`State` the unit was given.
+
+    That's the state after :class:`Juju` wrote in the shared changes from other
+    units, so it's what the charm actually saw, rather than the previous
+    dispatch's :attr:`state_out`.
+    """
+
+    state_out: State
+    """The :class:`State` the charm produced."""
 
     error: str | None = None
     """The charm's traceback, if it raised while handling the event.
 
     The charm's changes are discarded, as Juju discards a failed hook's, so
-    :attr:`state` is the unit's state before the event, in error status.
+    :attr:`state_out` is :attr:`state_in` in error status.
     """
+
+    _charm: _CharmForContext | None = dataclasses.field(default=None, repr=False, compare=False)
+
+    @property
+    def unit_name(self) -> str:
+        """The Juju unit name, for example ``myapp/2``."""
+        return f'{self.app}/{self.unit_id}'
+
+    def to_context(self) -> Context[CharmBase]:
+        """A new :class:`~ops.testing.Context` for the unit as it was at this dispatch.
+
+        The ``Context`` has the charm and metadata the test gave
+        :meth:`Juju.deploy`, the application's trust, and the unit's ID and
+        charm directory. Config and leadership come from :attr:`state_in`, so
+        running :attr:`event` against :attr:`state_in` runs the dispatch again
+        from the same starting point, without :class:`Juju`'s mocking::
+
+            ctx = dispatch.to_context()
+            state_out = ctx.run(dispatch.event, dispatch.state_in)
+
+        Like :meth:`Unit.to_context`, it's new on every call, and a charm
+        deployed in a worker process is imported into the test process.
+
+        Raises:
+            IsolationError: if the charm can't be imported into the test
+                process.
+            JujuError: if this ``Dispatch`` wasn't recorded by :meth:`Juju.settle`.
+        """
+        if self._charm is None:
+            raise JujuError('Only a Dispatch from Juju.settle() knows its charm.')
+        return self._charm.context(self.unit_id)
+
+
+class _CharmForContext:
+    """What a :class:`Context` for one of an application's units needs.
+
+    Kept apart from the :class:`App` so that a :class:`Dispatch` can build a
+    ``Context`` without holding the live application. The charm source and
+    metadata never change after ``deploy()``.
+    """
+
+    def __init__(self, app: App):
+        self._app_name = app.name
+        self._charm_source = app._charm_source
+        self._charm_type = app._charm_type
+        self._metadata = dict(app._metadata)
+        self._config_schema = dict(app._config_schema) if app._config_schema is not None else None
+        self._actions = dict(app._actions) if app._actions is not None else None
+        self._juju_version = app._juju_version
+        self._trust = app._trust
+        # Shared with the App, which adds each unit's directory as it's made.
+        self._charm_roots = app._charm_roots
+
+    def context(self, unit_id: int) -> Context[CharmBase]:
+        if self._charm_type is None:
+            assert self._charm_source is not None
+            try:
+                self._charm_type = _load_charm_type(
+                    self._charm_source,
+                    module_name=f'_ops_testing_charm_{uuid4().hex}',
+                )
+            except Exception as e:
+                raise IsolationError(
+                    f'Cannot import the charm for {self._app_name} into the test process, '
+                    f'which a Context needs: {e!r}'
+                ) from e
+        return Context(
+            self._charm_type,
+            meta=dict(self._metadata),
+            config=dict(self._config_schema) if self._config_schema is not None else None,
+            actions=dict(self._actions) if self._actions is not None else None,
+            app_name=self._app_name,
+            unit_id=unit_id,
+            juju_version=self._juju_version,
+            app_trusted=self._trust,
+            charm_root=self._charm_roots.get(unit_id),
+        )
 
 
 # Event sequences
@@ -409,32 +506,7 @@ class Unit:
             IsolationError: if the charm can't be imported into the test
                 process.
         """
-        app = self._app
-        charm_type = app._charm_type
-        if charm_type is None:
-            assert app._charm_source is not None
-            try:
-                charm_type = _load_charm_type(
-                    app._charm_source,
-                    module_name=f'_ops_testing_charm_{uuid4().hex}',
-                )
-            except Exception as e:
-                raise IsolationError(
-                    f'Cannot import the charm for {app.name} into the test process, '
-                    f'which a Context needs: {e!r}'
-                ) from e
-            app._charm_type = charm_type
-        return Context(
-            charm_type,
-            meta=dict(app._metadata),
-            config=dict(app._config_schema) if app._config_schema is not None else None,
-            actions=dict(app._actions) if app._actions is not None else None,
-            app_name=app.name,
-            unit_id=self._id,
-            juju_version=app._juju_version,
-            app_trusted=app._trust,
-            charm_root=app._charm_roots.get(self._id),
-        )
+        return self._app._for_context().context(self._id)
 
     def __repr__(self) -> str:
         return f'<Unit {self.name}>'
@@ -487,6 +559,7 @@ class App:
         # and _run_in_worker.
         self._runner: _Runner = _NotStarted()
         self._charm_type: type[CharmBase] | None = None
+        self._context_source: _CharmForContext | None = None
         self._leader_id = 0
         self._units: dict[int, Unit] = {}
         # Units that remove_unit has started taking down: they leave their
@@ -499,6 +572,11 @@ class App:
         self._peer_ids: dict[str, int] = {
             endpoint: juju._new_relation_id() for endpoint in self._peer_endpoints
         }
+
+    def _for_context(self) -> _CharmForContext:
+        if self._context_source is None:
+            self._context_source = _CharmForContext(self)
+        return self._context_source
 
     def _run_in_process(self) -> None:
         """Run the charm in the test process, loading it from its path if it has one."""
@@ -862,6 +940,17 @@ class Juju:
         # Every unit's filesystem root, created with the first unit.
         self._filesystems: pathlib.Path | None = None
         self._filesystems_finalizer: weakref.finalize[Any, Any] | None = None
+
+    @property
+    def apps(self) -> Mapping[str, App]:
+        """Every application deployed under this ``Juju``, by name.
+
+        A test or fixture can reach any application through this without
+        keeping the handle :meth:`deploy` returned, and a :class:`Dispatch`
+        leads back to its application with ``juju.apps[dispatch.app]``. It's
+        read-only: applications are added with :meth:`deploy`.
+        """
+        return types.MappingProxyType(self._state.apps)
 
     # Internals
     def _as_model(self) -> Model:
@@ -1603,7 +1692,7 @@ class Juju:
 
     def _trace_tail(self) -> str:
         tail = self._state.trace[-_TRACE_TAIL:]
-        lines = [f'  {d.event.name} on {d.unit.name}' for d in tail]
+        lines = [f'  {d.event.name} on {d.unit_name}' for d in tail]
         return '\nLast events dispatched:\n' + '\n'.join(lines) if lines else ''
 
     def _next_queued(self) -> _Queued | None:
@@ -1718,12 +1807,14 @@ class Juju:
         try:
             state_out = app._runner.run(unit.id, event, state_in, seed)
         except _HookFailedError as e:
-            self._fail(app, unit, event, e)
+            self._fail(app, unit, event, e, state_in)
             return
         if not unit.is_leader:
             _check_no_app_data_writes(unit, state_in, state_out)
         unit._state = state_out
-        self._state.trace.append(Dispatch(event, unit, state_out))
+        self._state.trace.append(
+            Dispatch(event, app.name, unit.id, state_in, state_out, _charm=app._for_context())
+        )
         if event.name.endswith('_relation_broken') and event.relation is not None:
             self._leave_relation(unit, event.relation.id)
         if unit.id in app._dying:
@@ -1735,7 +1826,9 @@ class Juju:
         self._propagate_app_status(app, unit)
         self._sync_secrets()
 
-    def _fail(self, app: App, unit: Unit, event: _Event, error: _HookFailedError) -> None:
+    def _fail(
+        self, app: App, unit: Unit, event: _Event, error: _HookFailedError, state_in: State
+    ) -> None:
         """Put a unit in error after its charm raised, as Juju does for a failed hook.
 
         Nothing the charm did in the dispatch is kept, and nothing is
@@ -1746,7 +1839,17 @@ class Juju:
             unit._state, unit_status=ErrorStatus(f'hook failed: "{hook}"')
         )
         self._state.failed[app.name, unit.id] = error
-        self._state.trace.append(Dispatch(event, unit, unit._state, error.traceback))
+        self._state.trace.append(
+            Dispatch(
+                event,
+                app.name,
+                unit.id,
+                state_in,
+                unit._state,
+                error.traceback,
+                _charm=app._for_context(),
+            )
+        )
 
     def _leave_relation(self, unit: Unit, relation_id: int) -> None:
         """Take a relation out of a unit's state after its ``relation-broken``.

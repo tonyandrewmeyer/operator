@@ -489,7 +489,7 @@ def test_reads_fall_through_to_the_host_and_writes_stay_in_the_root(
         app = juju._deploy(root, **deploy_kwargs(isolated))
         trace = juju.settle()
         unit = app.leader
-        assert trace[0].state.unit_status.message == 'from the host'
+        assert trace[0].state_out.unit_status.message == 'from the host'
         assert status(unit) == {
             'shared': 'from the host, and the charm',
             'listing': ['new', 'shared.txt'],

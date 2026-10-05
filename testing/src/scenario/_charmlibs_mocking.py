@@ -3,19 +3,22 @@
 
 """The ``charmlibs`` default: each library's own ``mocked()``, from its testing package.
 
-The libraries a charm uses are found from its source: every ``charmlibs``
-import in it, matched to the installed library distribution that provides
-it. Each library's testing package registers the library's ``mocked`` in
-the ``ops.testing.mocking`` entry-point group, under the library's import
+A library's testing package registers the library's ``mocked`` in the
+``ops.testing.mocking`` entry-point group, under the library's import
 package, for example::
 
     [project.entry-points."ops.testing.mocking"]
     "charmlibs.interfaces.tracing" = "charmlibs.interfaces.tracing_testing:mocked"
 
-A testing package installed at a different version from its library is an
-error, since the two are released in lockstep. A library with no testing
-package installed runs without its mocking, because most libraries don't
-publish one yet. A testing package reaches an isolated charm's environment
+The libraries a charm uses are found from its source: each import in it is
+matched to the registered package it's in. Any library can register, not
+only those in ``charmlibs``.
+
+A ``charmlibs`` testing package installed at a different version from its
+library is an error, since the two are released in lockstep; other
+libraries' testing packages can pin their library however they like. A
+library with no testing package installed runs without its mocking, because
+most libraries don't publish one yet. A testing package reaches an isolated charm's environment
 the way any test dependency does: through the charm's ``dependency-groups``,
 or the ``requirements=`` file.
 """
@@ -48,7 +51,7 @@ class LibraryMocking:
 
 
 def find(app_name: str, sources: Iterable[pathlib.Path]) -> list[LibraryMocking]:
-    """The ``mocked()`` of each ``charmlibs`` library imported in ``sources``.
+    """The ``mocked()`` of each registered library imported in ``sources``.
 
     ``sources`` are files, or directories to search for ``.py`` files. The
     libraries come back sorted by import package, so they are opened in the
@@ -57,33 +60,31 @@ def find(app_name: str, sources: Iterable[pathlib.Path]) -> list[LibraryMocking]
     A library with no testing package installed is left out.
 
     Raises:
-        JujuError: naming the library and the testing package, if the
-            testing package is at a different version from the library, or
-            its registered ``mocked`` can't be loaded.
+        JujuError: naming the library and the testing package, if a
+            ``charmlibs`` testing package is at a different version from its
+            library, or a registered ``mocked`` can't be loaded.
     """
-    imported = charmlibs_imports(sources)
-    if not imported:
-        return []
-    libraries = _installed_libraries()
-    used: dict[str, importlib.metadata.Distribution] = {}
-    for name in imported:
-        package = _owning_package(name, libraries)
-        if package is not None:
-            used[package] = libraries[package]
     registered = {ep.name: ep for ep in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)}
+    if not registered:
+        return []
+    used: set[str] = set()
+    for name in imported_modules(sources):
+        package = _owning_package(name, registered)
+        if package is not None:
+            used.add(package)
+    if not used:
+        return []
+    libraries = _installed_libraries() if any(map(_is_charmlibs, used)) else {}
     found: list[LibraryMocking] = []
     for package in sorted(used):
-        library = used[package]
-        version = library.version
-        entry_point = registered.get(package)
-        if entry_point is None:
-            continue
+        entry_point = registered[package]
+        library = libraries.get(package)
         testing = entry_point.dist
-        if testing is not None and testing.version != version:
+        if library is not None and testing is not None and testing.version != library.version:
             raise JujuError(
-                f'{app_name}: the charm uses {package} {version}, but the installed '
+                f'{app_name}: the charm uses {package} {library.version}, but the installed '
                 f'testing package, {testing.metadata["Name"]}, is {testing.version}. '
-                f'Install {testing.metadata["Name"]}=={version}.'
+                f'Install {testing.metadata["Name"]}=={library.version}.'
             )
         try:
             mocked = entry_point.load()
@@ -105,8 +106,8 @@ def find(app_name: str, sources: Iterable[pathlib.Path]) -> list[LibraryMocking]
     return found
 
 
-def charmlibs_imports(sources: Iterable[pathlib.Path]) -> set[str]:
-    """Every module under ``charmlibs`` imported in the given files and directories.
+def imported_modules(sources: Iterable[pathlib.Path]) -> set[str]:
+    """Every module imported in the given files and directories.
 
     ``from charmlibs.interfaces import tls_certificates`` counts as an import
     of ``charmlibs.interfaces.tls_certificates``, since the name imported may
@@ -120,10 +121,8 @@ def charmlibs_imports(sources: Iterable[pathlib.Path]) -> set[str]:
             continue  # Importing the charm will report it, if it matters.
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                names.update(a.name for a in node.names if _is_charmlibs(a.name))
+                names.update(a.name for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                if not _is_charmlibs(node.module):
-                    continue
                 names.add(node.module)
                 names.update(f'{node.module}.{a.name}' for a in node.names if a.name != '*')
     return names
@@ -181,14 +180,12 @@ def _import_packages(dist: importlib.metadata.Distribution) -> set[str]:
     return {(dist.metadata['Name'] or '').replace('-', '.')}
 
 
-def _owning_package(
-    name: str, libraries: Mapping[str, importlib.metadata.Distribution]
-) -> str | None:
-    """The library import package that ``name`` is, or is inside, if any."""
+def _owning_package(name: str, packages: Mapping[str, object]) -> str | None:
+    """The package in ``packages`` that ``name`` is, or is inside, if any."""
     parts = name.split('.')
     for end in range(len(parts), 0, -1):
         candidate = '.'.join(parts[:end])
-        if candidate in libraries:
+        if candidate in packages:
             return candidate
     return None
 

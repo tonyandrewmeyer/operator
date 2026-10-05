@@ -96,7 +96,7 @@ def site(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[pa
     monkeypatch.setenv('PYTHONPATH', os.pathsep.join(filter(None, [str(site), existing])))
     yield site
     for name in list(sys.modules):
-        if name == 'charmlibs' or name.startswith('charmlibs.'):
+        if name.split('.')[0] in ('charmlibs', 'vendorlib', 'vendorlib_fakes'):
             del sys.modules[name]
     importlib.invalidate_caches()
 
@@ -221,7 +221,7 @@ def test_a_charm_spec_gets_the_default_for_its_class_s_module(
         assert app.leader.state.unit_status == testing.ActiveStatus('mocked')
 
 
-def test_charmlibs_imports_in_every_form(tmp_path: pathlib.Path):
+def test_imports_in_every_form(tmp_path: pathlib.Path):
     source = write(
         tmp_path,
         {
@@ -237,7 +237,8 @@ def test_charmlibs_imports_in_every_form(tmp_path: pathlib.Path):
             'lib/charms/old/v0/lib.py': 'import charmlibs.passwd\n',
         },
     )
-    assert _charmlibs_mocking.charmlibs_imports([source / 'src', source / 'lib']) == {
+    assert _charmlibs_mocking.imported_modules([source / 'src', source / 'lib']) == {
+        'os',
         'charmlibs.pathops',
         'charmlibs',
         'charmlibs.apt',
@@ -254,3 +255,58 @@ def test_charmlibs_imports_in_every_form(tmp_path: pathlib.Path):
 def test_a_charm_with_no_charmlibs_imports_needs_nothing(tmp_path: pathlib.Path):
     source = write(tmp_path, {'src/charm.py': 'import ops\n'})
     assert _charmlibs_mocking.find('app', [source / 'src']) == []
+
+
+OTHER_LIBRARY = """
+    def value():
+        return 'real'
+"""
+
+OTHER_TESTING = """
+    import contextlib
+    from unittest import mock
+
+    import vendorlib
+
+
+    @contextlib.contextmanager
+    def mocked():
+        with mock.patch.object(vendorlib, 'value', lambda: 'mocked'):
+            yield
+"""
+
+OTHER_CHARM = """
+    import ops
+
+    import vendorlib
+
+
+    class VendorCharm(ops.CharmBase):
+        def __init__(self, framework):
+            super().__init__(framework)
+            framework.observe(self.on.install, self._on_install)
+
+        def _on_install(self, _):
+            self.unit.status = ops.ActiveStatus(vendorlib.value())
+"""
+
+
+def test_a_library_outside_charmlibs_can_register(
+    tmp_path: pathlib.Path, site: pathlib.Path, isolated: bool
+):
+    # Its testing package needn't share its version: lockstep is a charmlibs rule.
+    distribution(site, 'vendorlib', '3.0', {'vendorlib/__init__.py': OTHER_LIBRARY})
+    distribution(
+        site,
+        'vendorlib-fakes',
+        '0.1',
+        {'vendorlib_fakes/__init__.py': OTHER_TESTING},
+        entry_points='[ops.testing.mocking]\nvendorlib = vendorlib_fakes:mocked\n',
+    )
+    root = write(
+        tmp_path / 'vendor', {'metadata.yaml': 'name: vendor-user\n', 'src/charm.py': OTHER_CHARM}
+    )
+    with testing.Juju() as juju:
+        app = deploy(juju, root, isolated)
+        juju.settle()
+        assert app.leader.state.unit_status == testing.ActiveStatus('mocked')

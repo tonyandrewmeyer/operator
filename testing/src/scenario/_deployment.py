@@ -51,11 +51,12 @@ import tempfile
 import types
 import weakref
 from collections import deque
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
 from uuid import uuid4
 
 from . import _charm_mocking, _environment, _isolated_serde, _unit_filesystem
+from . import state as _state_module
 from ._isolated_worker import (
     _charm_exception,
     _charm_traceback,
@@ -141,7 +142,7 @@ _COALESCED_SUFFIXES = ('_relation_changed', 'config_changed', 'secret_changed')
 
 #: ``State`` fields that describe a unit's place in the model. :class:`Juju`
 #: sets these itself, so a ``state_template`` may not.
-_JUJU_OWNED_FIELDS = ('leader', 'planned_units', 'model', 'config', 'relations')
+_JUJU_OWNED_FIELDS = ('leader', 'planned_units', 'model', 'config', 'relations', 'secrets')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -838,6 +839,26 @@ class _Integration:
         return f'{a.name}:{ea} {b.name}:{eb}'
 
 
+@dataclasses.dataclass
+class _UserSecret:
+    """A secret the test added with :meth:`Juju.add_secret`."""
+
+    id: str
+    name: str
+    info: str | None
+    # Each revision's content, oldest first.
+    revisions: list[dict[str, str]]
+    # The names of the applications it's granted to.
+    grants: set[str] = dataclasses.field(default_factory=set[str])
+
+    def as_source(self) -> Secret:
+        """The secret as its owner would hold it, for :func:`_reader_copy`."""
+        secret = Secret(dict(self.revisions[-1]), id=self.id, description=self.info)
+        object.__setattr__(secret, '_tracked_revision', len(self.revisions))
+        object.__setattr__(secret, '_latest_revision', len(self.revisions))
+        return secret
+
+
 class _JujuState:
     """The mutable half of a :class:`Juju`.
 
@@ -869,6 +890,8 @@ class _JujuState:
         # For each secret ID, the highest revision that secret-remove has
         # been queued for.
         self.removable_revisions: dict[str, int] = {}
+        # Secrets the test added, as a user would with juju add-secret, by ID.
+        self.user_secrets: dict[str, _UserSecret] = {}
         # Units whose charm raised, keyed by application name and unit ID,
         # with what it raised. Like a unit in a failed hook in Juju, each
         # gets no more events: those queued for it wait in ``held``.
@@ -1395,6 +1418,88 @@ class Juju:
             _Event(f'{relation.endpoint}_relation_broken', relation=relation),
             rebind=_Rebind('relation', relation.id),
         )
+
+    # User secrets
+    def add_secret(self, name: str, content: Mapping[str, Any], *, info: str | None = None) -> str:
+        """Add a secret as a user would, matching ``juju add-secret``.
+
+        The secret isn't visible to any application until it's granted with
+        :meth:`grant_secret`. It's usually passed to a charm through a config
+        option of type ``secret``.
+
+        Args:
+            name: The secret's name, unique in the model.
+            content: The secret's content.
+            info: A description of the secret.
+
+        Returns:
+            The secret's URI. It's derived from the model UUID and how many
+            secrets the test has added, so it's the same on every run.
+
+        Raises:
+            JujuError: if the name is already used, or the content is empty.
+        """
+        self._check_open()
+        if any(s.name == name for s in self._state.user_secrets.values()):
+            raise JujuError(f'A secret named {name!r} already exists.')
+        if not content:
+            raise JujuError('A secret needs some content.')
+        with _secret_ids(f'{self.uuid}/user-secrets/{len(self._state.user_secrets)}'):
+            secret_id = _state_module._generate_secret_id()
+        self._state.user_secrets[secret_id] = _UserSecret(
+            secret_id, name, info, [{k: str(v) for k, v in content.items()}]
+        )
+        return secret_id
+
+    def grant_secret(self, identifier: str, app: App | Iterable[App]) -> None:
+        """Let an application read a secret the test added, matching ``juju grant-secret``.
+
+        Args:
+            identifier: The secret's URI or name.
+            app: The application, or applications, to grant it to.
+        """
+        self._check_open()
+        secret = self._user_secret(identifier)
+        apps = [app] if isinstance(app, App) else list(app)
+        for each in apps:
+            self._check_deployed(each)
+        secret.grants.update(each.name for each in apps)
+        self._sync_secrets()
+
+    def update_secret(self, identifier: str, content: Mapping[str, str]) -> None:
+        """Add a new revision of a secret the test added, matching ``juju update-secret``.
+
+        Each unit tracking the secret gets ``secret-changed``.
+
+        Args:
+            identifier: The secret's URI or name.
+            content: The new content.
+        """
+        self._check_open()
+        secret = self._user_secret(identifier)
+        if not content:
+            raise JujuError('A secret needs some content.')
+        secret.revisions.append({k: str(v) for k, v in content.items()})
+        self._sync_secrets()
+
+    def remove_secret(self, identifier: str) -> None:
+        """Remove a secret the test added, matching ``juju remove-secret``.
+
+        It's removed from every unit's :class:`State`.
+
+        Args:
+            identifier: The secret's URI or name.
+        """
+        self._check_open()
+        secret = self._user_secret(identifier)
+        del self._state.user_secrets[secret.id]
+        self._sync_secrets()
+
+    def _user_secret(self, identifier: str) -> _UserSecret:
+        for secret in self._state.user_secrets.values():
+            if identifier in (secret.id, secret.name):
+                return secret
+        raise JujuError(f'No secret {identifier!r} was added with add_secret().')
 
     def config(self, app: App, config: Mapping[str, Any]) -> None:
         """Change an application's configuration, as ``juju config`` would.
@@ -2176,6 +2281,11 @@ class Juju:
                 for unit in remote._live_units:
                     if remote.name in grantees or unit.name in grantees:
                         wanted.setdefault((remote.name, unit.id), {})[secret.id] = secret
+        for user_secret in self._state.user_secrets.values():
+            source = user_secret.as_source()
+            for app_name in sorted(user_secret.grants):
+                for unit in self._state.apps[app_name]._live_units:
+                    wanted.setdefault((app_name, unit.id), {})[source.id] = source
 
         readers: dict[str, list[Secret]] = {}
         for app in self._state.apps.values():
@@ -2327,7 +2437,8 @@ def _check_state_template(template: State) -> None:
             raise JujuError(
                 f'state_template may not set {name}: Juju sets it for each unit. '
                 'Use config= for configuration; relations come from the '
-                "charm's peer endpoints."
+                "charm's peer endpoints and integrate(), and secrets from the "
+                'charms themselves and add_secret().'
             )
 
 

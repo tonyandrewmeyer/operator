@@ -945,6 +945,7 @@ def test_state_template_leaves_the_juju_owned_fields_to_juju(juju: testing.Juju)
         ('model', testing.State(model=testing.Model(type='lxd'))),
         ('config', testing.State(config={'log_level': 'debug'})),
         ('relations', testing.State(relations={testing.PeerRelation('replicas')})),
+        ('secrets', testing.State(secrets={testing.Secret({'a': 'b'})})),
     ],
 )
 def test_state_template_may_not_set_juju_owned_fields(

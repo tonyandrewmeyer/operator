@@ -769,3 +769,91 @@ def test_relations_reach_a_charm_in_a_worker(isolated: str):
             assert 'password=second' in unit.state.unit_status.message
         for unit in db.units:
             assert unit.state.unit_status.message.startswith(('clients=', 'removed revision'))
+
+
+# User secrets
+
+
+class UserSecretReader(ops.CharmBase):
+    """Reads the secret named by its config, and reports its content in its status."""
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.config_changed, self._report)
+        framework.observe(self.on.secret_changed, self._on_secret_changed)
+
+    def _report(self, _: ops.EventBase):
+        secret_id = self.config.get('secret')
+        if not secret_id:
+            self.unit.status = ops.WaitingStatus('no secret')
+            return
+        try:
+            content = self.model.get_secret(id=str(secret_id)).get_content()
+        except (ops.SecretNotFoundError, ops.ModelError):
+            self.unit.status = ops.BlockedStatus('cannot read secret')
+            return
+        self.unit.status = ops.ActiveStatus(content['password'])
+
+    def _on_secret_changed(self, event: ops.SecretChangedEvent):
+        content = event.secret.get_content(refresh=True)
+        self.unit.status = ops.ActiveStatus(content['password'])
+
+
+READER_META: dict[str, Any] = {
+    'name': 'reader',
+    'config': {'options': {'secret': {'type': 'secret'}}},
+}
+
+
+def test_a_user_secret_is_only_readable_once_granted(juju: testing.Juju):
+    reader = juju.deploy(testing.CharmSpec(UserSecretReader, meta=READER_META), num_units=2)
+    uri = juju.add_secret('db-password', {'password': 'one'}, info='for the db')
+    juju.config(reader, {'secret': uri})
+    juju.settle()
+    assert reader.leader.state.unit_status == testing.BlockedStatus('cannot read secret')
+
+    juju.grant_secret('db-password', reader)
+    for unit in reader.units:
+        assert any(s.id == uri for s in unit.state.secrets)
+
+
+def test_updating_a_user_secret_notifies_its_readers(juju: testing.Juju):
+    reader = juju.deploy(testing.CharmSpec(UserSecretReader, meta=READER_META), num_units=2)
+    uri = juju.add_secret('db-password', {'password': 'one'})
+    juju.grant_secret(uri, reader)
+    juju.config(reader, {'secret': uri})
+    juju.settle()
+    assert [u.state.unit_status for u in reader.units] == [testing.ActiveStatus('one')] * 2
+
+    juju.update_secret('db-password', {'password': 'two'})
+    trace = juju.settle()
+    assert sorted(d.unit_name for d in trace if d.event.name == 'secret_changed') == [
+        'reader/0',
+        'reader/1',
+    ]
+    assert [u.state.unit_status for u in reader.units] == [testing.ActiveStatus('two')] * 2
+
+
+def test_removing_a_user_secret_takes_it_from_every_unit(juju: testing.Juju):
+    reader = juju.deploy(testing.CharmSpec(UserSecretReader, meta=READER_META))
+    uri = juju.add_secret('db-password', {'password': 'one'})
+    juju.grant_secret(uri, [reader])
+    juju.settle()
+    juju.remove_secret(uri)
+    assert all(s.id != uri for s in reader.leader.state.secrets)
+
+
+def test_user_secret_ids_are_the_same_on_every_run():
+    with testing.Juju() as first, testing.Juju() as second:
+        assert first.add_secret('a', {'k': 'v'}) == second.add_secret('a', {'k': 'v'})
+        assert first.add_secret('b', {'k': 'v'}) != first.uuid
+
+
+def test_user_secret_errors(juju: testing.Juju):
+    juju.add_secret('a', {'k': 'v'})
+    with pytest.raises(testing.errors.JujuError, match='already exists'):
+        juju.add_secret('a', {'k': 'v'})
+    with pytest.raises(testing.errors.JujuError, match='No secret'):
+        juju.update_secret('nope', {'k': 'v'})
+    with pytest.raises(testing.errors.JujuError, match='needs some content'):
+        juju.add_secret('b', {})

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import functools
 import hashlib
 import importlib.metadata
 import json
@@ -47,7 +48,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, cast
 
 import yaml
@@ -71,6 +72,10 @@ _OPS_DISTRIBUTIONS = ('ops', 'ops-scenario')
 
 #: Written into an environment once it is complete.
 _MARKER = 'ops-testing-environment.json'
+
+#: Bound when this module is imported, so that a test that patches
+#: ``subprocess.run`` for its own charm doesn't also patch the environment build.
+_subprocess_run = subprocess.run
 
 _REQUIREMENT_NAME = re.compile(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)')
 _HASH_OPTION = re.compile(r'\s--hash[=\s]\S+')
@@ -101,6 +106,20 @@ class _Plan:
     files: Mapping[str, bytes]
     #: A requirements file installed as it is (``requirements=``).
     requirements_file: pathlib.Path | None = None
+    #: For the ``uv`` plugin: what decides the requirements, which go into the
+    #: cache key in their place, and how to get them. The lockfile decides
+    #: them, so a cache hit doesn't need to run ``uv export``.
+    export_inputs: Mapping[str, Any] | None = None
+    export: Callable[[], list[str]] | None = None
+
+    def resolved(self) -> _Plan:
+        """The plan with its requirements, running ``uv export`` if that's still to do."""
+        if self.export is None:
+            return self
+        requirements = [*self.export(), *self.requirements]
+        return dataclasses.replace(
+            self, requirements=tuple(_deduplicated(requirements)), export=None
+        )
 
 
 def build(
@@ -133,7 +152,7 @@ def build(
     shim = _ops_shim()
     if (path / _MARKER).exists():
         return Environment(_interpreter(path), (str(shim),), path, cached=True)
-    _create(path, plan, charm_root, app_name, uv)
+    _create(path, plan.resolved(), charm_root, app_name, uv)
     return Environment(_interpreter(path), (str(shim),), path, cached=False)
 
 
@@ -219,10 +238,23 @@ def _plan_from_charm(charm_root: pathlib.Path, app_name: str, uv: str) -> _Plan:
             files[name] = (charm_root / name).read_bytes()
     groups = _mocking_groups(charm_root, app_name)
     if plugin == 'uv':
-        requirements = _uv_export(charm_root, part, groups, app_name, uv)
-    else:
-        requirements = _plugin_requirements(charm_root, plugin, part, app_name)
-        requirements += _group_requirements(charm_root, groups, app_name)
+        if not (charm_root / 'uv.lock').exists():
+            raise _suggest_requirements(
+                f'{app_name}: the charm is built with the uv plugin but has no uv.lock. Run '
+                '`uv lock` in the charm.'
+            )
+        return _Plan(
+            plugin,
+            tuple(_ops_requirements()),
+            files,
+            export_inputs={
+                'extras': [str(e) for e in part.get('uv-extras', ())],
+                'groups': [str(g) for g in [*part.get('uv-groups', ()), *groups]],
+            },
+            export=functools.partial(_uv_export, charm_root, part, groups, app_name, uv),
+        )
+    requirements = _plugin_requirements(charm_root, plugin, part, app_name)
+    requirements += _group_requirements(charm_root, groups, app_name)
     requirements += _ops_requirements()
     return _Plan(plugin, tuple(_deduplicated(requirements)), files)
 
@@ -294,6 +326,9 @@ def _uv_export(
         uv,
         'export',
         '--locked',
+        # The uv plugin doesn't install the default groups (such as dev), so
+        # neither does this.
+        '--no-default-groups',
         '--no-emit-project',
         '--no-hashes',
         '--no-header',
@@ -306,7 +341,7 @@ def _uv_export(
         cmd += ['--extra', str(extra)]
     for group in [*part.get('uv-groups', ()), *groups]:
         cmd += ['--group', str(group)]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=charm_root)
+    result = _subprocess_run(cmd, capture_output=True, text=True, cwd=charm_root)
     if result.returncode != 0:
         output = result.stderr.strip()
         if '--locked' in output or 'needs to be updated' in output:
@@ -494,6 +529,7 @@ def _cache_key(plan: _Plan) -> str:
     inputs = {
         'plugin': plan.plugin,
         'requirements': sorted(plan.requirements),
+        'export': plan.export_inputs,
         'files': {
             name: hashlib.sha256(content).hexdigest()
             for name, content in sorted(plan.files.items())
@@ -567,7 +603,7 @@ def _create(
 def _run(
     cmd: Sequence[str], app_name: str, *, cwd: pathlib.Path, installing: bool = False
 ) -> None:
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    result = _subprocess_run(cmd, capture_output=True, text=True, cwd=cwd)
     if result.returncode == 0:
         return
     output = (result.stderr or result.stdout).strip()

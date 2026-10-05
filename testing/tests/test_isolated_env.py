@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pathlib
 import shutil
+import subprocess
 import sys
 import textwrap
 import time
@@ -595,6 +596,39 @@ def test_uv_plugin_forwards_extras_and_groups(
     assert environment.cached
     assert list(environment.path.rglob('mockhelper/__init__.py'))
     assert list(environment.path.rglob('confdep/__init__.py'))
+
+
+@needs_uv
+def test_uv_plugin_leaves_out_the_default_groups(tmp_path: pathlib.Path, cache: pathlib.Path):
+    root = uv_charm(
+        tmp_path / 'uvdev',
+        ['confdep==1.0'],
+        groups='[dependency-groups]\ndev = ["mockhelper==1.0"]',
+    )
+    environment = _environment.build(root, 'uvdev')
+    assert list(environment.path.rglob('confdep/__init__.py'))
+    assert not list(environment.path.rglob('mockhelper/__init__.py'))
+
+
+@needs_uv
+def test_a_uv_cache_hit_does_not_run_uv_export(
+    tmp_path: pathlib.Path, cache: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = uv_charm(tmp_path / 'uvwarm', ['confdep==1.0'])
+    cold = _environment.build(root, 'uvwarm')
+
+    def no_export(*args: object, **kwargs: object):
+        raise AssertionError('uv export ran on a cache hit')
+
+    monkeypatch.setattr(_environment, '_uv_export', no_export)
+    warm = _environment.build(root, 'uvwarm')
+    assert warm.cached
+    assert warm.path == cold.path
+
+
+def test_patching_subprocess_run_does_not_reach_the_build(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(subprocess, 'run', None)
+    assert _environment._subprocess_run is not None
 
 
 @needs_uv

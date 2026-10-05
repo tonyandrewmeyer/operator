@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import enum
 import os
 import pathlib
 import subprocess
@@ -83,7 +84,7 @@ def test_ops_testing_doc():
         name
         for name in ops.testing.__all__
         if name not in ops.testing._compatibility_names
-        and type(getattr(ops.testing, name)) in (type, types.FunctionType)
+        and type(getattr(ops.testing, name)) in (type, enum.EnumMeta, types.FunctionType)
     )
     expected_names.update(
         f'errors.{name}' for name in dir(ops.testing.errors) if not name.startswith('_')

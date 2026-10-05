@@ -116,6 +116,9 @@ This API for testing was previously called 'Scenario'.
 .. autoclass:: ops.testing.RelationBase
 .. autoclass:: ops.testing.Resource
 .. autoclass:: ops.testing.Secret
+.. autoclass:: ops.testing.ServiceBehaviour
+.. autoclass:: ops.testing.ServiceFailureMode
+.. autoclass:: ops.testing.ServiceStart
 .. autoclass:: ops.testing.State
 .. autoclass:: ops.testing.Storage
 .. autoclass:: ops.testing.StoredState

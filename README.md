@@ -8,146 +8,69 @@ The `ops` library is a Python framework for developing and testing Kubernetes an
 > - The latest version of `ops` requires Python 3.10 or above.
 > - Read our [docs](https://canonical.com/juju/docs/ops/latest/) for tutorials, how-to guides, the library reference, and more.
 
-## Give it a try
+## A minimal charm
 
-Let's use `ops` to build a Kubernetes charm:
-
-### Set up
-
-> See [Juju | Set things up](https://documentation.ubuntu.com/juju/3.6/howto/manage-your-juju-deployment/set-up-your-juju-deployment/). <br> Choose the automatic track and MicroK8s.
-
-
-### Write your charm
-
-On your Multipass VM, create a charm directory and use Charmcraft to initialise your charm file structure:
-
-```shell-script
-mkdir ops-example
-cd ops-example
-charmcraft init
-```
-This has created a standard charm directory structure:
-
-```shell-script
-$ ls -R
-.:
-CONTRIBUTING.md  README.md        pyproject.toml    src    tox.ini
-LICENSE          charmcraft.yaml  requirements.txt  tests
-
-./src:
-charm.py
-
-./tests:
-integration  unit
-
-./tests/integration:
-test_charm.py
-
-./tests/unit:
-test_charm.py
-```
-
-Things to note:
-
-- The `charmcraft.yaml` file shows that what we have is an example charm called `ops-example`, which uses an OCI image resource `httpbin` from `kennethreitz/httpbin`.
-
-- The `requirements.txt` file lists the version of `ops` to use.
-
-- The `src/charm.py` file imports `ops` and uses `ops` constructs to create a charm class `OpsExampleCharm`, observe Juju events, and pair them to event handlers:
+A charm is a Python class that observes Juju events. This one sets the unit status to active when the unit starts:
 
 ```python
 import ops
 
 
-class OpsExampleCharm(ops.CharmBase):
-    """Charm the service."""
+class MyCharm(ops.CharmBase):
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.start, self._on_start)
 
-    def __init__(self, *args):
-        super().__init__(*args)
-        self.framework.observe(self.on['httpbin'].pebble_ready, self._on_httpbin_pebble_ready)
-        self.framework.observe(self.on.config_changed, self._on_config_changed)
+    def _on_start(self, event: ops.StartEvent):
+        self.unit.status = ops.ActiveStatus('ready')
 
-    def _on_httpbin_pebble_ready(self, event: ops.PebbleReadyEvent):
-        """Define and start a workload using the Pebble API.
 
-        Change this example to suit your needs. You'll need to specify the right entrypoint and
-        environment configuration for your specific workload.
-
-        Learn more about interacting with Pebble at
-            https://canonical.com/juju/docs/ops/latest/reference/pebble/
-        """
-        # Get a reference the container attribute on the PebbleReadyEvent
-        container = event.workload
-        # Add initial Pebble config layer using the Pebble API
-        container.add_layer('httpbin', self._pebble_layer, combine=True)
-        # Make Pebble reevaluate its plan, ensuring any services are started if enabled.
-        container.replan()
-        # Learn more about statuses at
-        # https://documentation.ubuntu.com/juju/3.6/reference/status/
-        self.unit.status = ops.ActiveStatus()
+if __name__ == '__main__':
+    ops.main(MyCharm)
 ```
 
-> See more: [`ops.PebbleReadyEvent`](https://canonical.com/juju/docs/ops/latest/reference/ops/#ops.PebbleReadyEvent)
-
-- The `tests/unit/test_charm.py` file imports `ops.testing` and uses it to set up a unit test:
+You can test the charm without Juju, using `ops.testing`:
 
 ```python
-import ops
 from ops import testing
 
-from charm import OpsExampleCharm
+from charm import MyCharm
 
 
-def test_httpbin_pebble_ready():
-    # Arrange:
-    ctx = testing.Context(OpsExampleCharm)
-    container = testing.Container('httpbin', can_connect=True)
-    state_in = testing.State(containers={container})
-
-    # Act:
-    state_out = ctx.run(ctx.on.pebble_ready(container), state_in)
-
-    # Assert:
-    updated_plan = state_out.get_container(container.name).plan
-    expected_plan = {
-        'services': {
-            'httpbin': {
-                'override': 'replace',
-                'summary': 'httpbin',
-                'command': 'gunicorn -b 0.0.0.0:80 httpbin:app -k gevent',
-                'startup': 'enabled',
-                'environment': {'GUNICORN_CMD_ARGS': '--log-level info'},
-            }
-        },
-    }
-    assert expected_plan == updated_plan
-    assert (
-        state_out.get_container(container.name).service_statuses['httpbin']
-        == ops.pebble.ServiceStatus.ACTIVE
-    )
-    assert state_out.unit_status == testing.ActiveStatus()
+def test_start():
+    ctx = testing.Context(MyCharm)
+    state_out = ctx.run(ctx.on.start(), testing.State())
+    assert state_out.unit_status == testing.ActiveStatus('ready')
 ```
 
-> See more: [`ops.testing`](https://canonical.com/juju/docs/ops/latest/reference/ops-testing/)
+## Try it out
 
+1. Install [Concierge](https://github.com/canonical/concierge) and use it to set up a Juju development environment:
 
-Explore further, start editing the files, or skip ahead and pack the charm:
+   ```shell
+   sudo snap install concierge --classic
+   sudo concierge prepare --preset k8s
+   ```
 
-```shell-script
-charmcraft pack
-```
+2. Install [Charmcraft](https://documentation.ubuntu.com/charmcraft/) and create a Kubernetes charm that uses `ops`:
 
-If you didn't take any wrong turn or simply left the charm exactly as it was, this has created a file called `ops-example_ubuntu-22.04-amd64.charm` (the architecture bit may be different depending on your system's architecture). Use this name and the resource from the `metadata.yaml` to deploy your example charm to your local MicroK8s cloud:
+   ```shell
+   sudo snap install charmcraft --classic
+   mkdir my-charm && cd my-charm
+   charmcraft init --profile kubernetes
+   ```
 
-```shell-script
-juju deploy ./ops-example_ubuntu-22.04-amd64.charm --resource httpbin-image=kennethreitz/httpbin
-```
+   The generated project includes `src/charm.py`, unit tests in `tests/unit`, and integration tests in `tests/integration`.
 
-Congratulations, you’ve just built your first Kubernetes charm using `ops`!
+3. Run the unit tests, then pack and deploy the charm:
 
-### Clean up
+   ```shell
+   tox -e unit
+   charmcraft pack
+   juju deploy ./*.charm --resource httpbin-image=kennethreitz/httpbin
+   ```
 
-> See [Juju | Tear things down](https://documentation.ubuntu.com/juju/3.6/howto/manage-your-juju-deployment/tear-down-your-juju-deployment-local-testing-and-development/). <br> Choose the automatic track.
+For a full walkthrough, follow the [Kubernetes charm tutorial](https://canonical.com/juju/docs/ops/latest/tutorial/from-zero-to-hero-write-your-first-kubernetes-charm/). When you're finished, tear down the environment with `sudo concierge restore`.
 
 ## Next steps
 

@@ -1247,7 +1247,7 @@ class Juju:
         Raises:
             JujuError: if the arguments don't match the substrate's form for
                 the applications involved, if removing them would leave an
-                application with no units, or if a named unit is the leader.
+                application with no units.
         """
         self._check_open()
         if not app_or_unit:
@@ -1308,13 +1308,6 @@ class Juju:
                 raise JujuError(
                     f'Cannot remove the last unit of {app.name}; remove the application instead.'
                 )
-            for unit in doomed:
-                if unit.id == app._leader_id:
-                    raise JujuError(
-                        f'Cannot remove {unit.name}: it is the leader, and this layer '
-                        'does not elect a new one yet. Remove a non-leader unit, or '
-                        'remove the application entirely.'
-                    )
         for app, doomed in by_app.items():
             doomed_ids = {u.id for u in doomed}
             for unit in doomed:
@@ -1834,6 +1827,8 @@ class Juju:
             app._dying.discard(unit_id)
             self._drop_peer(app, unit_id)
             self._state.granted.pop((app.name, unit_id), None)
+            if unit_id == app._leader_id:
+                self._elect_leader(app)
             self._sync_secrets()
             return None
         unit = app._units.get(unit_id)
@@ -1855,6 +1850,25 @@ class Juju:
                 return None
             event = dataclasses.replace(event, **{rebind.kind: rebound})
         return app, unit, event
+
+    def _elect_leader(self, app: App) -> None:
+        """Give leadership to another unit once the leader has gone.
+
+        Juju picks a new leader when the old one's lease lapses, and fires
+        ``leader-elected`` on it. The lowest-numbered remaining unit wins, so
+        that it's the same unit on every run, and it starts from the
+        application data, status and secrets the old leader left, which every
+        unit already has.
+        """
+        candidates = sorted(uid for uid in app._units if uid not in app._dying) or sorted(
+            app._units
+        )
+        if not candidates:
+            return
+        app._leader_id = candidates[0]
+        leader = app._units[app._leader_id]
+        leader._state = dataclasses.replace(leader._state, leader=True)
+        self._enqueue(app, leader.id, _Event('leader_elected'))
 
     def _enter_relation_event(self, app: App, unit: Unit, event: _Event, relation_id: int) -> bool:
         """Bring a unit's view of a relation up to the moment of a relation event.

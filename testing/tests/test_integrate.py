@@ -579,6 +579,25 @@ def test_application_status_is_shared_with_followers(juju: testing.Juju):
     assert app.units[1].state.app_status == testing.ActiveStatus('serving')
 
 
+def test_the_new_leader_keeps_the_application_status():
+    class Status(ops.CharmBase):
+        def __init__(self, framework: ops.Framework):
+            super().__init__(framework)
+            framework.observe(self.on.start, self._on_start)
+
+        def _on_start(self, _: ops.StartEvent):
+            if self.unit.is_leader():
+                self.app.status = ops.ActiveStatus('serving')
+
+    with testing.Juju(type='lxd') as juju:
+        app = juju.deploy(testing.CharmSpec(Status, meta={'name': 'status'}), num_units=2)
+        juju.settle()
+        juju.remove_unit(app.leader)
+        juju.settle()
+        assert app.leader.id == 1
+        assert app.leader.state.app_status == testing.ActiveStatus('serving')
+
+
 # Ordering
 
 

@@ -654,11 +654,34 @@ def test_isolated_app_runs_config(tmp_path: pathlib.Path):
 # Leadership
 
 
-def test_removing_the_leader_is_refused(machine_juju: testing.Juju):
-    app = deploy_mycharm(machine_juju, num_units=2)
+def test_removing_the_leader_elects_a_new_one(machine_juju: testing.Juju):
+    app = deploy_mycharm(machine_juju, num_units=3)
     machine_juju.settle()
-    with pytest.raises(testing.errors.JujuError, match='it is the leader'):
-        machine_juju.remove_unit(app.leader)
+    old_leader = app.leader
+    machine_juju.remove_unit(old_leader)
+    trace = machine_juju.settle()
+    assert [u.id for u in app.units] == [1, 2]
+    assert app.leader.id == 1
+    assert app.leader.state.leader
+    assert not app.units[1].state.leader
+    elected = [d.unit_name for d in trace if d.event.name == 'leader_elected']
+    assert elected == [f'{app.name}/1']
+    # The new leader is elected once the old one has gone.
+    names = [(d.event.name, d.unit_name) for d in trace]
+    assert names.index(('remove', f'{app.name}/0')) < names.index((
+        'leader_elected',
+        f'{app.name}/1',
+    ))
+
+
+def test_scaling_down_past_a_moved_leader_elects_another(juju: testing.Juju):
+    app = deploy_mycharm(juju, num_units=2)
+    juju.settle()
+    app._leader_id = 1  # As if leadership had moved.
+    juju.remove_unit(app, num_units=1)
+    juju.settle()
+    assert [u.id for u in app.units] == [0]
+    assert app.leader.id == 0
 
 
 def test_removing_a_non_leader_is_allowed(machine_juju: testing.Juju):

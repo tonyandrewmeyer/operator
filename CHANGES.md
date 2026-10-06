@@ -1,3 +1,10 @@
+# 3.8.6 - 06 October 2026
+
+## CI
+
+* Use the changelog tool's built-in team and next-version's size
+* Tighten the release workflows and docs after review
+
 # 3.8.5 - 06 October 2026
 
 ## CI

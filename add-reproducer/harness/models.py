@@ -427,6 +427,12 @@ class Outcome(str, Enum):
     """Approach §5's rung ladder, plus Approach §4's `skipped_stale` outcome."""
 
     SKIPPED_STALE = "skipped_stale"
+    # The bug is in how ops handles a hook tool's output, and the issue does
+    # not say what the hook tool returned, so there is nothing to fake on
+    # `substrate: none` and only a real Juju would show it. The extraction
+    # names it in `moving_parts.other["needs_juju"]`
+    # (`spike-step-5/static-retry/RESULT.md` §10, `#2709`).
+    SKIPPED_NEEDS_JUJU = "skipped_needs_juju"
     REPRODUCED = "reproduced"
     REPRODUCED_WEAKER = "reproduced_weaker"
     REPRODUCED_LOG_ONLY = "reproduced_log_only"

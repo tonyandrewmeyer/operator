@@ -1,7 +1,7 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Work out which version to release, and the range of commits it covers.
+"""Work out which version to release, and write its changelog entry.
 
 Called by the propose-release workflow, from its own checkout of the default
 branch, with the branch being released as the working directory. Everything
@@ -12,8 +12,9 @@ it needs comes from the environment the workflow sets:
     DRY_RUN        'true' when nothing is going to be pushed.
     CHANGELOG      The uvx `--from` spec for the team's changelog tool.
 
-It writes the commits since the last tag to `$RUNNER_TEMP/changes.log`, for
-the later steps, and sets `previous`, `version` and `team` as step outputs.
+It writes the changelog entry for the commits since the last tag to
+`$RUNNER_TEMP/changes-entry.md`, for the later steps, and sets `previous` and
+`version` as step outputs.
 Every refusal is a workflow error annotation and a non-zero exit.
 """
 
@@ -25,8 +26,6 @@ import re
 import subprocess
 import sys
 import typing
-
-TEAM_FILE = pathlib.Path(__file__).parent / 'changelog-team.txt'
 
 
 def run(*args: str, input: str | None = None) -> str:
@@ -45,23 +44,8 @@ def fail(message: str) -> typing.NoReturn:
     sys.exit(1)
 
 
-def read_team() -> str:
-    """Return the team list as the one comma-separated value `--team` takes.
-
-    An empty list is not worth failing a release over: it credits everyone,
-    which is the direction the changelog tool errs in too.
-    """
-    team: list[str] = []
-    for line in TEAM_FILE.read_text().splitlines():
-        name, _, _ = line.partition('#')
-        name = ''.join(name.split())
-        if name:
-            team.append(name)
-    return ','.join(team)
-
-
 def main() -> None:
-    """Pick the version, check it can be released, and set the step outputs."""
+    """Pick the version, check it can be released, and write its entry."""
     branch = os.environ['BRANCH']
     version_input = os.environ['VERSION_INPUT']
     dry_run = os.environ['DRY_RUN'] == 'true'
@@ -82,13 +66,10 @@ def main() -> None:
         fail(f'No release tag in the history of {branch} to count from.')
     print(f'Last tag on {branch}: {previous}')
 
-    team = read_team()
-
     log_format = run(*tool, 'git-log-format').strip()
     log = run(
         'git', 'log', '--reverse', '--no-merges', f'--format={log_format}', f'{previous}..HEAD'
     )
-    (runner_temp / 'changes.log').write_text(log)
 
     if version_input:
         # An explicit version is used as it stands, with no inference: it is
@@ -97,7 +78,13 @@ def main() -> None:
         if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?', version):
             fail(f"'{version}' is not X.Y.Z or X.Y.Z{{a,b,rc}}N.")
     else:
-        size = run(*tool, 'bump-size', input=log).strip()
+        # `next-version` prints `version=` and `size=` lines, so the size the
+        # maintenance check reads is the one the version was worked out from.
+        output = dict(
+            line.split('=', 1)
+            for line in run(*tool, 'next-version', '--previous', previous, input=log).splitlines()
+        )
+        version, size = output['version'], output['size']
         print(f'The commits since {previous} are a {size} release.')
         # A feature or a breaking change on a maintenance branch has been put
         # on the wrong branch, and a patch release is not the place to find
@@ -106,7 +93,6 @@ def main() -> None:
             fail(
                 f'The commits since {previous} on {branch} are a {size} release: a feature or a breaking change has landed on a maintenance branch. Fix that, or pass an explicit version if this is really intended.'
             )
-        version = run(*tool, 'next-version', '--previous', previous, input=log).strip()
 
     if succeeds('git', 'rev-parse', '-q', '--verify', f'refs/tags/{version}'):
         if version_input:
@@ -121,7 +107,7 @@ def main() -> None:
         )
 
     # Checked here rather than at the push, so that a leftover branch costs
-    # nothing: everything after this step rewrites files and spends a model
+    # nothing: everything after this check writes files and spends a model
     # call. A dry run never pushes, so a leftover branch doesn't block one.
     if not dry_run and succeeds(
         'gh', 'api', f'repos/{repository}/git/ref/heads/release-prep-{version}'
@@ -130,10 +116,14 @@ def main() -> None:
             f'A release-prep-{version} branch already exists. Delete it, or finish the pull request that goes with it, before proposing {version} again.'
         )
 
+    entry = run(*tool, 'changes-entry', '--repo', repository, '--tag', version, input=log)
+    (runner_temp / 'changes-entry.md').write_text(entry)
+    print(entry, end='')
+
     count = run('git', 'rev-list', '--count', f'{previous}..HEAD').strip()
     print(f'Releasing {version}, from the {count} commits since {previous}.')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-        f.write(f'previous={previous}\nversion={version}\nteam={team}\n')
+        f.write(f'previous={previous}\nversion={version}\n')
 
 
 if __name__ == '__main__':

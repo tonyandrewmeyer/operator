@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import re
 
+import static_test_check
 from models import (
     COMMENT_OUTCOMES,
     Hypothesis,
@@ -63,6 +64,29 @@ AUTOMATION_PREFIX = (
     "> **Automated reproduction attempt.** These steps were produced by a bot "
     "that ran the commands below; please verify before relying on them."
 )
+
+
+def _prefix(hypothesis: Hypothesis) -> str:
+    """`AUTOMATION_PREFIX`, plus a caveat when the test fakes hook tools.
+
+    A fake hook tool prints what the issue says Juju returned, so a run shows
+    how ops handles that output and nothing about whether Juju returns it. On
+    `#2709` part of the reporter's account of Juju was wrong
+    (`relation-list` succeeds), and a test built from it would have
+    "reproduced" that part too. Structural for the same reason as the
+    prefix: the claim the comment can make depends on it.
+    """
+    test_file = _resolved_test_file(hypothesis)
+    tools = static_test_check.faked_hook_tools(test_file.body) if test_file is not None else []
+    if not tools:
+        return AUTOMATION_PREFIX
+    names = ", ".join(f"`{tool}`" for tool in tools)
+    return (
+        f"{AUTOMATION_PREFIX}\n>\n"
+        f"> The hook tools this test runs ({names}) are fakes that print what the issue "
+        "reports Juju returning. The run shows how ops handles that output, not that "
+        "Juju returns it."
+    )
 
 
 def _trim(text: str, limit: int = _TRIM_CHARS) -> str:
@@ -268,7 +292,7 @@ def compose_template(
     if outcome not in COMMENT_OUTCOMES:
         return None
 
-    lines = [AUTOMATION_PREFIX, ""]
+    lines = [_prefix(hypothesis), ""]
     if outcome == Outcome.PARTIAL:
         lines.append("**Partial reproduction attempt** -- got partway, then diverged.")
     else:
@@ -704,7 +728,7 @@ class Composer:
         # the marker is: criterion 2's accepted-risk mitigation is only
         # worth anything if it cannot be dropped by a model that decided
         # the comment read better without it.
-        return f"{AUTOMATION_PREFIX}\n\n{body}\n\n{_marker(issue, run_id)}"
+        return f"{_prefix(hypothesis)}\n\n{body}\n\n{_marker(issue, run_id)}"
 
     @staticmethod
     def _build_prompt(

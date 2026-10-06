@@ -250,6 +250,20 @@ class Pipeline:
         # rate this exemption is measured against is 0/0, not merely 0-of-
         # something-untried.
         branch = runner_stage.choose_branch(hypothesis)
+        # Ahead of the confidence gate, which would also stop it (the
+        # extraction is told to answer "low"), so that the record says why.
+        # Not bypassed by `calibration_mode`: there are no commands to run.
+        needs_juju = hypothesis.moving_parts.other.get("needs_juju")
+        if branch == "none" and needs_juju:
+            return PipelineResult(
+                issue.number,
+                "extraction:needs_juju",
+                Outcome.SKIPPED_NEEDS_JUJU,
+                f"a hook tool's output is not in the issue, so only a real Juju would show it: {needs_juju}",
+                None,
+                branch=branch,
+                hypothesis=hypothesis,
+            )
         if (
             not calibration_mode
             and hypothesis.confidence == "low"

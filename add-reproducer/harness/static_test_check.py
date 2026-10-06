@@ -320,6 +320,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _assert_in_charm(tree)
     reasons += _str_compared_with_path(tree)
     reasons += _capture_read_before_handlers_run(tree)
+    reasons += _backend_under_testing(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -760,9 +761,15 @@ def _assigned_type(cls: type, name: str) -> type | None:
     `self.x = local`, where every binding of `local` in that method is
     annotated with or constructs the same `T` (a parameter counts by its
     annotation)."""
+    import typing
+
     found: set[type | None] = set()
     for base in cls.__mro__:
-        if base is object:
+        # `typing.Generic` assigns nothing to `self`, and from Python 3.12 it
+        # is implemented in C, so it has no source to read: without this,
+        # every generic class (`testing.Context` among them) was unknowable
+        # on 3.12 and later, and the chain rule only worked on 3.11.
+        if base is object or base is typing.Generic:
             continue
         tree = _class_tree(base)
         if tree is None:
@@ -1440,6 +1447,104 @@ def _calls_manager_run(statement: ast.AST, managers: list[str]) -> bool:
         and node.func.value.id in managers
         for node in ast.walk(statement)
     )
+
+
+def _backend_under_testing(tree: ast.Module) -> list[str]:
+    """`._backend` in a file that builds a `testing.Context`.
+
+    `ops.testing` swaps the model backend for one that never runs a hook
+    tool, so it cannot return what Juju's hook tools return. On `#2709`
+    (Juju answers "permission denied" for a gone relation), a test whose
+    charm called `self.model._backend.relation_get(...)` and expected that
+    error failed on its own assertion with or without the fix, and rung 6
+    called it a reproduction (`spike-step-5/static-retry/RESULT.md` §10). No
+    `ops.testing` test has a reason to reach into the backend, so this cannot
+    reject one that would work.
+    """
+    if not any(_is_context_call(node) for node in ast.walk(tree)):
+        return []
+    return [
+        f"line {node.lineno}: `{ast.unparse(node)}` under `ops.testing`, which replaces the "
+        "model backend, so no hook tool runs and nothing Juju's hook tools return can "
+        "happen; for a bug in how ops handles a hook tool's output, test "
+        "`ops.model._ModelBackend` with fake hook tools instead"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "_backend"
+    ]
+
+
+# Juju 3.6's hook tools: the executables `ops.model._ModelBackend` runs.
+_HOOK_TOOLS = frozenset({
+    "action-fail",
+    "action-get",
+    "action-log",
+    "action-set",
+    "application-version-set",
+    "close-port",
+    "config-get",
+    "credential-get",
+    "goal-state",
+    "is-leader",
+    "juju-log",
+    "juju-reboot",
+    "leader-get",
+    "leader-set",
+    "network-get",
+    "open-port",
+    "opened-ports",
+    "pod-spec-get",
+    "pod-spec-set",
+    "relation-get",
+    "relation-ids",
+    "relation-list",
+    "relation-model-get",
+    "relation-set",
+    "resource-get",
+    "secret-add",
+    "secret-get",
+    "secret-grant",
+    "secret-ids",
+    "secret-info-get",
+    "secret-remove",
+    "secret-revoke",
+    "secret-set",
+    "state-delete",
+    "state-get",
+    "state-set",
+    "status-get",
+    "status-set",
+    "storage-add",
+    "storage-get",
+    "storage-list",
+    "unit-get",
+})
+
+
+def faked_hook_tools(source: str) -> list[str]:
+    """The hook tools a test fakes, sorted, or `[]` when it fakes none.
+
+    A test fakes hook tools when it drives `ops.model._ModelBackend` and
+    names hook tools as string literals (the files it writes onto `PATH`).
+    Whatever those fakes print is the issue's account of what Juju returned,
+    not something the run observed, and the composer says so.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    uses_backend = any(
+        (isinstance(node, ast.Name) and node.id == "_ModelBackend")
+        or (isinstance(node, ast.Attribute) and node.attr == "_ModelBackend")
+        or (isinstance(node, ast.alias) and node.name == "_ModelBackend")
+        for node in ast.walk(tree)
+    )
+    if not uses_backend:
+        return []
+    return sorted({
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in _HOOK_TOOLS
+    })
 
 
 def _line_of(reason: str) -> int:

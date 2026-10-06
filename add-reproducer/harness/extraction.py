@@ -161,6 +161,53 @@ ops[testing] does not start with the application name:
       ctx.run(ctx.on.start(), testing.State())
       assert captured["unit"].startswith(captured["app"] + "/")
 
+Some bugs are in how ops handles what a Juju hook tool returns
+(`relation-get`, `config-get`, `secret-get`, and so on): an error message,
+an exit status, or output ops does not expect. ops[testing] cannot show
+those. It replaces the backend that runs hook tools, so no hook tool runs
+and nothing Juju returns can happen, and a test that expects Juju's error
+under `testing.Context` fails whether or not the bug is real. For these
+bugs, on `substrate: none`:
+
+- If the issue (or a comment) says what the hook tool printed or returned,
+  test `ops.model.Model` over the real `ops.model._ModelBackend`, with fake
+  hook tools on PATH that print exactly that. Fake every hook tool the code
+  path calls, not only the failing one. Install `ops` and `pytest`, not
+  `ops[testing]`.
+- If the issue does not say what the hook tool printed or returned, there
+  is nothing to fake and only a real Juju would show it. Return an empty
+  commands list, set confidence to "low", and set
+  moving_parts.other["needs_juju"] to one sentence naming the hook tool and
+  what the issue leaves out.
+
+If the bug shows as an exception, catch it and assert on the value, so the
+test fails on an assertion. For example, for a hypothetical report that
+`self.config` raises `ModelError` when `config-get` prints
+`ERROR config not ready`, rather than reading as empty:
+
+  import os
+
+  import ops
+  from ops.model import _ModelBackend
+
+  def fake_hook_tool(bin_dir, name, script):
+      path = bin_dir / name
+      path.write_text("#!/bin/sh\\n" + script + "\\n")
+      path.chmod(0o755)
+
+  def test_unready_config_reads_empty(tmp_path, monkeypatch):
+      bin_dir = tmp_path / "bin"
+      bin_dir.mkdir()
+      monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+      monkeypatch.setenv("JUJU_VERSION", "3.6.0")
+      fake_hook_tool(bin_dir, "config-get", "echo 'ERROR config not ready' >&2; exit 1")
+      model = ops.Model(ops.CharmMeta.from_yaml("name: myapp\\n"), _ModelBackend("myapp/0"))
+      try:
+          config = dict(model.config)
+      except ops.ModelError as e:
+          config = e
+      assert config == {}
+
 "confidence" is about the reproduction hypothesis as a whole -- whether
 these commands, run on this substrate, would actually show the reported
 failure. It is not a measure of how sure you are about the substrate field

@@ -1,3 +1,9 @@
+# 3.8.5 - 06 October 2026
+
+## CI
+
+* Move the release scripts and templates into .github/release
+
 # 3.8.4 - 05 October 2026
 
 ## Fixes

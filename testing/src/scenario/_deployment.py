@@ -46,10 +46,12 @@ import contextlib
 import dataclasses
 import hashlib
 import inspect
+import json
 import os
 import pathlib
 import re
 import shutil
+import sys
 import tempfile
 import types
 import unicodedata
@@ -85,6 +87,7 @@ from .state import (
     RelationBase,
     Secret,
     State,
+    SubordinateRelation,
     _CharmSpec,
     _Event,
 )
@@ -448,6 +451,23 @@ class _IsolatedRunner(_Runner):
         self._ctx.close()
 
 
+class _FreshProcessRunner(_IsolatedRunner):
+    """Runs each dispatch of an on-disk charm in a new process, with its own hash seed.
+
+    Used by ``settle(check_flapping=True)``. In Juju, every hook is a new
+    process, and each process has its own string-hash seed, so anything whose
+    order depends on string hashing (iterating a ``set`` of strings, for
+    example) can come out in a different order in each hook. The normal
+    runners keep one process, and so one seed, for every dispatch.
+    """
+
+    def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
+        # The seed only has to differ between dispatches, and be the same on every run.
+        hash_seed = int(hashlib.sha256(secret_seed.encode()).hexdigest()[:8], 16) or 1
+        self._ctx._child_env['PYTHONHASHSEED'] = str(hash_seed)
+        return super().run(unit_id, event, state, secret_seed)
+
+
 # Public handles
 
 
@@ -607,6 +627,11 @@ class App:
         # Set by Juju once it knows where the charm runs; see _run_in_process
         # and _run_in_worker.
         self._runner: _Runner = _NotStarted()
+        # How to start a worker for this charm: the interpreter, the extra
+        # sys.path, and the front of PYTHONPATH. A charm on disk that runs in
+        # the test process uses the test's own interpreter.
+        self._worker_args: tuple[str, tuple[str, ...], tuple[str, ...]] = (sys.executable, (), ())
+        self._fresh_runner: _Runner | None = None
         self._charm_type: type[CharmBase] | None = None
         self._context_source: _CharmForContext | None = None
         self._leader_id = 0
@@ -682,6 +707,7 @@ class App:
         ``extra_sys_path`` is prepended to the worker's ``sys.path``.
         """
         assert self._charm_source is not None, 'only a charm on disk can run in a worker'
+        self._worker_args = (python_executable, tuple(extra_sys_path), tuple(python_path))
         self._runner = _IsolatedRunner(
             IsolatedContext(
                 charm_source=self._charm_source,
@@ -703,6 +729,37 @@ class App:
         # The mocking itself loads in the worker; the parent reports the
         # configuration problems it can see without importing anything.
         self._charm_mocking(self._charm_source).check()
+
+    def _fresh_process_runner(self) -> _Runner:
+        """The runner ``settle(check_flapping=True)`` uses: a new process for every dispatch.
+
+        A charm defined in the test can't run in another process, so it keeps
+        its usual runner.
+        """
+        if self._charm_source is None:
+            return self._runner
+        if self._fresh_runner is None:
+            python_executable, extra_sys_path, python_path = self._worker_args
+            self._fresh_runner = _FreshProcessRunner(
+                IsolatedContext(
+                    charm_source=self._charm_source,
+                    python_executable=python_executable,
+                    extra_sys_path=extra_sys_path,
+                    python_path=python_path,
+                    meta=self._metadata,
+                    config=self._config_schema,
+                    actions=self._actions,
+                    app_name=self._name,
+                    juju_version=self._juju_version,
+                    app_trusted=self._trust,
+                    mocking=self._mocked,
+                    spawn_per_event=True,
+                ),
+                self._charm_roots,
+                self._unit_roots,
+                self._workload_roots,
+            )
+        return self._fresh_runner
 
     def _charm_mocking(
         self,
@@ -1844,7 +1901,7 @@ class Juju:
         queue.insert(index, _Queued(app, unit_id, event, _Rebind('relation', integration.id)))
 
     # Convergence
-    def settle(self) -> list[Dispatch]:
+    def settle(self, *, check_flapping: bool = False) -> list[Dispatch]:
         """Dispatch queued events until the model converges.
 
         Convergence is reached when the queue is empty: every event produced
@@ -1856,6 +1913,26 @@ class Juju:
         relies on the charms being deterministic too: a charm that, for
         example, writes the current time to a databag ends up in a different
         :class:`State` each run, though the order of dispatch is the same.
+
+        Settling doesn't catch a charm that writes a value whose order
+        depends on string hashing, such as a ``set`` of strings serialised
+        without sorting. In Juju, each hook is a new process with its own hash
+        seed, so the value changes order from hook to hook, and two charms
+        reacting to each other's writes never settle (they "flap"). Here, the
+        test process, and each charm's worker process, keeps one seed for
+        every dispatch, so the order doesn't change. Pass
+        ``check_flapping=True`` to run each dispatch of a charm on disk in a
+        new process, with its own seed, as Juju does. A charm that flaps is
+        then reported as a loop, naming the databag value that changed only
+        in order. That's much slower (a new process for every dispatch), so
+        it's for a test that checks for flapping, not for every test. A charm
+        defined in the test (a :class:`CharmSpec` or a bare class) can't run
+        in another process, so it runs as usual.
+
+        Args:
+            check_flapping: Run each dispatch of a charm on disk in a new
+                process with its own hash seed, and report a value that only
+                changes order as flapping.
 
         Returns:
             The events dispatched, in order, each with the unit it went to and
@@ -1882,7 +1959,7 @@ class Juju:
         self._check_open()
         self._state.trace = []
         already_failed = set(self._state.failed)
-        seen: set[tuple[str, int, str, str]] = set()
+        seen: dict[tuple[str, int, str, str], State] = {}
         dispatched = 0
         while (queued := self._next_queued()) is not None:
             limit = _SETTLE_DISPATCHES_PER_UNIT * max(1, self._unit_count())
@@ -1896,16 +1973,30 @@ class Juju:
             if entry is None:
                 continue
             app, unit, event = entry
-            key = _dispatch_key(app, unit, event)
+            key = _dispatch_key(app, unit, event, ignore_order=check_flapping)
             if key is not None:
-                if key in seen:
+                earlier = seen.get(key)
+                if earlier is not None:
+                    reordered = _reordered_values(unit, earlier, unit._state)
+                    if reordered:
+                        raise JujuError(
+                            f'{unit.name} was about to handle {event.name} with the same '
+                            'State it had the last time it handled it, apart from the order '
+                            'of some databag values, so settling would never end. This looks '
+                            'like flapping: '
+                            + ', and '.join(reordered)
+                            + ', changed only in order. Each hook in Juju is a new process '
+                            'with its own string-hash seed, so a value built by iterating a '
+                            'set of strings comes out in a different order in each hook. '
+                            f'Sort the value before writing it.{self._trace_tail()}'
+                        )
                     raise JujuError(
                         f'{unit.name} was about to handle {event.name} with the same '
                         'State it had the last time it handled it, so settling would '
                         f'never end.{self._trace_tail()}'
                     )
-                seen.add(key)
-            self._dispatch(app, unit, event)
+                seen[key] = unit._state
+            self._dispatch(app, unit, event, fresh_process=check_flapping)
             dispatched += 1
         failed = [(k, e) for k, e in self._state.failed.items() if k not in already_failed]
         if failed:
@@ -2088,12 +2179,15 @@ class Juju:
             return remote_id is None or remote_id in view.remote_units_data
         return True
 
-    def _dispatch(self, app: App, unit: Unit, event: _Event) -> None:
+    def _dispatch(
+        self, app: App, unit: Unit, event: _Event, *, fresh_process: bool = False
+    ) -> None:
         state_in = unit._state
         seed = f'{self.uuid}/{unit.name}/{self._state.dispatches}'
         self._state.dispatches += 1
+        runner = app._fresh_process_runner() if fresh_process else app._runner
         try:
-            state_out = app._runner.run(unit.id, event, state_in, seed)
+            state_out = runner.run(unit.id, event, state_in, seed)
         except _HookFailedError as e:
             self._fail(app, unit, event, e, state_in)
             return
@@ -2621,6 +2715,8 @@ class Juju:
         """
         for app in self._state.apps.values():
             app._runner.close()
+            if app._fresh_runner is not None:
+                app._fresh_runner.close()
         if self._filesystems_finalizer is not None:
             self._filesystems_finalizer()
         self._state.apps.clear()
@@ -2765,21 +2861,133 @@ def _check_state_template(template: State) -> None:
             )
 
 
-def _dispatch_key(app: App, unit: Unit, event: _Event) -> tuple[str, int, str, str] | None:
+def _dispatch_key(
+    app: App, unit: Unit, event: _Event, *, ignore_order: bool = False
+) -> tuple[str, int, str, str] | None:
     """Identify a dispatch by its unit, event and input state, for loop detection.
+
+    With ``ignore_order``, databag values that differ only in the order of
+    their items are treated as the same (see :func:`_unordered`).
 
     Returns ``None`` when the event or state holds something the JSON codec
     can't encode, in which case that dispatch isn't checked.
     """
+    state = unit._state
+    if ignore_order:
+        state = _unordered_databags(state)
+        if event.relation is not None:
+            event = dataclasses.replace(event, relation=_unordered_relation(event.relation))
     try:
         return (
             app.name,
             unit.id,
             _isolated_serde.encode_event(event),
-            unit._state._to_json(),
+            state._to_json(),
         )
     except TypeError:
         return None
+
+
+def _unordered(value: str) -> str:
+    """A databag value with the order of its items made canonical.
+
+    A JSON list is sorted (and so is every list inside it); otherwise, a
+    comma-separated or whitespace-separated value has its items sorted.
+    """
+    try:
+        loaded = json.loads(value)
+    except ValueError:
+        for separator in (',', None):
+            items = value.split(separator)
+            if len(items) > 1:
+                return (separator or ' ').join(sorted(item.strip() for item in items))
+        return value
+
+    def canonical(obj: Any) -> Any:
+        if isinstance(obj, list):
+            items = [canonical(item) for item in cast('list[Any]', obj)]
+            return sorted(items, key=lambda item: json.dumps(item, sort_keys=True))
+        if isinstance(obj, dict):
+            return {k: canonical(v) for k, v in cast('dict[str, Any]', obj).items()}
+        return obj
+
+    return json.dumps(canonical(loaded), sort_keys=True)
+
+
+#: The databag fields of the relation classes: one databag, or one per unit.
+_DATABAG_FIELDS = ('local_app_data', 'local_unit_data', 'remote_app_data', 'remote_unit_data')
+_UNIT_DATABAG_FIELDS = ('remote_units_data', 'peers_data')
+
+
+def _unordered_relation(relation: RelationBase) -> RelationBase:
+    """``relation`` with every databag value passed through :func:`_unordered`."""
+    changes: dict[str, Any] = {}
+    for name in _DATABAG_FIELDS:
+        bag = getattr(relation, name, None)
+        if bag is not None:
+            changes[name] = {k: _unordered(v) for k, v in bag.items()}
+    for name in _UNIT_DATABAG_FIELDS:
+        bags = getattr(relation, name, None)
+        if bags is not None:
+            changes[name] = {
+                unit_id: {k: _unordered(v) for k, v in bag.items()}
+                for unit_id, bag in bags.items()
+            }
+    return dataclasses.replace(relation, **changes)
+
+
+def _unordered_databags(state: State) -> State:
+    """``state`` with every relation databag value passed through :func:`_unordered`."""
+    relations = frozenset(_unordered_relation(relation) for relation in state.relations)
+    return dataclasses.replace(state, relations=relations)
+
+
+def _reordered_values(unit: Unit, before: State, after: State) -> list[str]:
+    """Describe each databag value that differs between two of a unit's states only in order."""
+    found: list[str] = []
+    earlier = {relation.id: relation for relation in before.relations}
+    app_name = unit.app.name
+    for relation in sorted(after.relations, key=lambda r: r.id):
+        old = earlier.get(relation.id)
+        if old is None:
+            continue
+        remote_app = getattr(relation, 'remote_app_name', app_name)
+        bags: list[tuple[str, Mapping[str, str], Mapping[str, str]]] = [
+            (f"{app_name}'s application data", old.local_app_data, relation.local_app_data),
+            (f"{unit.name}'s unit data", old.local_unit_data, relation.local_unit_data),
+        ]
+        if isinstance(relation, Relation) and isinstance(old, Relation):
+            bags.append((
+                f"{remote_app}'s application data",
+                old.remote_app_data,
+                relation.remote_app_data,
+            ))
+            for unit_id, bag in sorted(relation.remote_units_data.items()):
+                old_bag = old.remote_units_data.get(unit_id, {})
+                bags.append((f"{remote_app}/{unit_id}'s unit data", old_bag, bag))
+        elif isinstance(relation, SubordinateRelation) and isinstance(old, SubordinateRelation):
+            bags.append((
+                f"{remote_app}'s application data",
+                old.remote_app_data,
+                relation.remote_app_data,
+            ))
+            bags.append((
+                f"{remote_app}/{relation.remote_unit_id}'s unit data",
+                old.remote_unit_data,
+                relation.remote_unit_data,
+            ))
+        elif isinstance(relation, PeerRelation) and isinstance(old, PeerRelation):
+            for unit_id, bag in sorted(relation.peers_data.items()):
+                old_bag = old.peers_data.get(unit_id, {})
+                bags.append((f"{app_name}/{unit_id}'s unit data", old_bag, bag))
+        for owner, old_bag, new_bag in bags:
+            for key in sorted(new_bag):
+                old_value, new_value = old_bag.get(key), new_bag[key]
+                if old_value is None or old_value == new_value:
+                    continue
+                if _unordered(old_value) == _unordered(new_value):
+                    found.append(f'{key!r} in {owner} on {relation.endpoint}:{relation.id}')
+    return found
 
 
 def _resolve_meta(charm: CharmSource, app: str | None) -> Mapping[str, Any]:

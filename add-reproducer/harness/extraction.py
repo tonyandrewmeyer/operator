@@ -198,7 +198,7 @@ test fails on an assertion. For example, for a hypothetical report that
   def test_unready_config_reads_empty(tmp_path, monkeypatch):
       bin_dir = tmp_path / "bin"
       bin_dir.mkdir()
-      monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+      monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
       monkeypatch.setenv("JUJU_VERSION", "3.6.0")
       fake_hook_tool(bin_dir, "config-get", "echo 'ERROR config not ready' >&2; exit 1")
       model = ops.Model(ops.CharmMeta.from_yaml("name: myapp\\n"), _ModelBackend("myapp/0"))

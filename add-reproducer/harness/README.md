@@ -30,7 +30,10 @@ does.
    that cannot reproduce anything: no `test_` function, a run at module
    level, a `testing.Context` attribute the installed `ops` does not have
    (followed down a chain such as `ctx.charm_spec.charm_dir` while each
-   step's type is certain), a `str` compared with a `Path`, and a few more. If it fails, the
+   step's type is certain), a `str` compared with a `Path`, and a few more.
+   For a test that fakes hook tools over `_ModelBackend`, it also checks the
+   relation endpoints against the test's literal `CharmMeta`, that every hook
+   tool a relation access runs is faked, and `_ModelBackend` keywords. If it fails, the
    extraction is asked again once, with the reasons; the second answer is
    kept whatever it says, and both verdicts go in the extraction record.
 4. **scope second opinion** (`inscope_second_pass.py`) - a second, narrower
@@ -125,7 +128,10 @@ workflow use.
 - `static_test_check/` - 33 saved `#2045` extractions (four prompt versions
   of 8, plus one live dispatch), the calibration corpus for
   `static_test_check.py`; the expected verdicts are in
-  `tests/test_static_test_check.py`.
+  `tests/test_static_test_check.py`. `2709.json` and `2709-hooktool.json`
+  are the saved `#2709` tests (`ops.testing`, and fake hook tools), with
+  their verdicts in `tests/test_hook_tool_fakes.py` and
+  `tests/test_hook_tool_rules.py`.
 
 One caveat is worth stating because it is easy to misread: `#2107` is the
 only `substrate: lxd` extraction anywhere in the corpus, and while the

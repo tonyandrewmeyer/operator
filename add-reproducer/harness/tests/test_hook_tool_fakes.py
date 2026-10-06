@@ -15,6 +15,7 @@ The calibration corpus is the 24 saved `#2709` extractions under
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import textwrap
@@ -31,7 +32,11 @@ from static_test_check import check, faked_hook_tools
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 # The test from `#2709`'s thread, in the shape the prompt asks for: it fails
-# on an assertion on ops 3.8.3 and passes with the fix.
+# on an assertion on ops 3.8.3 and passes with the fix
+# (`test_the_fake_tool_test_fails_only_on_its_assertion` runs it). Its
+# `relation-list` fake printed `[]` until §17, which made ops run
+# `relation-list --app`, get `[]` back as the application name, and fail
+# with `TypeError` on both versions.
 _FAKE_TOOL_TEST = '''\
 import os
 
@@ -51,7 +56,7 @@ def test_gone_relation_databag_reads_empty(tmp_path, monkeypatch):
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
     monkeypatch.setenv('JUJU_VERSION', '3.6.27')
     fake_hook_tool(bin_dir, 'relation-ids', 'echo \\'["db:2"]\\'')
-    fake_hook_tool(bin_dir, 'relation-list', 'echo \\'[]\\'')
+    fake_hook_tool(bin_dir, 'relation-list', 'echo \\'["provider/0"]\\'')
     fake_hook_tool(bin_dir, 'relation-get', 'echo "ERROR permission denied" >&2; exit 1')
     fake_hook_tool(bin_dir, 'is-leader', 'echo false')
     meta = ops.CharmMeta.from_yaml('name: myapp\\nrequires:\\n  db:\\n    interface: db\\n')
@@ -133,6 +138,31 @@ def test_the_fake_tool_test_passes_the_check():
 def test_the_prompt_example_passes_the_check():
     example = _prompt_example()
     assert check(example).passed, check(example).reasons
+
+
+def test_the_prompt_example_nests_no_quotes_in_an_f_string():
+    """All 8 live answers at §16 copied the example's
+    `f"{bin_dir}{os.pathsep}{os.environ['PATH']}"` with the outer quotes
+    swapped, which only parses on Python 3.12 and later (§17)."""
+    example = _prompt_example()
+    for node in ast.walk(ast.parse(example)):
+        if isinstance(node, ast.JoinedStr):
+            for value in node.values:
+                if isinstance(value, ast.FormattedValue):
+                    inner = ast.get_source_segment(example, value.value) or ""
+                    assert "'" not in inner and '"' not in inner, inner
+
+
+@pytest.mark.filterwarnings("ignore:JujuLogHandler is not set up")
+def test_the_fake_tool_test_fails_only_on_its_assertion(tmp_path, monkeypatch):
+    """On the installed ops it fails on its assertion (the bug, ops 3.8.3) or
+    passes (the fix): never on anything else."""
+    namespace: dict = {}
+    exec(compile(_FAKE_TOOL_TEST, "test_gone.py", "exec"), namespace)
+    try:
+        namespace["test_gone_relation_databag_reads_empty"](tmp_path, monkeypatch)
+    except AssertionError:
+        pass
 
 
 # --- faked_hook_tools() ------------------------------------------------------

@@ -1,0 +1,5 @@
+name: alpha
+summary: Charm that depends on confdep v1.
+description: |
+  Demonstration charm for per-charm dependency isolation. Requires the v1 API
+  of confdep (LEGACY_NAME, compute()==1), which is incompatible with v2.

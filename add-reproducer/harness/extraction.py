@@ -181,9 +181,17 @@ bugs, on `substrate: none`:
   what the issue leaves out.
 
 If the bug shows as an exception, catch it and assert on the value, so the
-test fails on an assertion. For example, for a hypothetical report that
-`self.config` raises `ModelError` when `config-get` prints
-`ERROR config not ready`, rather than reading as empty:
+test fails on an assertion. When the bug is that ops raises (or raises the
+wrong exception) where the issue says it should not, wrap the access that
+raises in `try:` / `except ops.ModelError as e: result = e`, then
+`assert result == <what the issue says it should be>`: on the buggy version
+the test fails with an `AssertionError`, and on the fixed version it passes.
+Left uncaught, the exception fails the test on the buggy version without an
+assertion failing, and that shows nothing. Use `pytest.raises` only when the
+issue says an exception should be raised, and then only with the exact class
+ops raises. For example, for a hypothetical report that `self.config` raises
+`ModelError` when `config-get` prints `ERROR config not ready`, rather than
+reading as empty:
 
   import os
 
@@ -202,6 +210,7 @@ test fails on an assertion. For example, for a hypothetical report that
       monkeypatch.setenv("JUJU_VERSION", "3.6.0")
       fake_hook_tool(bin_dir, "config-get", "echo 'ERROR config not ready' >&2; exit 1")
       model = ops.Model(ops.CharmMeta.from_yaml("name: myapp\\n"), _ModelBackend("myapp/0"))
+      # Catch the error the bug raises, so the bug fails the assert below.
       try:
           config = dict(model.config)
       except ops.ModelError as e:

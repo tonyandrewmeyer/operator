@@ -261,9 +261,12 @@ def test_a_denied_first_tool_needs_is_leader(access, tools, first, tmp_path, mon
         _run(source, tmp_path, monkeypatch)
     assert raised.value.filename == "is-leader"
 
+    # With `is-leader` faked the access gets to the bug, and the error it
+    # raises is uncaught, which `_uncaught_hook_tool_error()` rejects (§18).
     fakes["is-leader"] = "echo false"
     source = _shape(access, fakes)
-    assert check(source).passed, check(source).reasons
+    (reason,) = check(source).reasons
+    assert "so the installed ops raises `ops.ModelError` there, and nothing around it catches that" in reason
     with pytest.raises(static_test_check._ops().ModelError):
         _run(source, tmp_path, monkeypatch)
 
@@ -400,7 +403,9 @@ def test_is_leader_needs_a_fake_ops_certainly_sees_failing():
     fakes = dict(_OUTPUT, **{"relation-get": "echo 'ERROR permission denied'; exit 1"})
     del fakes["is-leader"]
     access = "relation = model.get_relation('db', 2)\ndict(relation.data[relation.app])"
-    assert check(_shape(access, fakes)).passed  # to stdout, not stderr
+    # To stdout, not stderr: no `is-leader`, though the uncaught `ModelError`
+    # it raises is rejected (§18).
+    assert not [r for r in check(_shape(access, fakes)).reasons if "is-leader" in r]
     fakes["relation-get"] = "echo 'ERROR permission denied' >&2"
     assert check(_shape(access, fakes)).passed  # exits 0
     fakes["relation-get"] = "echo \"ERROR $X denied\" >&2; exit 1"

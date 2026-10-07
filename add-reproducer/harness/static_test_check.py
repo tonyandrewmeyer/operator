@@ -38,6 +38,7 @@ import importlib
 import inspect
 import json
 import shlex
+import typing
 
 from models import StaticCheckResult, embedded_test_file
 
@@ -356,6 +357,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _backend_under_testing(tree)
     reasons += _undeclared_endpoints(tree)
     reasons += _unfaked_hook_tools(tree)
+    reasons += _uncaught_hook_tool_error(tree)
     reasons += _backend_keywords(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
@@ -2335,9 +2337,10 @@ def _and_list(items) -> str:
     return ", ".join(items[:-1]) + ", and " + items[-1]
 
 
-def _certain_target(statement: ast.AST, names: _Names, ops) -> tuple[ast.AST, bool] | None:
+def _certain_target(statement: ast.AST, names: _Names, ops) -> tuple[ast.AST, bool, list[ast.AST]] | None:
     """(the statement whose accesses certainly run, whether it is inside a
-    `try` / `with pytest.raises`) for a statement at the top of a test.
+    `try` / `with pytest.raises`, the exception types those catch) for a
+    statement at the top of a test.
 
     Inside a `try`, only the first statement of its body, and only when every
     handler catches `ops.ModelError` subclasses alone, so `FileNotFoundError`
@@ -2354,18 +2357,21 @@ def _certain_target(statement: ast.AST, names: _Names, ops) -> tuple[ast.AST, bo
         return True
 
     guarded = False
+    caught: list[ast.AST] = []
     while isinstance(statement, (ast.Try, ast.With)):
         if isinstance(statement, ast.Try):
-            if not model_errors_only([h.type for h in statement.handlers]):
-                return None
-        elif not model_errors_only([_raises_types(item, names) for item in statement.items]):
+            types = [h.type for h in statement.handlers]
+        else:
+            types = [_raises_types(item, names) for item in statement.items]
+        if not model_errors_only(types):
             return None
+        caught += types
         statement, guarded = statement.body[0], True
     if isinstance(statement, (ast.stmt)) and not isinstance(
         statement, (ast.Expr, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Assert, ast.Delete, ast.Pass)
     ):
         return None
-    return statement, guarded
+    return statement, guarded, caught
 
 
 def _unconditional(node: ast.AST, statement: ast.AST) -> bool:
@@ -2439,19 +2445,12 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
     only catches `ops.ModelError`s, with no other call in that statement.
     Everything after a `return` or a skip is left alone.
     """
-    if not _faked_hook_tools(tree):
+    reasons = []
+    found = _hook_tool_accesses(tree)
+    if found is None:
         return []
-    counts = _file_binding_counts(tree)
-    ops = _ops()
-    if counts is None or ops is None:
-        return []
-    names = _Names(tree, counts)
     scripts = _fake_scripts(tree)
     faked = set(scripts)
-    models = _models(names)
-    backends = _backends(names)
-    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-    reasons = []
 
     def authz_failure(tool: str) -> str | None:
         found = scripts.get(tool, [])
@@ -2459,6 +2458,80 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
             return _authz_failure(found[0])
         return None
 
+    for access in found:
+        node, tools, endpoint, relation_id = access.node, access.tools, access.endpoint, access.relation_id
+        if access.guarded and not _calls_only(access.target, node):
+            continue
+        failure = authz_failure(access.first)
+        if failure is not None and "is-leader" not in faked and not access.asserted:
+            reasons.append(
+                f"line {node.lineno}: the `{access.first}` fake fails with \"{failure}\", so "
+                f"for `{ast.unparse(node)}` ops runs `is-leader` as well (it checks "
+                "leadership to log the failure as a security event), and the test does "
+                "not fake `is-leader`, so it fails with `FileNotFoundError` before it "
+                "reaches the bug; fake `is-leader` too, printing `true` or `false`"
+            )
+        for tool in tools:
+            found_scripts = scripts.get(tool, [])
+            printed = (
+                _non_json_output(found_scripts[0])
+                if len(found_scripts) == 1 and found_scripts[0] is not None
+                else None
+            )
+            if printed is not None:
+                shown = f"`{printed}`" if printed else "nothing"
+                reasons.append(
+                    f"line {node.lineno}: `{ast.unparse(node)}` needs `{tool}`, and its "
+                    f"fake prints {shown}, which is not JSON, so ops fails with "
+                    "`JSONDecodeError` before it reaches the bug; "
+                    f"{_tool_output(tool, endpoint, relation_id)}"
+                )
+        missing = [t for t in tools if t not in faked]
+        if missing:
+            what = "; ".join(_tool_output(t, endpoint, relation_id) for t in missing)
+            reasons.append(
+                f"line {node.lineno}: `{ast.unparse(node)}` needs the "
+                f"{_and_list(f'`{t}`' for t in tools)} hook tool"
+                f"{'s' if len(tools) > 1 else ''}, and the test does not fake "
+                f"{_and_list(f'`{t}`' for t in missing)}, so it fails with "
+                "`FileNotFoundError` before it reaches the bug; fake "
+                f"{'it' if len(missing) == 1 else 'them'} too: {what}"
+            )
+    return list(dict.fromkeys(reasons))
+
+
+class _Access(typing.NamedTuple):
+    """A model access `_hook_tool_accesses()` is certain runs, if the test
+    gets to it."""
+
+    function: ast.FunctionDef
+    index: int  # of the statement in `function.body`
+    node: ast.AST
+    tools: tuple[str, ...]  # the hook tools it runs
+    first: str  # the one it runs first
+    endpoint: str | None
+    relation_id: int | None
+    target: ast.AST  # the statement it is in, inside any `try` / `with`
+    guarded: bool  # inside a `try` / `with pytest.raises(...)`
+    caught: list[ast.AST]  # what those catch: `ops.ModelError` subclasses
+    asserted: bool  # something before it could fail the test on an assertion
+
+
+def _hook_tool_accesses(tree: ast.Module) -> list[_Access] | None:
+    """The model accesses in a fake-hook-tool test whose hook tools are
+    known (see `_unfaked_hook_tools()`), or `None` when the file is not that
+    shape or its names cannot be known."""
+    if not _faked_hook_tools(tree):
+        return None
+    counts = _file_binding_counts(tree)
+    ops = _ops()
+    if counts is None or ops is None:
+        return None
+    names = _Names(tree, counts)
+    models = _models(names)
+    backends = _backends(names)
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    found: list[_Access] = []
     for function in _test_functions(tree):
         assigned: set[str] = set()
         # {relation name: (endpoint, relation ID, whether reading it needs
@@ -2466,18 +2539,18 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
         relations: dict[str, tuple[str, int | None, bool]] = {}
         contents: dict[str, str] = {}
         asserted = False
-        for statement in function.body:
+        for index, statement in enumerate(function.body):
             if _stops_the_test(statement):
                 break
             certain = _certain_target(statement, names, ops)
             if certain is not None:
-                target, guarded = certain
+                target, guarded, caught = certain
                 live_models = {m for m in models if m in assigned}
                 accesses = []  # (node, tools, endpoint, relation ID)
                 for node in ast.walk(target):
-                    found = _relation_access(node, live_models)
-                    if found is not None:
-                        accesses.append((node, *found))
+                    access = _relation_access(node, live_models)
+                    if access is not None:
+                        accesses.append((node, *access))
                     elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                         owner = node.func.value
                         backend = (isinstance(owner, ast.Name) and owner.id in backends and owner.id in assigned) or (
@@ -2498,40 +2571,22 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
                 for node, tools, endpoint, relation_id in accesses:
                     if id(node) in nested or not _unconditional(node, target):
                         continue
-                    if guarded and not _calls_only(target, node):
-                        continue
                     first = tools[-1] if tools[0] == "relation-list" and "relation-get" in tools else tools[0]
-                    failure = authz_failure(first)
-                    if failure is not None and "is-leader" not in faked and not asserted:
-                        reasons.append(
-                            f"line {node.lineno}: the `{first}` fake fails with \"{failure}\", so "
-                            f"for `{ast.unparse(node)}` ops runs `is-leader` as well (it checks "
-                            "leadership to log the failure as a security event), and the test does "
-                            "not fake `is-leader`, so it fails with `FileNotFoundError` before it "
-                            "reaches the bug; fake `is-leader` too, printing `true` or `false`"
+                    found.append(
+                        _Access(
+                            function,
+                            index,
+                            node,
+                            tools,
+                            first,
+                            endpoint,
+                            relation_id,
+                            target,
+                            guarded,
+                            caught,
+                            asserted,
                         )
-                    for tool in tools:
-                        found = scripts.get(tool, [])
-                        printed = _non_json_output(found[0]) if len(found) == 1 and found[0] is not None else None
-                        if printed is not None:
-                            shown = f"`{printed}`" if printed else "nothing"
-                            reasons.append(
-                                f"line {node.lineno}: `{ast.unparse(node)}` needs `{tool}`, and its "
-                                f"fake prints {shown}, which is not JSON, so ops fails with "
-                                "`JSONDecodeError` before it reaches the bug; "
-                                f"{_tool_output(tool, endpoint, relation_id)}"
-                            )
-                    missing = [t for t in tools if t not in faked]
-                    if missing:
-                        what = "; ".join(_tool_output(t, endpoint, relation_id) for t in missing)
-                        reasons.append(
-                            f"line {node.lineno}: `{ast.unparse(node)}` needs the "
-                            f"{_and_list(f'`{t}`' for t in tools)} hook tool"
-                            f"{'s' if len(tools) > 1 else ''}, and the test does not fake "
-                            f"{_and_list(f'`{t}`' for t in missing)}, so it fails with "
-                            "`FileNotFoundError` before it reaches the bug; fake "
-                            f"{'it' if len(missing) == 1 else 'them'} too: {what}"
-                        )
+                    )
             # What this statement binds, for the statements after it: only
             # plain assignments at the top of the test.
             if (
@@ -2543,17 +2598,335 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
                 name = statement.targets[0].id
                 assigned.add(name)
                 value = statement.value
-                found = _relation_access(value, {m for m in models if m in assigned})
-                if found is not None and (isinstance(value, ast.Call) or found[0] == ("relation-ids", "relation-list")):
-                    needs_list = found[0] == ("relation-ids",)
-                    relations[name] = (found[1], found[2], needs_list)
+                access = _relation_access(value, {m for m in models if m in assigned})
+                if access is not None and (isinstance(value, ast.Call) or access[0] == ("relation-ids", "relation-list")):
+                    needs_list = access[0] == ("relation-ids",)
+                    relations[name] = (access[1], access[2], needs_list)
                 else:
                     relation = _databag(value, relations, {})
                     if relation is not None and isinstance(value, ast.Subscript):
                         contents[name] = relation
             if _may_fail_an_assertion(statement, functions):
                 asserted = True
+    return found
+
+
+def _uncaught_hook_tool_error(tree: ast.Module) -> list[str]:
+    """A model access whose first hook tool's fake certainly fails, so ops
+    certainly raises `ops.ModelError` there, with nothing around it that
+    catches `ops.ModelError`.
+
+    On the buggy version the test then dies on that exception rather than
+    failing an assertion, and rung 1c keeps it silent: repaired by hand from
+    §17's reasons, 4 of `#2709`'s 8 tests reached the bug and passed with the
+    fix, and none was valid. Two read the databag with nothing around it and
+    one wrapped the read in `pytest.raises(RelationNotFoundError)`, which a
+    plain `ModelError` gets out of (`spike-step-5/static-retry/RESULT.md`
+    §17, §18). So this also rejects a `pytest.raises(X)` or `except X`
+    around the access when `X` is a strict subclass of `ops.ModelError`.
+
+    What ops raises comes from the installed ops's `_wrap_hookcmd()` (ops
+    3.8.3): a hook tool that exits non-zero is `ModelError(stderr)`, except
+    `RelationNotFoundError` for a relation tool whose stderr says `relation
+    not found` (which a databag read turns into `{}`). Printing `ERROR ...`
+    and exiting 0 is not a failure to ops (the output goes to
+    `json.loads()`), so only the exit status counts. Each row is checked by
+    running it (`tests/test_hook_tool_rules.py`).
+
+    It lets the test through unless all of these hold:
+
+    - the access is one `_hook_tool_accesses()` is certain runs, and nothing
+      before it in the test could fail on an assertion (if something can,
+      the test may fail there on the buggy version and pass with the fix,
+      which is a valid test whatever comes after: so no `assert`, `raise`,
+      `pytest.fail` or `pytest.raises`, and no call to a function the file
+      defines other than the fake helper), and it is the only call in its
+      statement;
+    - the first tool it runs is faked exactly once, by a statement at the top
+      of the test before the access, with a literal script that is only
+      `echo <literal words>` (to stdout or `>&2`) followed by `exit <1-255>`,
+      and its stderr does not say `not found`;
+    - when that stderr is an authorisation error and the installed ops checks
+      leadership for it: the tool is not `is-leader` (which recurses on 3.8.3
+      and raises `RecursionError`), and `is-leader` is faked the same way,
+      once, before the access, printing `true` or `false`;
+    - when the tool is `relation-get` on an application databag, or on one
+      the check cannot tell: the test sets `JUJU_VERSION` once, to a literal
+      version with application data, at its top before every
+      `_ModelBackend(...)` in the file (ops reads it when the backend is
+      built, and raises `RuntimeError` instead of running `relation-get`
+      without it); a direct `relation_get()` call has to bind to the
+      installed signature, with `is_app` a literal `True` or `False`.
+    """
+    ops = _ops()
+    if ops is None or not _hook_tool_failure_raises_model_error():
+        return []
+    accesses = _hook_tool_accesses(tree)
+    if not accesses:
+        return []
+    names = _Names(tree, _file_binding_counts(tree) or {})
+    scripts = _fake_scripts(tree)
+    helpers = _fake_helpers(tree)
+    reasons = []
+    defined = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for access in accesses:
+        node, tool = access.node, access.first
+        if access.asserted or not _calls_only(access.target, node):
+            continue
+        before = access.function.body[: access.index]
+        # `asserted` looks one call deep; here any call into the file's own
+        # functions but the fake helper might fail an assertion first.
+        if any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in defined - set(helpers)
+            for statement in before
+            for n in ast.walk(statement)
+        ):
+            continue
+        failure = _certain_fake(scripts, helpers, before, tool, _certain_failure)
+        if failure is None:
+            continue
+        code, stderr = failure
+        lowered = stderr.lower()
+        if "not found" in lowered:
+            continue
+        if _security_event_runs_is_leader() and any(m in lowered for m in _AUTHZ_MESSAGES):
+            if tool == "is-leader":
+                continue
+            if _certain_fake(scripts, helpers, before, "is-leader", _prints_a_json_bool) is None:
+                continue
+        if tool == "relation-get" and not _relation_get_runs(access, tree, names, ops):
+            continue
+        if any(_may_catch(t, ops.ModelError, names) for t in access.caught):
+            continue
+        reasons.append(_uncaught_reason(access, code, stderr))
     return list(dict.fromkeys(reasons))
+
+
+def _uncaught_reason(access: _Access, code: int, stderr: str) -> str:
+    node, tool = access.node, access.first
+    shown = ast.unparse(node)
+    printed = f', printing "{stderr}" to stderr' if stderr else ""
+    what = f"line {node.lineno}: `{shown}` runs `{tool}` first, and the test's `{tool}` fake exits {code}{printed}, so the installed ops raises `ops.ModelError` there"
+    if access.caught:
+        wrong = _and_list(f"`{ast.unparse(t)}`" for t in access.caught)
+        pytest_raises = _in_pytest_raises(access.function.body[access.index])
+        around = f"the `pytest.raises({ast.unparse(access.caught[0])})`" if pytest_raises else f"the `except` for {wrong}"
+        what += f", not {wrong}, and {around} around it does not catch a plain `ModelError`"
+    else:
+        pytest_raises = False
+        what += ", and nothing around it catches that"
+    if isinstance(node, ast.Compare):
+        # A databag compared with a mapping, or `key in bag`: read the bag.
+        on_right = isinstance(node.ops[0], (ast.In, ast.NotIn)) or isinstance(node.left, (ast.Dict, ast.Call))
+        suggested = f"dict({ast.unparse(node.comparators[0] if on_right else node.left)})"
+    else:
+        suggested = shown
+    reason = (
+        f"{what}: the test dies on that exception instead of failing an assertion, so its run "
+        "cannot tell the bug from a broken test; catch `ops.ModelError` around the access and "
+        f"assert on what the issue says should happen instead: `try: result = {suggested}` / "
+        "`except ops.ModelError as e: result = e` / `assert result == <what the issue says it "
+        "should be>`, so the buggy version fails that assertion and the fixed version passes"
+    )
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _BACKEND_METHOD_TOOLS:
+        # Asserting on the backend call's own result can fail with the fix too:
+        # ops can catch that layer's exception and return a value a layer up.
+        # By hand, `#2709` run 1 asserting `{}` on `relation_get()` failed on
+        # 3.8.3 and on `main`, a false reproduction (§18).
+        reason += (
+            f". `{ast.unparse(node.func)}()` is `_ModelBackend`, a layer below what a charm sees, "
+            "and ops can catch an exception there and return a value instead, so a test of the "
+            "backend call can fail with the fix as well; when the issue says what a charm should "
+            "see, read that through `ops.Model` (a relation's databag, `model.config`, ...) in "
+            "the same pattern and assert on it"
+        )
+    if pytest_raises:
+        reason += (
+            "; `pytest.raises` is only right when the issue says an exception should be raised, "
+            "and then only with the exact class ops raises"
+        )
+    return reason
+
+
+def _in_pytest_raises(statement: ast.stmt) -> bool:
+    """Whether the `try` / `with` chain `_certain_target()` walks down from
+    `statement` has a `with pytest.raises(...)` in it."""
+    while isinstance(statement, (ast.Try, ast.With)):
+        if isinstance(statement, ast.With):
+            return True
+        statement = statement.body[0]
+    return False
+
+
+@functools.cache
+def _hook_tool_failure_raises_model_error() -> bool:
+    """Whether the installed ops turns a failed hook tool into
+    `ModelError(stderr)`, except a relation tool whose stderr says `relation
+    not found` (ops 3.8.3). The `#2709` fix also treats a gone relation's
+    "permission denied" as `RelationNotFoundError`, so with it installed the
+    rule turns itself off rather than claim the wrong class."""
+    ops = _ops()
+    if ops is None:
+        return False
+    try:
+        source = inspect.getsource(ops.model._ModelBackend._wrap_hookcmd)
+    except (AttributeError, OSError, TypeError):
+        return False
+    return (
+        "raise ModelError(e.stderr) from e" in source
+        and "'relation not found' in e.stderr.lower()" in source
+        and "_relation_is_gone" not in source
+    )
+
+
+def _fake_helpers(tree: ast.Module) -> dict[str, tuple[int, int]]:
+    return {
+        node.name: shape
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and (shape := _fake_helper(node)) is not None
+    }
+
+
+def _certain_fake(scripts, helpers, before: list[ast.stmt], tool: str, read):
+    """`read(script)` for `tool`'s one fake, when the file fakes it exactly
+    once, with a literal script, in one of the `before` statements (a plain
+    call to a recognised helper); otherwise `None`."""
+    found = scripts.get(tool, [])
+    if len(found) != 1 or found[0] is None:
+        return None
+    for statement in before:
+        call = statement.value if isinstance(statement, ast.Expr) else None
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in helpers):
+            continue
+        name_at, _ = helpers[call.func.id]
+        if len(call.args) > name_at and isinstance(call.args[name_at], ast.Constant) and call.args[name_at].value == tool:
+            return read(found[0])
+    return None
+
+
+_SHELL_SPECIALS = "$`|&<>*?[\\;(){}'\"#~="
+
+
+def _echoes(command: str) -> tuple[str, bool] | None:
+    """(what it prints, whether to stderr) for `echo <literal words>`,
+    optionally with one `>&2` or `1>&2`; `None` for anything else."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    to_stderr = False
+    for redirect in (">&2", "1>&2"):
+        if redirect in words:
+            if to_stderr or words.count(redirect) != 1:
+                return None
+            words.remove(redirect)
+            to_stderr = True
+    if not words or words[0] != "echo":
+        return None
+    if any(w.startswith("-") or any(c in w for c in _SHELL_SPECIALS) for w in words[1:]):
+        return None
+    return " ".join(words[1:]), to_stderr
+
+
+def _certain_failure(script: str) -> tuple[int, str] | None:
+    """(exit status, what it printed to stderr) for a script that is only
+    `echo <literal words>` commands and then `exit <1-255>`; `None` for
+    anything else."""
+    commands = [c.strip() for line in script.splitlines() for c in line.split(";") if c.strip()]
+    if not commands:
+        return None
+    leave = commands.pop().split()
+    if len(leave) != 2 or leave[0] != "exit" or not leave[1].isdigit() or not 1 <= int(leave[1]) <= 255:
+        return None
+    stderr = []
+    for command in commands:
+        echoed = _echoes(command)
+        if echoed is None:
+            return None
+        if echoed[1]:
+            stderr.append(echoed[0])
+    return int(leave[1]), "\n".join(stderr)
+
+
+def _prints_a_json_bool(script: str) -> bool | None:
+    """`True` for a script that is exactly `echo true` or `echo false`
+    (optionally `; exit 0`), else `None`."""
+    commands = [c.strip() for line in script.splitlines() for c in line.split(";") if c.strip()]
+    if commands and commands[-1] == "exit 0":
+        commands.pop()
+    if len(commands) != 1:
+        return None
+    echoed = _echoes(commands[0])
+    return True if echoed is not None and not echoed[1] and echoed[0] in ("true", "false") else None
+
+
+def _relation_get_runs(access: _Access, tree: ast.Module, names: _Names, ops) -> bool:
+    """Whether ops certainly gets as far as running `relation-get` for this
+    access, rather than raising `RuntimeError` (application data on a Juju
+    version without it, which is any when `JUJU_VERSION` is unset) or
+    `TypeError` (a direct call that does not bind, or a non-bool `is_app`)."""
+    node = access.node
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "relation_get":
+        func = inspect.getattr_static(ops.model._ModelBackend, "relation_get", None)
+        if not inspect.isfunction(func) or any(isinstance(a, ast.Starred) for a in node.args):
+            return False
+        if any(k.arg is None for k in node.keywords):
+            return False
+        try:
+            bound = inspect.signature(func).bind(None, *node.args, **{k.arg: k.value for k in node.keywords})
+        except TypeError:
+            return False
+        is_app = bound.arguments.get("is_app")
+        if not (isinstance(is_app, ast.Constant) and isinstance(is_app.value, bool)):
+            return False
+        if not is_app.value:
+            return True
+    return _juju_version_set_first(access, tree, names, ops)
+
+
+def _juju_version_set_first(access: _Access, tree: ast.Module, names: _Names, ops) -> bool:
+    """Whether the test sets `JUJU_VERSION` to a literal version with
+    application data, at its top, before every `_ModelBackend(...)` in the
+    file, and nothing else in the file names `JUJU_VERSION`."""
+    mentions = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == "JUJU_VERSION"]
+    if len(mentions) != 1:
+        return False
+    body = access.function.body
+    set_at = None
+    for index, statement in enumerate(body[: access.index]):
+        value = None
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            call = statement.value
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "setenv"
+                and len(call.args) == 2
+                and not call.keywords
+                and call.args[0] is mentions[0]
+            ):
+                value = call.args[1]
+        elif (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Subscript)
+            and statement.targets[0].slice is mentions[0]
+            and names.dotted(statement.targets[0].value) == "os.environ"
+        ):
+            value = statement.value
+        if value is not None:
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                return False
+            try:
+                if not ops.JujuVersion(value.value).has_app_data():
+                    return False
+            except Exception:
+                return False
+            set_at = index
+            break
+    if set_at is None:
+        return False
+    after = {id(n) for statement in body[set_at + 1 : access.index + 1] for n in ast.walk(statement)}
+    return all(id(n) in after for n in ast.walk(tree) if _is_backend_call(n, names))
 
 
 def _backend_keywords(tree: ast.Module) -> list[str]:

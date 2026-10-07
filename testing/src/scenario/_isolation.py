@@ -607,7 +607,12 @@ class IsolatedContext:
         self._child_env = _child_environ()
         self._worker: _PersistentWorker | None = None
 
-    def _build_request(self, event: _Event, state: State) -> dict[str, Any]:
+    def _build_request(
+        self,
+        event: _Event,
+        state: State,
+        unit_id: int | None = None,
+    ) -> dict[str, Any]:
         return {
             'charm_source': str(self._env.charm_source),
             'extra_sys_path': list(self._env.extra_sys_path),
@@ -615,7 +620,7 @@ class IsolatedContext:
             'config': self._config,
             'actions': self._actions,
             'app_name': self.app_name,
-            'unit_id': self.unit_id,
+            'unit_id': self.unit_id if unit_id is None else unit_id,
             'juju_version': self.juju_version,
             'app_trusted': self.app_trusted,
             'charm_root': None if self.charm_root is None else str(self.charm_root),
@@ -655,7 +660,16 @@ class IsolatedContext:
             state_out = ctx.run(ctx.on.install(), State())
             assert state_out.unit_status == ActiveStatus('ready')
         """
-        request = self._build_request(event, state)
+        return self._run_as(self.unit_id, event, state)
+
+    def _run_as(self, unit_id: int, event: _Event, state: State) -> State:
+        """Dispatch ``event`` as unit ``unit_id`` rather than this context's own unit.
+
+        The unit ID travels in the request rather than being baked into the
+        worker, so a single persistent worker serves every unit of an
+        application: one process per application rather than one per unit.
+        """
+        request = self._build_request(event, state, unit_id=unit_id)
         if self._spawn_per_event:
             return _dispatch_spawn(self._env, self._child_env, request, self.dispatch_timeout)
         if self._worker is None:

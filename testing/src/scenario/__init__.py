@@ -68,6 +68,7 @@ from __future__ import annotations
 
 from ops._private.harness import ActionFailed  # For backwards compatibility.
 
+from ._deployment import App, CharmSource, CharmSpec, Dispatch, Juju, Unit
 from .context import CharmEvents, Context, Manager
 from .errors import StateValidationError  # For backwards compatibility.
 from .state import (
@@ -116,9 +117,12 @@ __all__ = [
     'ActiveStatus',
     'Address',
     'AnyJson',
+    'App',
     'BindAddress',
     'BlockedStatus',
     'CharmEvents',
+    'CharmSource',
+    'CharmSpec',
     'CharmType',
     'CheckInfo',
     'CloudCredential',
@@ -126,9 +130,11 @@ __all__ = [
     'Container',
     'Context',
     'DeferredEvent',
+    'Dispatch',
     'ErrorStatus',
     'Exec',
     'ICMPPort',
+    'Juju',
     'JujuLogLine',
     'MaintenanceStatus',
     'Manager',
@@ -151,6 +157,7 @@ __all__ = [
     'SubordinateRelation',
     'TCPPort',
     'UDPPort',
+    'Unit',
     'UnitID',
     'UnknownStatus',
     'WaitingStatus',

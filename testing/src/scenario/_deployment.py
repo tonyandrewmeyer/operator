@@ -1,0 +1,1686 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+"""Model-level testing: drive several charms with Juju-shaped operations.
+
+:class:`~ops.testing.Context` runs *one* event against *one* charm. This
+module adds a layer above it: a :class:`Juju` owns a set of applications
+(:class:`App`), each with its own units and its own :class:`State` per unit,
+and exposes Juju-shaped operations (``deploy``, ``add_unit``, ``remove_unit``,
+``config``) that describe **intents rather than events**. The ``Juju`` works
+out the Juju-faithful event sequence each intent produces, and
+:meth:`Juju.settle` drains it in a convergence loop.
+
+A test therefore reads as a sequence of operations, a ``settle()``, and then
+assertions on the resulting state, rather than as a hand-written event
+sequence::
+
+    from ops import testing
+
+    juju = testing.Juju()
+    web = juju.deploy('./charms/myapp', num_units=2)
+    juju.config(web, {'log_level': 'debug'})
+    juju.settle()
+    assert web.leader.state.unit_status == testing.ActiveStatus('ready')
+
+A charm comes from a path to its source, or, for a charm that runs in the test
+process, from a :class:`CharmSpec` holding its class and metadata.
+
+:class:`Juju` is its own class, not a subclass of :class:`~ops.testing.Model`:
+``Model`` is a frozen dataclass held as ``State.model`` in every unit's
+:class:`State`, so ``Juju`` produces the ``Model`` values that go into each
+unit's state rather than being one. The identity it carries (``name``,
+``uuid``, ``type``, ``cloud_spec``) is stamped into every unit's
+:class:`State`, which stops two applications under the same ``Juju`` from
+disagreeing about which model they are in.
+
+.. note::
+    Cross-application operations (``integrate`` and the event propagation
+    between related applications) are not in this layer yet. What is here is
+    the single-application half: everything an application does on its own,
+    including its peer relation.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import hashlib
+import inspect
+import os
+import pathlib
+import re
+import shutil
+import tempfile
+import types
+import unicodedata
+from collections import deque
+from collections.abc import Callable, Collection, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
+from uuid import UUID, uuid4, uuid5
+
+from . import _isolated_serde
+from ._isolated_worker import _load_charm_type
+from ._isolation import IsolatedContext, _load_charm_spec
+from .context import _DEFAULT_JUJU_VERSION, Context
+from .errors import IsolationError, JujuError, MetadataNotFoundError
+from .state import (
+    CharmType,
+    CloudSpec,
+    Container,
+    Model,
+    PeerRelation,
+    RawDataBagContents,
+    Secret,
+    State,
+    _CharmSpec,
+    _Event,
+    _next_relation_id,
+)
+
+if TYPE_CHECKING:
+    from ops.charm import CharmBase
+
+
+@dataclasses.dataclass(frozen=True)
+class CharmSpec(Generic[CharmType]):
+    """A charm that runs in the test process: its class, metadata, and mocking.
+
+    Deploy one with :meth:`Juju.deploy` to run a charm class defined in the
+    test, or a charm library's stand-in for the charm on the other end of a
+    relation, which the library's testing package provides::
+
+        spec = testing.CharmSpec(MyCharm, meta={'name': 'myapp'})
+        app = juju.deploy(spec)
+
+    A ``CharmSpec`` is frozen, so one can be deployed any number of times.
+    """
+
+    charm_type: type[CharmType]
+    """The charm class."""
+
+    meta: Mapping[str, Any]
+    """The charm's metadata, shaped like ``charmcraft.yaml``.
+
+    Config options go under ``config`` and actions under ``actions``, as they
+    do in ``charmcraft.yaml``, rather than in separate mappings.
+    """
+
+    mocking: Callable[..., contextlib.AbstractContextManager[Any]] | None = None
+    """A function returning a context manager that mocks what the charm needs.
+
+    :class:`Juju` opens it around each of the application's dispatches.
+    """
+
+
+#: What ``charm=`` accepts: a path to charm source on disk, a charm class, or a
+#: :class:`CharmSpec`.
+CharmSource: TypeAlias = 'str | pathlib.Path | type[CharmBase] | CharmSpec[Any]'
+
+#: How many dispatches per unit :meth:`Juju.settle` allows before it decides
+#: the model will not converge.
+_SETTLE_DISPATCHES_PER_UNIT = 100
+
+#: How many dispatches from the end of the trace a non-convergence error shows.
+_TRACE_TAIL = 10
+
+#: The namespace for the model UUIDs that :class:`Juju` derives from a test's
+#: identity when the test doesn't give one.
+_MODEL_UUID_NAMESPACE = UUID('6f2b0c5e-3d4a-4b8e-9c1f-0a7d5e2b8c43')
+
+#: The longest the test-name part of a derived model name can be.
+_MODEL_SLUG_LENGTH = 30
+
+#: For each test identity, the slots held by ``Juju`` objects that haven't been
+#: closed. The first ``Juju`` in a test has slot 1, a second one opened
+#: alongside it has slot 2, and so on.
+_model_slots: dict[str, set[int]] = {}
+
+#: ``State`` fields that describe a unit's place in the model. :class:`Juju`
+#: sets these itself, so a ``state_template`` may not.
+_JUJU_OWNED_FIELDS = ('leader', 'planned_units', 'model', 'config', 'relations')
+
+
+@dataclasses.dataclass(frozen=True)
+class Dispatch:
+    """One event dispatched to one unit, as recorded in a settle trace.
+
+    It's a record of the event as it happened, with no live handles: it
+    describes the unit as it was at that point, however the model has moved
+    on since, and two ``Dispatch`` objects compare by value. The application
+    itself is ``juju.apps[dispatch.app]``, and the model is
+    ``dispatch.state_in.model``.
+    """
+
+    event: _Event
+    """The event that was dispatched."""
+
+    app: str
+    """The name of the application the unit belongs to."""
+
+    unit_id: int
+    """The unit's ID, as in ``myapp/2``."""
+
+    state_in: State
+    """The :class:`State` the unit was given.
+
+    That's the state after :class:`Juju` wrote in the shared changes from other
+    units, so it's what the charm actually saw, rather than the previous
+    dispatch's :attr:`state_out`.
+    """
+
+    state_out: State
+    """The :class:`State` the charm produced."""
+
+    _charm: _CharmForContext | None = dataclasses.field(default=None, repr=False, compare=False)
+
+    @property
+    def unit_name(self) -> str:
+        """The Juju unit name, for example ``myapp/2``."""
+        return f'{self.app}/{self.unit_id}'
+
+    def to_context(self) -> Context[CharmBase]:
+        """A new :class:`~ops.testing.Context` for the unit as it was at this dispatch.
+
+        The ``Context`` has the charm and metadata the test gave
+        :meth:`Juju.deploy`, the application's trust, and the unit's ID and
+        charm directory. Config and leadership come from :attr:`state_in`, so
+        running :attr:`event` against :attr:`state_in` runs the dispatch again
+        from the same starting point, without :class:`Juju`'s mocking::
+
+            ctx = dispatch.to_context()
+            state_out = ctx.run(dispatch.event, dispatch.state_in)
+
+        Like :meth:`Unit.to_context`, it's new on every call, and a charm
+        deployed in a worker process is imported into the test process.
+
+        Raises:
+            IsolationError: if the charm can't be imported into the test
+                process.
+            JujuError: if this ``Dispatch`` wasn't recorded by :meth:`Juju.settle`.
+        """
+        if self._charm is None:
+            raise JujuError('Only a Dispatch from Juju.settle() knows its charm.')
+        return self._charm.context(self.unit_id)
+
+
+class _CharmForContext:
+    """What a :class:`Context` for one of an application's units needs.
+
+    Kept apart from the :class:`App` so that a :class:`Dispatch` can build a
+    ``Context`` without holding the live application. The charm source and
+    metadata never change after ``deploy()``.
+    """
+
+    def __init__(self, app: App):
+        self._app_name = app.name
+        self._charm_source = app._charm_source
+        self._charm_type = app._charm_type
+        self._metadata = dict(app._metadata)
+        self._config_schema = dict(app._config_schema) if app._config_schema is not None else None
+        self._actions = dict(app._actions) if app._actions is not None else None
+        self._juju_version = app._juju_version
+        self._trust = app._trust
+        # Shared with the App, which adds each unit's directory as it's made.
+        self._charm_roots = app._charm_roots
+
+    def context(self, unit_id: int) -> Context[CharmBase]:
+        if self._charm_type is None:
+            assert self._charm_source is not None
+            try:
+                self._charm_type = _load_charm_type(
+                    self._charm_source,
+                    module_name=f'_ops_testing_charm_{uuid4().hex}',
+                )
+            except Exception as e:
+                raise IsolationError(
+                    f'Cannot import the charm for {self._app_name} into the test process, '
+                    f'which a Context needs: {e!r}'
+                ) from e
+        return Context(
+            self._charm_type,
+            meta=dict(self._metadata),
+            config=dict(self._config_schema) if self._config_schema is not None else None,
+            actions=dict(self._actions) if self._actions is not None else None,
+            app_name=self._app_name,
+            unit_id=unit_id,
+            juju_version=self._juju_version,
+            app_trusted=self._trust,
+            charm_root=self._charm_roots.get(unit_id),
+        )
+
+
+# Event sequences
+#
+# Each operation below maps to the events Juju emits for it. Keeping them in
+# one place, named after the operation rather than the event, is what lets the
+# convergence loop stay ignorant of Juju's hook semantics.
+
+
+def _startup_events(app: App, unit_id: int) -> list[tuple[_Event, _Rebind | None]]:
+    """The events a newly-added unit sees, in Juju's order.
+
+    ``install`` first, then the leadership event (which one depends on whether
+    this unit won the election), then ``config-changed``, then ``start``.
+    Workload containers become ready after the unit has started.
+    """
+    events: list[tuple[_Event, _Rebind | None]] = [(_Event('install'), None)]
+    if unit_id == app._leader_id:
+        events.append((_Event('leader_elected'), None))
+    else:
+        events.append((_Event('leader_settings_changed'), None))
+    events.append((_Event('config_changed'), None))
+    events.append((_Event('start'), None))
+    for name in app._container_names:
+        events.append((_Event(f'{name}_pebble_ready'), _Rebind('container', name)))
+    return events
+
+
+def _teardown_events(app: App, unit_id: int) -> list[tuple[_Event, _Rebind | None]]:
+    """The events a departing unit sees, in Juju's order."""
+    del app, unit_id  # Same for every unit today; kept for symmetry with startup.
+    return [(_Event('stop'), None), (_Event('remove'), None)]
+
+
+# Runners
+#
+# Two ways to execute an event: in this process (a charm class, or a charm
+# loaded from a path, exactly what Context does) or in a subprocess running
+# the charm's own interpreter. The convergence loop only knows this interface.
+
+
+class _Runner:
+    """Executes a single event for one unit of one application."""
+
+    def run(self, unit_id: int, event: _Event, state: State) -> State:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class _NotStarted(_Runner):
+    """The runner of an application that :class:`Juju` hasn't started yet."""
+
+    def run(self, unit_id: int, event: _Event, state: State) -> State:
+        raise JujuError('This application has not been started by Juju.deploy().')
+
+    def close(self) -> None:
+        pass
+
+
+class _InProcessRunner(_Runner):
+    """Runs a charm class in the test process, via :class:`Context`.
+
+    No isolation: the charm shares the test process's interpreter and
+    installed packages, which is the same trade-off a plain ``Context`` test
+    makes. A separate ``Context`` is held per unit because the unit ID is
+    fixed at construction time.
+    """
+
+    def __init__(
+        self,
+        charm_type: type[CharmBase],
+        *,
+        meta: Mapping[str, Any],
+        config: Mapping[str, Any] | None,
+        actions: Mapping[str, Any] | None,
+        app_name: str,
+        juju_version: str,
+        app_trusted: bool,
+        charm_roots: Mapping[int, pathlib.Path],
+        mocking: Callable[..., contextlib.AbstractContextManager[Any]] | None = None,
+    ):
+        self._charm_type = charm_type
+        self._meta = meta
+        self._config = config
+        self._actions = actions
+        self._app_name = app_name
+        self._juju_version = juju_version
+        self._app_trusted = app_trusted
+        self._charm_roots = charm_roots
+        self._mocking = mocking
+        self._contexts: dict[int, Context[CharmBase]] = {}
+
+    def _context(self, unit_id: int) -> Context[CharmBase]:
+        if unit_id not in self._contexts:
+            # Context's own signature is still dict-typed, so copy at the
+            # boundary rather than widening it as a drive-by.
+            self._contexts[unit_id] = Context(
+                self._charm_type,
+                meta=dict(self._meta),
+                config=dict(self._config) if self._config is not None else None,
+                actions=dict(self._actions) if self._actions is not None else None,
+                app_name=self._app_name,
+                unit_id=unit_id,
+                juju_version=self._juju_version,
+                app_trusted=self._app_trusted,
+                charm_root=self._charm_roots.get(unit_id),
+            )
+        return self._contexts[unit_id]
+
+    def run(self, unit_id: int, event: _Event, state: State) -> State:
+        if self._mocking is None:
+            return self._context(unit_id).run(event, state)
+        with self._mocking():
+            return self._context(unit_id).run(event, state)
+
+    def close(self) -> None:
+        self._contexts.clear()
+
+
+class _IsolatedRunner(_Runner):
+    """Runs an on-disk charm in a subprocess, via :class:`IsolatedContext`.
+
+    One :class:`IsolatedContext`, and therefore one persistent worker process,
+    serves every unit of the application; the unit ID travels with each
+    request rather than being baked into the worker. The charm directory is
+    per unit, so it travels with each request too.
+    """
+
+    def __init__(self, ctx: IsolatedContext, charm_roots: Mapping[int, pathlib.Path]):
+        self._ctx = ctx
+        self._charm_roots = charm_roots
+
+    def run(self, unit_id: int, event: _Event, state: State) -> State:
+        self._ctx.charm_root = self._charm_roots.get(unit_id)
+        return self._ctx._run_as(unit_id, event, state)
+
+    def close(self) -> None:
+        self._ctx.close()
+
+
+# Public handles
+
+
+class Unit:
+    """One unit of an :class:`App`.
+
+    Units are created by :meth:`Juju.deploy` and :meth:`Juju.add_unit`; there
+    is no reason to construct one directly.
+    """
+
+    def __init__(self, app: App, unit_id: int, state: State):
+        self._app = app
+        self._id = unit_id
+        self._state = state
+
+    @property
+    def app(self) -> App:
+        """The application this unit belongs to."""
+        return self._app
+
+    @property
+    def id(self) -> int:
+        """The unit number, as in ``myapp/2``."""
+        return self._id
+
+    @property
+    def name(self) -> str:
+        """The Juju unit name, for example ``myapp/2``."""
+        return f'{self._app.name}/{self._id}'
+
+    @property
+    def is_leader(self) -> bool:
+        """Whether this unit currently holds leadership."""
+        return self._id == self._app._leader_id
+
+    @property
+    def state(self) -> State:
+        """This unit's :class:`State` as of the last event dispatched to it.
+
+        Reading this never runs charm code. Call :meth:`Juju.settle` first to
+        dispatch whatever the operations so far have queued, then assert.
+        """
+        return self._state
+
+    def to_context(self) -> Context[CharmBase]:
+        """A new :class:`~ops.testing.Context` for this unit's charm.
+
+        Use it to run an action against the unit at this point in the test, or
+        to carry on with a single-charm test from here::
+
+            ctx = web.leader.to_context()
+            ctx.run(ctx.on.action('backup'), web.leader.state)
+
+        The ``Context`` has the application's metadata, config options,
+        actions, name and trust, and this unit's ID and charm directory. It is
+        new on every call, so its collections, such as the Juju log, start
+        empty. Running it doesn't change this unit or anything else under the
+        :class:`Juju`, and it has none of the mocking that :class:`Juju`
+        applies around the application's dispatches.
+
+        The charm runs in the test process, so a charm deployed in a worker
+        process is imported into the test process here.
+
+        Raises:
+            IsolationError: if the charm can't be imported into the test
+                process.
+        """
+        return self._app._for_context().context(self._id)
+
+    def __repr__(self) -> str:
+        return f'<Unit {self.name}>'
+
+
+class App:
+    """An application under a :class:`Juju`.
+
+    Owns the charm reference, the metadata resolved from it, the environment
+    it runs in, and the :class:`State` of each of its units. Applications are
+    created by :meth:`Juju.deploy`, which resolves the metadata from the charm
+    source first; there is no reason to construct one directly.
+    """
+
+    def __init__(
+        self,
+        juju: Juju,
+        name: str,
+        charm: CharmSource,
+        *,
+        meta: Mapping[str, Any],
+        config: Mapping[str, Any] | None = None,
+        state_template: State | None = None,
+        trust: bool = False,
+        juju_version: str = _DEFAULT_JUJU_VERSION,
+    ):
+        if state_template is not None:
+            _check_state_template(state_template)
+        self._juju = juju
+        self._name = name
+        self._charm = charm
+        self._charm_source = (
+            pathlib.Path(charm) if isinstance(charm, (str, pathlib.Path)) else None
+        )
+        # Each unit gets its own charm directory (see _make_charm_root). The
+        # runners read this mapping when they dispatch, so it is shared.
+        self._charm_roots: dict[int, pathlib.Path] = {}
+        self._meta = dict(meta)
+        self._metadata, self._config_schema, self._actions = _split_meta(meta)
+        self._config = _merged_config(self._config_schema, config)
+        self._state_template = state_template if state_template is not None else State()
+        self._trust = trust
+        self._juju_version = juju_version
+        # Set by Juju once it knows where the charm runs; see _run_in_process
+        # and _run_in_worker.
+        self._runner: _Runner = _NotStarted()
+        self._charm_type: type[CharmBase] | None = None
+        self._context_source: _CharmForContext | None = None
+        self._leader_id = 0
+        self._units: dict[int, Unit] = {}
+        self._next_unit_id = 0
+        # One relation ID per peer endpoint: a peer relation is a single
+        # relation that every unit is a member of, so the ID must agree across
+        # units even though each unit holds its own view of the databags.
+        self._peer_ids: dict[str, int] = {
+            endpoint: _next_relation_id() for endpoint in self._peer_endpoints
+        }
+
+    def _for_context(self) -> _CharmForContext:
+        if self._context_source is None:
+            self._context_source = _CharmForContext(self)
+        return self._context_source
+
+    def _run_in_process(self) -> None:
+        """Run the charm in the test process, loading it from its path if it has one."""
+        mocking: Callable[..., contextlib.AbstractContextManager[Any]] | None = None
+        if isinstance(self._charm, CharmSpec):
+            charm_type = cast('type[CharmBase]', self._charm.charm_type)
+            mocking = self._charm.mocking
+        elif self._charm_source is None:
+            charm_type = cast('type[CharmBase]', self._charm)
+        else:
+            charm_type = _load_charm_type(
+                self._charm_source,
+                module_name=f'_ops_testing_charm_{uuid4().hex}',
+            )
+        self._charm_type = charm_type
+        self._runner = _InProcessRunner(
+            charm_type,
+            meta=self._metadata,
+            config=self._config_schema,
+            actions=self._actions,
+            app_name=self._name,
+            juju_version=self._juju_version,
+            app_trusted=self._trust,
+            charm_roots=self._charm_roots,
+            mocking=mocking,
+        )
+
+    def _run_in_worker(self, python_executable: str, extra_sys_path: Sequence[str]) -> None:
+        """Run the charm in a worker process, with the given interpreter.
+
+        The interpreter has to have the same ``ops`` installed as the test, and
+        everything else the charm needs. ``extra_sys_path`` is prepended to
+        the worker's ``sys.path``.
+        """
+        assert self._charm_source is not None, 'only a charm on disk can run in a worker'
+        self._runner = _IsolatedRunner(
+            IsolatedContext(
+                charm_source=self._charm_source,
+                python_executable=python_executable,
+                extra_sys_path=tuple(extra_sys_path),
+                meta=self._metadata,
+                config=self._config_schema,
+                actions=self._actions,
+                app_name=self._name,
+                juju_version=self._juju_version,
+                app_trusted=self._trust,
+            ),
+            self._charm_roots,
+        )
+
+    @property
+    def name(self) -> str:
+        """The application name."""
+        return self._name
+
+    @property
+    def meta(self) -> Mapping[str, Any]:
+        """The charm metadata, shaped like ``charmcraft.yaml``.
+
+        Read from the charm source, or taken from the :class:`CharmSpec`. Config
+        options are under ``config`` and actions under ``actions``, whichever
+        files they were read from.
+        """
+        return self._meta
+
+    @property
+    def config(self) -> Mapping[str, Any]:
+        """The application's current configuration."""
+        return dict(self._config)
+
+    @property
+    def units(self) -> Sequence[Unit]:
+        """This application's units, ordered by unit number."""
+        return tuple(self._units[uid] for uid in sorted(self._units))
+
+    @property
+    def leader(self) -> Unit:
+        """The unit that currently holds leadership."""
+        try:
+            return self._units[self._leader_id]
+        except KeyError:
+            raise JujuError(f'{self._name} has no units.') from None
+
+    @property
+    def _substrate(self) -> Literal['kubernetes', 'lxd']:
+        """The substrate this application is deployed on.
+
+        Every application under one :class:`Juju` shares its model's
+        substrate; there is no per-application override.
+        """
+        return self._juju.type
+
+    @property
+    def _peer_endpoints(self) -> tuple[str, ...]:
+        peers: dict[str, Any] = self._metadata.get('peers') or {}
+        return tuple(peers)
+
+    @property
+    def _container_names(self) -> tuple[str, ...]:
+        containers: dict[str, Any] = self._metadata.get('containers') or {}
+        return tuple(containers)
+
+    def _containers(self) -> list[Container]:
+        """Each unit's starting containers: the template's, or a connectable default."""
+        from_template = {c.name: c for c in self._state_template.containers}
+        containers: list[Container] = []
+        for name in self._container_names:
+            containers.append(from_template.pop(name, Container(name=name, can_connect=True)))
+        # Anything left names a container the metadata doesn't declare; keep
+        # it, so that Context's consistency check reports it to the test.
+        containers.extend(from_template.values())
+        return containers
+
+    def _make_charm_root(self, unit_id: int) -> None:
+        """Give a unit of an on-disk charm its own charm directory.
+
+        Juju gives each unit its own copy of the charm. Here the directory
+        links to each top-level entry of the charm source, so the charm finds
+        the files it ships, while the metadata files that ``Context`` writes
+        into its charm directory land in the unit's directory rather than in
+        the source tree.
+        """
+        if self._charm_source is None:
+            return
+        root = pathlib.Path(tempfile.mkdtemp(prefix=f'ops-testing-{self._name}-{unit_id}-'))
+        for entry in self._charm_source.resolve().iterdir():
+            if entry.name in {'metadata.yaml', 'config.yaml', 'actions.yaml'}:
+                continue
+            (root / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+        self._charm_roots[unit_id] = root
+
+    def _drop_charm_root(self, unit_id: int) -> None:
+        root = self._charm_roots.pop(unit_id, None)
+        if root is not None:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def __repr__(self) -> str:
+        return f'<App {self._name} ({len(self._units)} units)>'
+
+
+class _RemoveUnit:
+    """Queue entry marking where a removed unit's records should be dropped.
+
+    Bookkeeping rather than a Juju event. It sits in the queue *after* the
+    unit's teardown events so that those events still find the unit in place,
+    and so the drop happens in queue order rather than eagerly at
+    :meth:`Juju.remove_unit` time.
+    """
+
+
+class _Rebind(NamedTuple):
+    """Which object in the unit's state an event should be re-bound to.
+
+    A relation or workload event carries the relation or container *object*,
+    and the consistency checker requires it to equal the one in the state it is
+    dispatched against, not merely to share its ID or name. Events are queued
+    before they are dispatched and the state moves in between, so an event
+    queued with the object of the moment goes stale. Such events record what
+    to look up here, and the object is bound at dispatch time instead.
+    """
+
+    kind: Literal['relation', 'container']
+    name: str
+
+
+class _Queued(NamedTuple):
+    """An event waiting to be dispatched to a unit."""
+
+    app: App
+    unit_id: int
+    event: _Event | _RemoveUnit
+    rebind: _Rebind | None = None
+
+
+class _JujuState:
+    """The mutable half of a :class:`Juju`.
+
+    Held in one object rather than as plain attributes so that the identity
+    fields (``name``, ``uuid``, ``type``, ``cloud_spec``) stay the only things
+    set directly on ``Juju``; everything mutable during a test run lives
+    here instead.
+    """
+
+    def __init__(self) -> None:
+        self.apps: dict[str, App] = {}
+        self.queue: deque[_Queued] = deque()
+        self.trace: list[Dispatch] = []
+        self.closed = False
+
+
+class Juju:
+    """A set of applications, driven with Juju-shaped operations.
+
+    Construct it much as you would a :class:`~ops.testing.Model`::
+
+        juju = testing.Juju(model_name='my-model', type='lxd')
+
+    Applications are added with :meth:`deploy`, which returns an :class:`App`
+    handle::
+
+        web = juju.deploy('./charms/myapp', num_units=2)
+        db = juju.deploy(testing.CharmSpec(MyDatabaseCharm, meta={'name': 'db'}))
+
+    Each operation queues the events Juju would emit for it. Nothing runs until
+    :meth:`settle` drains the queue, so most tests are a sequence of
+    operations, a ``settle()``, and then assertions::
+
+        juju.config(web, {'log_level': 'debug'})
+        juju.settle()
+        assert web.leader.state.unit_status == testing.ActiveStatus('ready')
+
+    Charms run in the test process unless deployed with ``isolated=True``,
+    in which case the charm runs in a worker process of its own. Call
+    :meth:`close`, or use ``Juju`` as a context manager, to tear down any
+    worker processes.
+    """
+
+    def __init__(
+        self,
+        model_name: str | None = None,
+        *,
+        uuid: str | None = None,
+        type: Literal['kubernetes', 'lxd'] = 'kubernetes',
+        cloud_spec: CloudSpec | None = None,
+    ) -> None:
+        """Create a simulated Juju model, as ``juju add-model`` would.
+
+        By default, the model name and UUID come from the test that creates
+        the ``Juju``, so they're the same on every run of that test, and
+        anything derived from them (such as secret IDs) is too. Under pytest,
+        they come from the test's node ID, so selecting tests with ``-k``,
+        running them in a different order, or with ``pytest-xdist`` doesn't
+        change them, and each case of a parametrised test gets its own. A
+        ``Juju`` created in a function-scoped fixture gets the same name as
+        one created in the test itself. Outside pytest, they come from the
+        module and qualified name of the function that creates the ``Juju``.
+
+        The name is the test function's name, made into a valid model name,
+        followed by a hash of the node ID, for example
+        ``test-ingress-3f9a1c2e``. A second ``Juju`` created in the same test
+        while the first is still open gets ``-2`` added to its name and a
+        different UUID, a third gets ``-3``, and so on. Closing a ``Juju``
+        frees its name for the next one.
+
+        A fixture with a wider scope (module or session) gets the node ID of
+        whichever test first uses it, which depends on which tests are
+        selected. Pass ``model_name`` and ``uuid`` explicitly in such fixtures.
+
+        Args:
+            model_name: The model name. Defaults to a name derived from the
+                test, as above.
+            uuid: A unique identifier for the model. Defaults to a UUID derived
+                from the test, as above.
+            type: The type of Juju model: ``'kubernetes'`` or ``'lxd'``
+                (machine). Every application deployed under this ``Juju``
+                shares this substrate, which decides which form of
+                :meth:`remove_unit` it accepts.
+            cloud_spec: Cloud specification information, as in
+                :class:`~ops.testing.Model`.
+        """
+        self._slot: tuple[str, int] | None = None
+        if model_name is None or uuid is None:
+            default_name, default_uuid, self._slot = _claim_model_identity()
+            model_name = model_name if model_name is not None else default_name
+            uuid = uuid if uuid is not None else default_uuid
+        self.name = model_name
+        self.uuid = uuid
+        self.type: Literal['kubernetes', 'lxd'] = type
+        self.cloud_spec = cloud_spec
+        self._state = _JujuState()
+
+    @property
+    def apps(self) -> Mapping[str, App]:
+        """Every application deployed under this ``Juju``, by name.
+
+        A test or fixture can reach any application through this without
+        keeping the handle :meth:`deploy` returned, and a :class:`Dispatch`
+        leads back to its application with ``juju.apps[dispatch.app]``. It's
+        read-only: applications are added with :meth:`deploy`.
+        """
+        return types.MappingProxyType(self._state.apps)
+
+    # Internals
+    def _as_model(self) -> Model:
+        """This ``Juju``'s identity as a plain :class:`Model`.
+
+        Unit states get this rather than ``self``: a ``State`` is data that
+        may be serialised out to a worker process, and it should not carry a
+        handle to the ``Juju`` instance that is driving it.
+        """
+        return Model(
+            name=self.name,
+            uuid=self.uuid,
+            type=self.type,
+            cloud_spec=self.cloud_spec,
+        )
+
+    def _check_open(self) -> None:
+        if self._state.closed:
+            raise JujuError('This Juju has been closed.')
+
+    # Operations
+    def deploy(
+        self,
+        charm: CharmSource,
+        app: str | None = None,
+        *,
+        config: Mapping[str, Any] | None = None,
+        state_template: State | None = None,
+        trust: bool = False,
+        num_units: int = 1,
+        isolated: bool = False,
+        requirements: str | pathlib.Path | None = None,
+        juju_version: str = _DEFAULT_JUJU_VERSION,
+    ) -> App:
+        """Deploy a charm, as ``juju deploy`` would.
+
+        The units' startup events are queued; call :meth:`settle` to run them.
+
+        By default, the charm runs in the test process, like a ``Context``
+        test. Charms deployed that way share one set of imported modules, so
+        two that need different versions of the same package need
+        ``isolated=True`` for one of them.
+
+        Args:
+            charm: Charm source: a path to a charm's source directory, a
+                :class:`CharmSpec`, or a :class:`ops.CharmBase` subclass. A
+                path given as a ``str`` must be relative, as with
+                ``juju deploy``; pass a :class:`pathlib.Path` for an absolute
+                path. A charm class is shorthand for a ``CharmSpec`` with no
+                mocking, with its metadata loaded from the files beside its
+                source, as ``Context`` does.
+            app: Application name. Defaults to the charm's name from its
+                metadata.
+            config: Application configuration. Merged over the defaults
+                declared in the charm's config options.
+            state_template: The starting :class:`State` for every unit of the
+                application, including units added later with
+                :meth:`add_unit`. Use it for what ``Juju`` can't know, such as
+                ``Exec`` mocks and layers on containers, storage, resources,
+                secrets and stored state. ``Juju`` sets each unit's
+                ``leader``, ``planned_units``, ``model``, ``config`` and
+                ``relations`` itself, so the template may not set those:
+                relations come from peer endpoints, and config from
+                ``config=``.
+            trust: Whether the application has Juju trust, as with
+                ``juju deploy --trust``.
+            num_units: How many units to deploy. Unit ``0`` is the leader.
+            isolated: Run the charm in its own worker process, in a virtual
+                environment built from the charm's declared dependencies.
+                Only for a charm deployed from a path. Building the
+                environment is not implemented yet, so this raises
+                :class:`NotImplementedError`.
+            requirements: A requirements file to build the isolated
+                environment from, for a charm whose dependencies can't be
+                found from its build plugin. Only with ``isolated=True``.
+            juju_version: The Juju agent version to simulate.
+
+        Returns:
+            The :class:`App` handle for the new application.
+
+        Raises:
+            JujuError: if an application of this name already exists,
+                ``num_units`` is not positive, the charm or the template is
+                not accepted, or ``isolated`` or ``requirements`` is given
+                where it can't apply.
+            NotImplementedError: if ``isolated`` is true.
+        """
+        self._check_open()
+        if isinstance(charm, (str, pathlib.Path)):
+            if requirements is not None and not isolated:
+                raise JujuError('requirements= is for an isolated charm; pass isolated=True too.')
+        elif isolated or requirements is not None:
+            raise JujuError(
+                'isolated= and requirements= need a charm on disk: a charm class or '
+                'CharmSpec runs in the test process. Deploy it from a path.'
+            )
+        if isolated:
+            raise NotImplementedError(
+                'isolated=True is not implemented yet: Juju cannot build environments '
+                'for charms. Deploy the charm without isolated=, to run it in the test '
+                'process.'
+            )
+        return self._deploy(
+            charm,
+            app,
+            config=config,
+            state_template=state_template,
+            trust=trust,
+            num_units=num_units,
+            juju_version=juju_version,
+        )
+
+    def _deploy(
+        self,
+        charm: CharmSource,
+        app: str | None = None,
+        *,
+        config: Mapping[str, Any] | None = None,
+        state_template: State | None = None,
+        trust: bool = False,
+        num_units: int = 1,
+        juju_version: str = _DEFAULT_JUJU_VERSION,
+        python_executable: str | None = None,
+        extra_sys_path: Sequence[str] = (),
+    ) -> App:
+        """Deploy a charm, running it in a worker process if given an interpreter.
+
+        :meth:`deploy` without the checks on its public arguments. With
+        ``python_executable``, the charm runs in a worker process with that
+        interpreter, and ``extra_sys_path`` prepended to the worker's
+        ``sys.path``; the interpreter must have the same ``ops`` installed as
+        the test.
+        """
+        self._check_open()
+        if num_units < 1:
+            raise JujuError(f'num_units must be at least 1, not {num_units}.')
+        meta = _resolve_meta(charm, app)
+
+        app_name = app or meta.get('name')
+        if not app_name:
+            raise JujuError('Could not determine the application name; pass app=.')
+        if app_name in self._state.apps:
+            raise JujuError(f'An application named {app_name!r} is already deployed.')
+
+        new_app = App(
+            self,
+            app_name,
+            charm,
+            meta=meta,
+            config=config,
+            state_template=state_template,
+            trust=trust,
+            juju_version=juju_version,
+        )
+        if python_executable is not None:
+            new_app._run_in_worker(python_executable, extra_sys_path)
+        else:
+            new_app._run_in_process()
+        self._state.apps[app_name] = new_app
+
+        for _ in range(num_units):
+            self._add_unit(new_app)
+        return new_app
+
+    def add_unit(self, app: App) -> Unit:
+        """Add a unit to an application, as ``juju add-unit`` would.
+
+        The new unit's startup events are queued. If the application has a
+        peer relation, the units that were already there see the new unit join
+        it.
+
+        Returns:
+            The new :class:`Unit`.
+        """
+        self._check_open()
+        return self._add_unit(app)
+
+    def remove_unit(self, *app_or_unit: App | Unit, num_units: int = 0) -> None:
+        """Remove units from an application, as ``juju remove-unit`` would.
+
+        Removal differs by substrate, and this API matches Juju in exposing one
+        method for both rather than splitting it into two:
+
+        - **Kubernetes**: units are fungible, so scale down by count. Pass one
+          or more :class:`App` objects and a positive ``num_units``; the
+          highest-numbered units are removed from each::
+
+              juju.remove_unit(web, num_units=2)
+
+        - **Machine**: units are individually addressable, so name them. Pass
+          one or more :class:`Unit` objects, and no ``num_units``::
+
+              juju.remove_unit(web.units[1])
+              juju.remove_unit(u2, u3)
+
+        Which form applies is decided by the application's substrate
+        (:attr:`Juju.type`), not by which arguments happen to be passed: the
+        wrong form for the substrate is rejected with a message naming the
+        right one.
+
+        Args:
+            *app_or_unit: For the Kubernetes form, one or more :class:`App`
+                objects. For the machine form, one or more :class:`Unit`
+                objects, which need not all belong to the same application.
+            num_units: How many units to remove from each application.
+                Kubernetes form only; leave unset for the machine form.
+
+        Raises:
+            JujuError: if the arguments don't match the substrate's form for
+                the applications involved, if removing them would leave an
+                application with no units.
+        """
+        self._check_open()
+        if not app_or_unit:
+            raise JujuError('remove_unit() requires at least one App or Unit.')
+        is_apps = [isinstance(item, App) for item in app_or_unit]
+        if any(is_apps) and not all(is_apps):
+            raise JujuError(
+                'remove_unit() takes either App objects (with num_units=, for '
+                'Kubernetes) or Unit objects (for machine), not a mix.'
+            )
+
+        if is_apps[0]:
+            apps = cast('tuple[App, ...]', app_or_unit)
+            if num_units < 1:
+                raise JujuError(
+                    'remove_unit() with App objects scales down by count; pass a '
+                    'positive num_units=.'
+                )
+            for app in apps:
+                if app._substrate != 'kubernetes':
+                    raise JujuError(
+                        f'{app.name} is on a {app._substrate} substrate, which '
+                        f'addresses units by name, not count. Use '
+                        f'remove_unit(unit) or remove_unit(u1, u2, ...) instead.'
+                    )
+                if num_units >= len(app._units):
+                    raise JujuError(
+                        f'Cannot remove {num_units} units from {app.name}; it has '
+                        f'only {len(app._units)}. Remove the application instead '
+                        'to take it down entirely.'
+                    )
+            for app in apps:
+                doomed_ids = set(sorted(app._units, reverse=True)[:num_units])
+                for unit_id in sorted(doomed_ids, reverse=True):
+                    self._remove_one_unit(app, unit_id, doomed_ids)
+                self._update_planned_units(app)
+            return
+
+        if num_units:
+            raise JujuError(
+                'num_units= is only valid with App objects (the Kubernetes '
+                'scale-down form); pass Unit objects to remove named units.'
+            )
+        units = cast('tuple[Unit, ...]', app_or_unit)
+        by_app: dict[App, list[Unit]] = {}
+        for unit in units:
+            by_app.setdefault(unit.app, []).append(unit)
+        for app, doomed in by_app.items():
+            if app._substrate == 'kubernetes':
+                raise JujuError(
+                    f'{app.name} is on a kubernetes substrate, which is scaled '
+                    f'down by count, not by naming units. Use '
+                    f'remove_unit({app.name}, num_units=...) instead.'
+                )
+            for unit in doomed:
+                if unit.id not in app._units:
+                    raise JujuError(f'{unit.name} is not part of {app.name} (already removed?).')
+            if len(app._units) - len(doomed) < 1:
+                raise JujuError(
+                    f'Cannot remove the last unit of {app.name}; remove the application instead.'
+                )
+        for app, doomed in by_app.items():
+            doomed_ids = {u.id for u in doomed}
+            for unit in doomed:
+                self._remove_one_unit(app, unit.id, doomed_ids)
+            self._update_planned_units(app)
+
+    def _remove_one_unit(self, app: App, unit_id: int, doomed_ids: Collection[int] = ()) -> None:
+        """Enqueue the departure and teardown sequence for one unit.
+
+        Args:
+            app: The application the unit belongs to.
+            unit_id: The unit being removed.
+            doomed_ids: Other unit IDs being removed in the same batch (see
+                :meth:`remove_unit`). A peer in this set doesn't get a
+                ``relation_departed`` enqueued for *this* departure: it is
+                leaving too, and gets its own teardown instead, which also
+                avoids queueing an event for a unit that may already be gone
+                by the time this one dispatches.
+        """
+        departing = app._units[unit_id]
+        remaining = [u for u in app.units if u is not departing and u.id not in doomed_ids]
+
+        # The peers see the unit leave before it is torn down.
+        for endpoint in app._peer_endpoints:
+            for peer in remaining:
+                relation = _peer_relation(peer._state, endpoint)
+                if relation is not None:
+                    self._enqueue(
+                        app,
+                        peer.id,
+                        _Event(
+                            f'{endpoint}_relation_departed',
+                            relation=relation,
+                            relation_remote_unit_id=unit_id,
+                            relation_departed_unit_id=unit_id,
+                        ),
+                        rebind=_Rebind('relation', endpoint),
+                    )
+        for event, rebind in _teardown_events(app, unit_id):
+            self._enqueue(app, unit_id, event, rebind)
+
+        self._state.queue.append(_Queued(app, unit_id, _RemoveUnit()))
+
+    def config(self, app: App, config: Mapping[str, Any]) -> None:
+        """Change an application's configuration, as ``juju config`` would.
+
+        The new values are merged over the existing ones, and
+        ``config-changed`` is queued for every unit.
+        """
+        self._check_open()
+        app._config.update(config)
+        for unit in app.units:
+            unit._state = dataclasses.replace(unit._state, config=dict(app._config))
+            self._enqueue(app, unit.id, _Event('config_changed'))
+
+    # Convergence
+    def settle(self) -> list[Dispatch]:
+        """Dispatch queued events until the model converges.
+
+        Convergence is reached when the queue is empty: every event produced
+        by an operation has been dispatched, along with every follow-on event
+        those dispatches produced.
+
+        The order events are dispatched in is fixed, so the same operations
+        on the same starting states settle the same way on every run. That
+        relies on the charms being deterministic too: a charm that, for
+        example, writes the current time to a databag ends up in a different
+        :class:`State` each run, though the order of dispatch is the same.
+
+        Returns:
+            The events dispatched, in order, each with the unit it went to and
+            that unit's :class:`State` afterwards.
+
+        Raises:
+            JujuError: if the model does not converge. The same event reaching
+                the same unit with the same :class:`State` twice is a loop,
+                and is reported as soon as it happens; otherwise, the limit
+                grows with the number of units in the model. The message ends
+                with the last events dispatched.
+        """
+        self._check_open()
+        self._state.trace = []
+        seen: set[tuple[str, int, str, str]] = set()
+        dispatched = 0
+        while self._state.queue:
+            limit = _SETTLE_DISPATCHES_PER_UNIT * max(1, self._unit_count())
+            if dispatched >= limit:
+                raise JujuError(
+                    f'Did not converge after {dispatched} events. Check for charms '
+                    'that write a new value to a databag on every event.'
+                    f'{self._trace_tail()}'
+                )
+            entry = self._next_dispatch()
+            if entry is None:
+                continue
+            app, unit, event = entry
+            key = _dispatch_key(app, unit, event)
+            if key is not None:
+                if key in seen:
+                    raise JujuError(
+                        f'{unit.name} was about to handle {event.name} with the same '
+                        'State it had the last time it handled it, so settling would '
+                        f'never end.{self._trace_tail()}'
+                    )
+                seen.add(key)
+            self._dispatch(app, unit, event)
+            dispatched += 1
+        return list(self._state.trace)
+
+    def _unit_count(self) -> int:
+        count = 0
+        for app in self._state.apps.values():
+            count += len(app._units)
+        return count
+
+    def _trace_tail(self) -> str:
+        tail = self._state.trace[-_TRACE_TAIL:]
+        lines = [f'  {d.event.name} on {d.unit_name}' for d in tail]
+        return '\nLast events dispatched:\n' + '\n'.join(lines) if lines else ''
+
+    def _next_dispatch(self) -> tuple[App, Unit, _Event] | None:
+        """Pop the next queue entry, returning the charm invocation it holds, if any.
+
+        A ``_RemoveUnit`` marker, and an event whose rebind target vanished
+        before dispatch, carry no charm invocation of their own; both are
+        consumed here and ``None`` is returned.
+        """
+        app, unit_id, event, rebind = self._state.queue.popleft()
+        if isinstance(event, _RemoveUnit):
+            del app._units[unit_id]
+            app._drop_charm_root(unit_id)
+            self._drop_peer(app, unit_id)
+            if unit_id == app._leader_id:
+                self._elect_leader(app)
+            return None
+        unit = app._units[unit_id]
+        if rebind is not None:
+            rebound = _rebind(unit._state, rebind)
+            if rebound is None:
+                # Whatever the event was about went away between queueing and
+                # dispatch; there is nothing left for the charm to observe.
+                return None
+            event = dataclasses.replace(event, **{rebind.kind: rebound})
+        return app, unit, event
+
+    def _elect_leader(self, app: App) -> None:
+        """Give leadership to another unit once the leader has gone.
+
+        Juju picks a new leader when the old one's lease lapses, and fires
+        ``leader-elected`` on it. The lowest-numbered remaining unit wins, so
+        that it's the same unit on every run, and it starts from the
+        application data, status and secrets the old leader left, which every
+        unit already has.
+        """
+        leaving = {
+            q.unit_id
+            for q in self._state.queue
+            if q.app is app and isinstance(q.event, _RemoveUnit)
+        }
+        candidates = sorted(uid for uid in app._units if uid not in leaving) or sorted(app._units)
+        if not candidates:
+            return
+        app._leader_id = candidates[0]
+        leader = app._units[app._leader_id]
+        leader._state = dataclasses.replace(leader._state, leader=True)
+        self._enqueue(app, leader.id, _Event('leader_elected'))
+
+    def _dispatch(self, app: App, unit: Unit, event: _Event) -> None:
+        state_in = unit._state
+        state_out = app._runner.run(unit.id, event, state_in)
+        unit._state = state_out
+        self._state.trace.append(
+            Dispatch(event, app.name, unit.id, state_in, state_out, _charm=app._for_context())
+        )
+        self._propagate_peers(app, unit)
+        self._propagate_app_secrets(app, unit)
+
+    # Units and peer relations
+    def _add_unit(self, app: App) -> Unit:
+        unit_id = app._next_unit_id
+        app._next_unit_id += 1
+        existing = app.units
+
+        app._make_charm_root(unit_id)
+        unit = Unit(app, unit_id, self._initial_state(app, unit_id))
+        app._units[unit_id] = unit
+
+        # Everyone's planned-units count moves as soon as the unit exists.
+        self._update_planned_units(app)
+
+        # Existing units see the newcomer join the peer relation before the
+        # newcomer itself starts up. Juju follows relation-joined with
+        # relation-changed for that unit, because the databag Juju itself
+        # populates (the unit's addresses) becomes visible at the same moment.
+        for endpoint in app._peer_endpoints:
+            joining = _peer_relation(unit._state, endpoint)
+            for peer in existing:
+                relation = _peer_relation(peer._state, endpoint)
+                if relation is None:
+                    continue
+                peers_data = dict(relation.peers_data)
+                peers_data[unit_id] = dict(joining.local_unit_data) if joining else {}
+                peer._state = _with_peer_relation(
+                    peer._state,
+                    dataclasses.replace(relation, peers_data=peers_data),
+                )
+                for suffix in ('relation_joined', 'relation_changed'):
+                    self._enqueue(
+                        app,
+                        peer.id,
+                        _Event(
+                            f'{endpoint}_{suffix}',
+                            relation=relation,
+                            relation_remote_unit_id=unit_id,
+                        ),
+                        rebind=_Rebind('relation', endpoint),
+                    )
+
+        for event, rebind in _startup_events(app, unit_id):
+            self._enqueue(app, unit_id, event, rebind)
+        return unit
+
+    def _initial_state(self, app: App, unit_id: int) -> State:
+        relations: list[PeerRelation] = []
+        for endpoint in app._peer_endpoints:
+            # A unit joining an existing application can read what its peers
+            # have already published, so seed its view from theirs rather than
+            # starting it empty; otherwise the first peer to run afterwards
+            # looks like it just wrote data it had published long before.
+            peers_data: dict[int, RawDataBagContents] = {}
+            app_data: RawDataBagContents = {}
+            for peer_id, peer in app._units.items():
+                if peer_id == unit_id:
+                    continue
+                existing = _peer_relation(peer._state, endpoint)
+                if existing is None:
+                    continue
+                peers_data[peer_id] = dict(existing.local_unit_data)
+                if peer_id == app._leader_id:
+                    app_data = dict(existing.local_app_data)
+            relations.append(
+                PeerRelation(
+                    endpoint=endpoint,
+                    id=app._peer_ids[endpoint],
+                    local_app_data=app_data,
+                    peers_data=peers_data,
+                )
+            )
+        secrets = list(app._state_template.secrets)
+        if app._units:
+            # The application's own secrets are visible to every unit, so a
+            # new unit sees the ones the application already has.
+            template_ids = {s.id for s in secrets}
+            leader_state = app._units[app._leader_id]._state
+            for secret in leader_state.secrets:
+                if secret.owner == 'app' and secret.id not in template_ids:
+                    secrets.append(secret)
+        return dataclasses.replace(
+            app._state_template,
+            config=dict(app._config),
+            relations=frozenset(relations),
+            containers=frozenset(app._containers()),
+            secrets=frozenset(secrets),
+            leader=unit_id == app._leader_id,
+            model=self._as_model(),
+            planned_units=self._planned_units(app) + 1,
+        )
+
+    def _planned_units(self, app: App) -> int:
+        """How many units the application is meant to have.
+
+        A unit that :meth:`remove_unit` is taking down isn't counted, even
+        before its teardown: Juju marks it as dying straight away, and ops
+        leaves dying units out of ``planned_units()``.
+        """
+        leaving = {
+            q.unit_id
+            for q in self._state.queue
+            if q.app is app and isinstance(q.event, _RemoveUnit)
+        }
+        return len(app._units.keys() - leaving)
+
+    def _update_planned_units(self, app: App) -> None:
+        planned_units = self._planned_units(app)
+        for unit in app.units:
+            unit._state = dataclasses.replace(unit._state, planned_units=planned_units)
+
+    def _drop_peer(self, app: App, unit_id: int) -> None:
+        """Remove a departed unit from its peers' views of the peer relation."""
+        for endpoint in app._peer_endpoints:
+            for peer in app.units:
+                relation = _peer_relation(peer._state, endpoint)
+                if relation is None or unit_id not in relation.peers_data:
+                    continue
+                peers_data = dict(relation.peers_data)
+                del peers_data[unit_id]
+                peer._state = _with_peer_relation(
+                    peer._state,
+                    dataclasses.replace(relation, peers_data=peers_data),
+                )
+        self._update_planned_units(app)
+
+    def _propagate_peers(self, app: App, source: Unit) -> None:
+        """Publish a unit's peer databag writes to the rest of the application.
+
+        A peer relation is one relation with one set of databags, but each
+        unit holds its own view of it. After a unit runs, whatever it wrote to
+        its own unit databag (or, as leader, to the application databag) has to
+        appear in every other unit's view, and any unit whose view actually
+        changed sees ``relation-changed``, which is what makes a multi-unit
+        application converge rather than just run its events once.
+        """
+        for endpoint in app._peer_endpoints:
+            source_relation = _peer_relation(source._state, endpoint)
+            if source_relation is None:
+                continue
+            for peer in app.units:
+                if peer is source:
+                    continue
+                relation = _peer_relation(peer._state, endpoint)
+                if relation is None:
+                    continue
+                peers_data = dict(relation.peers_data)
+                changed = False
+                if peers_data.get(source.id) != source_relation.local_unit_data:
+                    peers_data[source.id] = dict(source_relation.local_unit_data)
+                    changed = True
+                app_data: RawDataBagContents = relation.local_app_data
+                if source.is_leader and app_data != source_relation.local_app_data:
+                    app_data = dict(source_relation.local_app_data)
+                    changed = True
+                if not changed:
+                    continue
+                peer._state = _with_peer_relation(
+                    peer._state,
+                    dataclasses.replace(
+                        relation,
+                        peers_data=peers_data,
+                        local_app_data=app_data,
+                    ),
+                )
+                self._enqueue(
+                    app,
+                    peer.id,
+                    _Event(
+                        f'{endpoint}_relation_changed',
+                        relation=relation,
+                        relation_remote_unit_id=source.id,
+                    ),
+                    rebind=_Rebind('relation', endpoint),
+                )
+
+    def _propagate_app_secrets(self, app: App, source: Unit) -> None:
+        """Share the leader's view of the application's own secrets with the other units.
+
+        Only the leader can create, change or remove a secret the application
+        owns, and every unit of the application can read it, so after the
+        leader runs, each other unit's application-owned secrets are made to
+        match the leader's.
+        """
+        if not source.is_leader:
+            return
+        owned: list[Secret] = [s for s in source._state.secrets if s.owner == 'app']
+        for peer in app.units:
+            if peer is source:
+                continue
+            others = [s for s in peer._state.secrets if s.owner != 'app']
+            secrets = frozenset(others + owned)
+            if secrets != peer._state.secrets:
+                peer._state = dataclasses.replace(peer._state, secrets=secrets)
+
+    def _enqueue(
+        self,
+        app: App,
+        unit_id: int,
+        event: _Event,
+        rebind: _Rebind | None = None,
+    ) -> None:
+        self._state.queue.append(_Queued(app, unit_id, event, rebind))
+
+    # Teardown
+    def close(self) -> None:
+        """Tear down every application's worker process.
+
+        Safe to call more than once. In-process applications have nothing to
+        tear down.
+        """
+        for app in self._state.apps.values():
+            app._runner.close()
+            for unit_id in list(app._charm_roots):
+                app._drop_charm_root(unit_id)
+        self._state.apps.clear()
+        self._state.queue.clear()
+        self._state.closed = True
+        if self._slot is not None:
+            key, slot = self._slot
+            _model_slots.get(key, set()).discard(slot)
+            self._slot = None
+
+    def __enter__(self) -> Juju:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def _test_identity() -> tuple[str, str]:
+    """The identity of the test that is creating a :class:`Juju`, and its function's name.
+
+    Under pytest, that's the node ID of the running test, without the phase
+    that pytest appends to ``PYTEST_CURRENT_TEST``, so that a function-scoped
+    fixture and the test body agree. Otherwise, it's the module and qualified
+    name of the first caller outside ``ops.testing``.
+    """
+    current = os.environ.get('PYTEST_CURRENT_TEST')
+    if current:
+        node_id = re.sub(r' \((setup|call|teardown)\)$', '', current)
+        function = node_id.rsplit('::', 1)[-1].split('[', 1)[0]
+        return node_id, function
+    frame = inspect.currentframe()
+    package = __name__.rpartition('.')[0]
+    while frame is not None:
+        module = frame.f_globals.get('__name__', '')
+        if module != package and not module.startswith(f'{package}.'):
+            break
+        frame = frame.f_back
+    if frame is None:
+        return '', ''
+    code = frame.f_code
+    qualname = getattr(code, 'co_qualname', code.co_name)  # co_qualname is 3.11+.
+    return f'{frame.f_globals.get("__name__", "")}::{qualname}', code.co_name
+
+
+def _model_name_slug(function: str) -> str:
+    """A function name made into the start of a valid Juju model name."""
+    ascii_name = unicodedata.normalize('NFKD', function).encode('ascii', 'ignore').decode()
+    slug = re.sub(r'[^a-z0-9]+', '-', ascii_name.lower()).strip('-')
+    slug = slug[:_MODEL_SLUG_LENGTH].rstrip('-')
+    return slug or 'model'
+
+
+def _model_identity(identity: str, function: str, slot: int = 1) -> tuple[str, str]:
+    """The default model name and UUID for a test, and its ``slot``-th ``Juju``."""
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:8]
+    name = f'{_model_name_slug(function)}-{digest}'
+    key = identity
+    if slot > 1:
+        name = f'{name}-{slot}'
+        key = f'{identity}#{slot}'
+    # Juju's model UUIDs are version 4, and some charm libraries check that,
+    # so the name-based UUID is given version 4's version and variant bits.
+    return name, str(UUID(bytes=uuid5(_MODEL_UUID_NAMESPACE, key).bytes, version=4))
+
+
+def _claim_model_identity() -> tuple[str, str, tuple[str, int]]:
+    """The default model name and UUID for a new :class:`Juju`, and the slot it holds."""
+    identity, function = _test_identity()
+    taken = _model_slots.setdefault(identity, set())
+    slot = 1
+    while slot in taken:
+        slot += 1
+    taken.add(slot)
+    name, uuid = _model_identity(identity, function, slot)
+    return name, uuid, (identity, slot)
+
+
+def _check_state_template(template: State) -> None:
+    """Reject a ``state_template`` that sets a field :class:`Juju` owns.
+
+    ``State()`` gives every ``Model`` a random name and UUID, so those two
+    can't be told apart from a template's own; a template's model is rejected
+    only when its type or cloud spec differs from the default.
+    """
+    default = State()
+    for name in _JUJU_OWNED_FIELDS:
+        value = getattr(template, name)
+        if name == 'model':
+            if value.type != default.model.type or value.cloud_spec is not None:
+                raise JujuError(
+                    "state_template may not set model: Juju sets each unit's model. "
+                    'Pass type= and cloud_spec= to Juju instead.'
+                )
+            continue
+        if value != getattr(default, name):
+            raise JujuError(
+                f'state_template may not set {name}: Juju sets it for each unit. '
+                'Use config= for configuration; relations come from the '
+                "charm's peer endpoints."
+            )
+
+
+def _dispatch_key(app: App, unit: Unit, event: _Event) -> tuple[str, int, str, str] | None:
+    """Identify a dispatch by its unit, event and input state, for loop detection.
+
+    Returns ``None`` when the event or state holds something the JSON codec
+    can't encode, in which case that dispatch isn't checked.
+    """
+    try:
+        return (
+            app.name,
+            unit.id,
+            _isolated_serde.encode_event(event),
+            unit._state._to_json(),
+        )
+    except TypeError:
+        return None
+
+
+def _resolve_meta(charm: CharmSource, app: str | None) -> Mapping[str, Any]:
+    """A charm's metadata, shaped like ``charmcraft.yaml``, from wherever it comes from.
+
+    Raises:
+        JujuError: if a path isn't a charm directory, or a charm class has no
+            metadata beside its source.
+    """
+    if isinstance(charm, CharmSpec):
+        return charm.meta
+    if isinstance(charm, (str, pathlib.Path)):
+        if isinstance(charm, str) and pathlib.PurePath(charm).is_absolute():
+            raise JujuError(
+                f'A charm path given as a str must be relative, as with juju deploy: '
+                f'{charm!r}. Pass a pathlib.Path for an absolute path.'
+            )
+        if not pathlib.Path(charm).is_dir():
+            raise JujuError(f'No charm source directory at {str(charm)!r}.')
+        try:
+            meta, config, actions = _load_charm_spec(pathlib.Path(charm))
+        except MetadataNotFoundError as e:
+            raise JujuError(str(e)) from None
+        return _joined_meta(meta, config, actions)
+    try:
+        spec = _CharmSpec.autoload(charm)
+    except (MetadataNotFoundError, OSError, TypeError):
+        name = app or charm.__name__.lower()
+        raise JujuError(
+            f'{charm.__name__} has no metadata beside its source to load. Wrap it in a '
+            f'CharmSpec with the metadata: '
+            f"deploy(CharmSpec({charm.__name__}, meta={{'name': {name!r}, ...}}))."
+        ) from None
+    return _joined_meta(spec.meta, spec.config, spec.actions)
+
+
+def _joined_meta(
+    meta: Mapping[str, Any],
+    config: Mapping[str, Any] | None,
+    actions: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Metadata, config options and actions, joined in ``charmcraft.yaml`` shape."""
+    joined = dict(meta)
+    if config is not None:
+        joined['config'] = dict(config)
+    if actions is not None:
+        joined['actions'] = dict(actions)
+    return joined
+
+
+def _split_meta(
+    meta: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    """``charmcraft.yaml``-shaped metadata, split into the three that ``Context`` takes."""
+    metadata = dict(meta)
+    config = metadata.pop('config', None)
+    actions = metadata.pop('actions', None)
+    return (
+        metadata,
+        dict(config) if config is not None else None,
+        dict(actions) if actions is not None else None,
+    )
+
+
+def _merged_config(
+    config_schema: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Charm config defaults, with the caller's values on top.
+
+    Juju applies a charm's declared defaults to any option the deployer did not
+    set, so a charm reading ``self.config['foo']`` finds the default rather
+    than a ``KeyError``.
+    """
+    merged: dict[str, Any] = {}
+    for name, option in (config_schema or {}).get('options', {}).items():
+        if isinstance(option, dict) and 'default' in option:
+            merged[name] = option['default']
+    if config:
+        merged.update(config)
+    return merged
+
+
+def _rebind(state: State, rebind: _Rebind) -> PeerRelation | Container | None:
+    """Look up the object an event should carry, in the state it will run against."""
+    if rebind.kind == 'relation':
+        return _peer_relation(state, rebind.name)
+    for container in state.containers:
+        if container.name == rebind.name:
+            return container
+    return None
+
+
+def _peer_relation(state: State, endpoint: str) -> PeerRelation | None:
+    for relation in state.relations:
+        if relation.endpoint == endpoint and isinstance(relation, PeerRelation):
+            return relation
+    return None
+
+
+def _with_peer_relation(state: State, relation: PeerRelation) -> State:
+    """A copy of ``state`` with ``relation`` replacing the one with its ID."""
+    relations = [r for r in state.relations if r.id != relation.id]
+    relations.append(relation)
+    return dataclasses.replace(state, relations=frozenset(relations))

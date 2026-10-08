@@ -33,7 +33,10 @@ does.
    step's type is certain), a `str` compared with a `Path`, and a few more.
    For a test that fakes hook tools over `_ModelBackend`, it also checks the
    relation endpoints against the test's literal `CharmMeta`, that every hook
-   tool a relation access runs is faked, and `_ModelBackend` keywords. If it fails, the
+   tool a relation access runs is faked, `_ModelBackend` keywords, an
+   uncaught hook-tool error, and a relation databag that is looked up and
+   never read, or read where `RelationNotFoundError` is expected (a read
+   cannot raise it). If it fails, the
    extraction is asked again once, with the reasons; the second answer is
    kept whatever it says, and both verdicts go in the extraction record.
 4. **scope second opinion** (`inscope_second_pass.py`) - a second, narrower
@@ -131,7 +134,11 @@ workflow use.
   `tests/test_static_test_check.py`. `2709.json` and `2709-hooktool.json`
   are the saved `#2709` tests (`ops.testing`, and fake hook tools), with
   their verdicts in `tests/test_hook_tool_fakes.py` and
-  `tests/test_hook_tool_rules.py`.
+  `tests/test_hook_tool_rules.py`; `2709-hooktool-repaired.json`,
+  `2709-hooktool3.json` and `2709-hooktool3-repaired.json` are later
+  `#2709` tests and hand repairs, checked in
+  `tests/test_uncaught_hook_tool_error.py` and
+  `tests/test_databag_not_read.py`.
 
 One caveat is worth stating because it is easy to misread: `#2107` is the
 only `substrate: lxd` extraction anywhere in the corpus, and while the

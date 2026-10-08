@@ -298,13 +298,13 @@ def test_a_test_that_fakes_no_hook_tools_is_left_alone():
     "wrap",
     [
         "if os.environ.get('X'):\n    {access}",
-        "for _ in range(1):\n    {access}",
+        "for _ in os.environ:\n    {access}",
         "try:\n    {access}\nexcept Exception:\n    pass",
         "try:\n    {access}\nexcept:\n    pass",
         "try:\n    {access}\nexcept FileNotFoundError:\n    pass",
         "try:\n    {access}\nexcept (ops.ModelError, OSError):\n    pass",
         "try:\n    {access}\nexcept SomethingElse:\n    pass",
-        "with open(os.devnull):\n    {access}",
+        "with something():\n    {access}",
         "with pytest.raises(Exception):\n    {access}",
         "try:\n    os.getcwd()\n    {access}\nexcept ops.ModelError:\n    pass",
         "try:\n    x = os.getcwd() and {access}\nexcept ops.ModelError:\n    pass",
@@ -329,6 +329,9 @@ def test_an_access_that_might_not_run_or_whose_error_might_be_caught_is_left_alo
         "try:\n    x = {access}\nexcept ops.model.ModelError as e:\n    x = e",
         "with pytest.raises(ops.ModelError):\n    {access}",
         "assert {access} is not None",
+        # Certain to run, and nothing swallows the error (§20).
+        "for _ in range(1):\n    {access}",
+        "with open(os.devnull):\n    {access}",
     ],
 )
 def test_an_access_whose_error_certainly_escapes_is_checked(wrap):

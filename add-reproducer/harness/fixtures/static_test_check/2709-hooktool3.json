@@ -1,0 +1,42 @@
+[
+  {
+    "source": "retry-hooktool3-2709.json",
+    "run": 0,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import os\n\nimport ops\nfrom ops.model import _ModelBackend\n\n\ndef fake_hook_tool(bin_dir, name, script):\n    path = bin_dir / name\n    path.write_text('#!/bin/sh\\n' + script + '\\n')\n    path.chmod(0o755)\n\n\ndef test_permission_denied_raises_relation_not_found(tmp_path, monkeypatch):\n    bin_dir = tmp_path / 'bin'\n    bin_dir.mkdir()\n    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])\n    monkeypatch.setenv('JUJU_VERSION', '3.6.0')\n\n    fake_hook_tool(bin_dir, 'relation-ids', 'echo \\'[\"db:1\"]\\'')\n    fake_hook_tool(bin_dir, 'relation-list', 'echo \\'[\"provider/0\"]\\'')\n    fake_hook_tool(bin_dir, 'relation-get', 'echo \\'ERROR permission denied\\' >&2; exit 1')\n    fake_hook_tool(bin_dir, 'is-leader', 'echo true')\n\n    meta = '''\nname: my-app\nrequires:\n  db:\n    interface: db\n'''\n    model = ops.Model(ops.CharmMeta.from_yaml(meta), _ModelBackend('my-app/0'))\n    relation = model.get_relation('db', 1)\n\n    try:\n        relation.data[relation.app]\n    except ops.RelationNotFoundError:\n        pass  # Expected\n    else:\n        raise AssertionError('Expected RelationNotFoundError, but no exception was raised')"
+    }
+  },
+  {
+    "source": "retry-hooktool3-2709.json",
+    "run": 6,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import os\nimport ops\nfrom ops.model import _ModelBackend\nimport pytest\n\ndef fake_hook_tool(bin_dir, name, script):\n    path = bin_dir / name\n    path.write_text('#!/bin/sh\\n' + script + '\\n')\n    path.chmod(0o755)\n\ndef test_permission_denied_error_handling(tmp_path, monkeypatch):\n    bin_dir = tmp_path / 'bin'\n    bin_dir.mkdir()\n    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])\n    monkeypatch.setenv('JUJU_VERSION', '3.6.0')\n    fake_hook_tool(bin_dir, 'relation-ids', 'echo \\'[\\\"db:1\\\"]\\'')\n    fake_hook_tool(bin_dir, 'relation-list', 'echo \\'[\\\"provider/0\\\"]\\'')\n    fake_hook_tool(bin_dir, 'relation-get', 'echo \\'ERROR permission denied\\' >&2; exit 1')\n    fake_hook_tool(bin_dir, 'is-leader', 'echo \\'true\\'')\n    meta = ops.CharmMeta.from_yaml('name: myapp\\nrequires:\\n  db: {interface: db}\\n')\n    model = ops.Model(meta, _ModelBackend('myapp/0'))\n    relation = model.get_relation('db', 1)\n    with pytest.raises(ops.RelationNotFoundError):\n        relation.data[relation.app]"
+    }
+  },
+  {
+    "source": "retry-hooktool3-2709.json",
+    "run": 7,
+    "test_file": {
+      "path": "test_relation_permission_denied.py",
+      "body": "import os\n\nimport ops\nfrom ops.model import _ModelBackend\n\n\ndef fake_hook_tool(bin_dir, name, script):\n    path = bin_dir / name\n    path.write_text('#!/bin/sh\\n' + script + '\\n')\n    path.chmod(0o755)\n\n\ndef test_permission_denied_reads_as_empty(tmp_path, monkeypatch):\n    bin_dir = tmp_path / 'bin'\n    bin_dir.mkdir()\n    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])\n    monkeypatch.setenv('JUJU_VERSION', '3.6.0')\n    fake_hook_tool(bin_dir, 'is-leader', 'echo true')\n    fake_hook_tool(bin_dir, 'relation-get', 'echo 'ERROR permission denied' >&2; exit 1')\n    meta_yaml = '''\nname: myapp\nrequires:\n  db:\n    interface: db\n'''\n    model = ops.Model(ops.CharmMeta.from_yaml(meta_yaml), _ModelBackend('myapp/0'))\n    relation_id = 2\n    app_name = 'provider'\n    unit_name = 'myapp/0'\n    # Catch the error the bug raises, so the bug fails the assert below.\n    try:\n        databag = model.get_relation('db', relation_id).data[app_name]\n    except ops.ModelError as e:\n        databag = e\n    assert databag == {}"
+    }
+  },
+  {
+    "source": "retry-hooktool3b-2709.json",
+    "run": 1,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import os\nimport json\nimport pytest\nimport ops\nfrom ops.model import _ModelBackend\n\ndef fake_hook_tool(bin_dir, name, script):\n    path = bin_dir / name\n    path.write_text('#!/bin/sh\\n' + script + '\\n')\n    path.chmod(0o755)\n\ndef test_relation_get_permission_denied(tmp_path, monkeypatch):\n    bin_dir = tmp_path / 'bin'\n    bin_dir.mkdir()\n    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])\n    monkeypatch.setenv('JUJU_VERSION', '3.6.0')\n    fake_hook_tool(bin_dir, 'relation-ids', 'echo \\'[\\\"db:1\\\"]\\'')\n    fake_hook_tool(bin_dir, 'relation-list', 'echo \\'provider\\'')\n    fake_hook_tool(bin_dir, 'relation-get', 'echo \\'ERROR permission denied\\' >&2; exit 1')\n    fake_hook_tool(bin_dir, 'is-leader', 'echo true')\n    meta = '''name: my-charm\nrequires:\n  db:\n    interface: db\n'''\n    model = ops.Model(ops.CharmMeta.from_yaml(meta), _ModelBackend('my-charm/0'))\n    with pytest.raises(ops.RelationNotFoundError):\n        model.get_relation('db').data[model.get_relation('db').app]"
+    }
+  },
+  {
+    "source": "retry-hooktool3b-2709.json",
+    "run": 2,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import os\nimport pytest\nimport ops\nfrom ops.model import _ModelBackend\n\n\ndef fake_hook_tool(bin_dir, name, script):\n    path = bin_dir / name\n    path.write_text('#!/bin/sh\\n' + script + '\\n')\n    path.chmod(0o755)\n\n\ndef test_permission_denied_maps_to_relation_not_found(tmp_path, monkeypatch):\n    bin_dir = tmp_path / 'bin'\n    bin_dir.mkdir()\n    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])\n    monkeypatch.setenv('JUJU_VERSION', '3.6.0')\n    fake_hook_tool(bin_dir, 'relation-get', \"echo 'ERROR permission denied' >&2; exit 1\")\n    model = ops.Model(ops.CharmMeta.from_yaml('name: myapp\\n'), _ModelBackend('myapp/0'))\n    try:\n        model.relations['dbc'][0].data['provider']\n    except ops.RelationNotFoundError:\n        pass\n    except Exception as e:\n        pytest.fail(f'Expected RelationNotFoundError, got {type(e)}')"
+    }
+  }
+]

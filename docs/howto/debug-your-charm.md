@@ -201,7 +201,7 @@ jhack fire myapp/0 config-changed
 ```
 
 ```{caution}
-Firing events manually can desynchronise charm state from Juju state if your event handlers are not idempotent. Use this only in development and test environments.
+Firing events manually can desynchronize charm state from Juju state if your event handlers are not idempotent. Use this only in development and test environments.
 ```
 
 ### Push local changes with `jhack sync`
@@ -369,7 +369,7 @@ UNIT_IP=$(multipass exec <vm-name> -- juju show-unit myapp/0 --format json \
 # 2. Get the VM's IP:
 VM_IP=$(multipass info <vm-name> --format json | jq -r '.info["<vm-name>"].ipv4[0]')
 
-# 3. If necessary, make sure that you are authorised to SSH into the VM, for example by adding your SSH public key to `~/.ssh/authorized_keys` on the VM.
+# 3. If necessary, make sure that you are authorized to SSH into the VM, for example by adding your SSH public key to `~/.ssh/authorized_keys` on the VM.
 
 # 4. Forward the debugpy port through the VM to your host:
 ssh -N -L 5678:${UNIT_IP}:5678 ubuntu@${VM_IP}

@@ -82,7 +82,7 @@ In addition to checking that the databag state is valid, we could check for more
 
 - [Ingress interface tests](https://github.com/canonical/charm-relation-interfaces/blob/main/interfaces/ingress/v2/interface_tests/test_provider.py)
 
-Interface tests enable us to check whether our charm complies with the behavioural specification of the interface, independently from whichever charm is integrated with our charm.
+Interface tests enable us to check whether our charm complies with the behavioral specification of the interface, independently from whichever charm is integrated with our charm.
 
 (integration-testing)=
 ## Integration testing

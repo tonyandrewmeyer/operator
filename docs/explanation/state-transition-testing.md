@@ -228,7 +228,7 @@ def test_status_leader(leader):
     assert state_out.unit_status == charm.unit.status
 ```
 
-Before calling [](ops.testing.Manager.run), the charm object was initialised based on the context's state.
+Before calling [](ops.testing.Manager.run), the charm object was initialized based on the context's state.
 The state didn't specify a status for the unit, so at this point it's `unknown`.
 The charm's `_on_start` method runs and sets the status when `mgr.run()` is called.
 

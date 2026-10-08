@@ -9,7 +9,7 @@ myst:
 
 Before you write your charm code, create a repository and use Charmcraft to generate your charm's project structure. See [](#init-charm).
 
-This guide demonstrates how to use standard structures in your charm code and summarises best practices for charm development.
+This guide demonstrates how to use standard structures in your charm code and summarizes best practices for charm development.
 
 As you work on your charm, commit your changes after every significant change. You'll then have a record of your work and can revert to an earlier version if required.
 
@@ -74,7 +74,7 @@ complexity of understanding the entire system, and adds a maintenance burden of
 keeping track of upstream versions, particularly around security issues. See [Our Software Dependency Problem](https://research.swtch.com/deps).
 ```
 
-If you initialised your charm using the `machine` or `kubernetes` profile of `charmcraft init`, your charm uses Charmcraft's {external+charmcraft:ref}`uv plugin <craft_parts_uv_plugin>` and has a lock file called `uv.lock`. After specifying dependencies in `pyproject.toml`, run `uv lock` to update `uv.lock`.
+If you initialized your charm using the `machine` or `kubernetes` profile of `charmcraft init`, your charm uses Charmcraft's {external+charmcraft:ref}`uv plugin <craft_parts_uv_plugin>` and has a lock file called `uv.lock`. After specifying dependencies in `pyproject.toml`, run `uv lock` to update `uv.lock`.
 
 We recommend that you use `uv add` and `uv remove` instead of editing dependencies in `pyproject.toml`. These commands automatically update `pyproject.toml` and `uv.lock`. For more information, see [Managing dependencies](https://docs.astral.sh/uv/concepts/projects/dependencies/) in the uv documentation.
 
@@ -330,7 +330,7 @@ letting the charm crash and go into an error state.
 
 ```{tip}
 By default, Juju will retry hooks that fail, but users can disable this
-behaviour, so charms should not rely on it.
+behavior, so charms should not rely on it.
 ```
 
 (follow-best-practices)=

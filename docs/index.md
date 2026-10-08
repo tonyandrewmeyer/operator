@@ -38,7 +38,7 @@ For a hands-on introduction to charm development with Ops, try our tutorials:
 :class: top-aligned
 
 * - **Starting a project**
-  - [Manage charms](howto/manage-charms) • [Choose your tool versions](explanation/versions) • [Initialise your project](howto/initialise-your-project) • [Write and structure charm code](howto/write-and-structure-charm-code)
+  - [Manage charms](howto/manage-charms) • [Choose your tool versions](explanation/versions) • [Initialize your project](howto/initialise-your-project) • [Write and structure charm code](howto/write-and-structure-charm-code)
 * - **Running workloads**
   - [Manage packages on machines](howto/run-workloads-with-a-charm-machines) • [Manage Kubernetes workloads](howto/manage-containers/index)
 * - **Adding functionality**
@@ -51,7 +51,7 @@ For a hands-on introduction to charm development with Ops, try our tutorials:
   - [Publish your charm on Charmhub](howto/publish-your-charm-on-charmhub) • [Make your charm discoverable](howto/make-your-charm-discoverable)
 ```
 
-## How this documentation is organised
+## How this documentation is organized
 
 This documentation uses the [Diátaxis documentation structure](https://diataxis.fr/).
 
@@ -66,7 +66,7 @@ This documentation uses the [Diátaxis documentation structure](https://diataxis
 :class: top-aligned
 
 * - **{external+charmcraft:doc}`Charmcraft <index>`**
-  - The CLI tool for initialising charms, packing charms, and interacting with [Charmhub](https://charmhub.io/). You'll find the {external+charmcraft:ref}`charmcraft.yaml specification <charmcraft-yaml-file>` especially helpful.
+  - The CLI tool for initializing charms, packing charms, and interacting with [Charmhub](https://charmhub.io/). You'll find the {external+charmcraft:ref}`charmcraft.yaml specification <charmcraft-yaml-file>` especially helpful.
 * - **{external+charmlibs:doc}`Charmlibs <index>`**
   - A listing of charm libraries and guidance on how to distribute your own libraries.
 * - **{external+concierge:doc}`Concierge <index>`**

@@ -49,7 +49,7 @@ event or an `is-leader` check. If the charm code may run longer, then extra
 
 See first: {ref}`write-unit-tests-for-a-charm`
 
-To verify behaviour when leadership has changed, pass the leadership status to the `State`. For example:
+To verify behavior when leadership has changed, pass the leadership status to the `State`. For example:
 
 ```python
 class MyCharm(ops.CharmBase):
@@ -83,7 +83,7 @@ needs to remove the leader unit (machine charms) or run `juju_stop_unit` in the
 charm container (Kubernetes charms). The test then needs to wait up to 60 seconds
 for Juju to elect a new leader.
 
-More commonly, an integration test might want to verify that leader and non-leader behaviour is
+More commonly, an integration test might want to verify that leader and non-leader behavior is
 as expected. For example:
 
 ```python

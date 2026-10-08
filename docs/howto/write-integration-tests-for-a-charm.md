@@ -71,7 +71,7 @@ When it's time to run the integration tests, you'll run them from this directory
 
 ## Prepare the `tox.ini` configuration file
 
-Check that `tox.ini` has an `integration` environment. If you initialised the charm with `charmcraft init` it should already be there. For example:
+Check that `tox.ini` has an `integration` environment. If you initialized the charm with `charmcraft init` it should already be there. For example:
 
 ```ini
 [testenv:integration]
@@ -93,7 +93,7 @@ commands =
         {posargs}
 ```
 
-Also check that `pyproject.toml` has an `integration` dependency group. Again, if you initialised the charm with `charmcraft init` it should already be there. Integration tests use two packages: {external+jubilant:doc}`Jubilant <index>`, which wraps the Juju CLI, and [`pytest-jubilant`](https://github.com/canonical/pytest-jubilant), a pytest plugin that manages Juju models during tests. Pin to the current stable major versions, which are maintained with strong backwards compatibility guarantees. For example:
+Also check that `pyproject.toml` has an `integration` dependency group. Again, if you initialized the charm with `charmcraft init` it should already be there. Integration tests use two packages: {external+jubilant:doc}`Jubilant <index>`, which wraps the Juju CLI, and [`pytest-jubilant`](https://github.com/canonical/pytest-jubilant), a pytest plugin that manages Juju models during tests. Pin to the current stable major versions, which are maintained with strong backwards compatibility guarantees. For example:
 
 ```toml
 [dependency-groups]
@@ -147,7 +147,7 @@ For general guidance about `conftest.py`, see [conftest.py: sharing fixtures acr
 
 By convention, integration tests are kept in the charm's source tree, in a directory called `tests/integration`.
 
-If you initialised the charm with `charmcraft init`, your charm directory should already contain a  `tests/integration/test_charm.py` file. Otherwise, manually create this directory structure and a test file. You can call the test file anything you like, as long as the name starts with `test_`.
+If you initialized the charm with `charmcraft init`, your charm directory should already contain a  `tests/integration/test_charm.py` file. Otherwise, manually create this directory structure and a test file. You can call the test file anything you like, as long as the name starts with `test_`.
 
 (write-integration-tests-for-a-charm-split-across-modules)=
 ### Split tests across modules
@@ -372,7 +372,7 @@ See more: [`pytest | How to invoke pytest`](https://docs.pytest.org/en/7.1.x/how
 (write-integration-tests-for-a-charm-configure-jubilant-logs)=
 ## Configure Jubilant logs
 
-Jubilant emits logs during the integration tests. These logs are captured and displayed by pytest. You can configure the logging behaviour in the `[tool.pytest.ini_options]` table in `pyproject.toml`.
+Jubilant emits logs during the integration tests. These logs are captured and displayed by pytest. You can configure the logging behavior in the `[tool.pytest.ini_options]` table in `pyproject.toml`.
 
 ### Logging levels
 
@@ -399,8 +399,8 @@ Sample output of `tox -e integration`:
 INFO jubilant cli: juju deploy --model jubilant-b3578475-test-charm ...
 INFO jubilant.wait [fastapi-demo] status changed: waiting (installing agent)
 INFO jubilant.wait [fastapi-demo/0] status changed: waiting (installing agent)
-INFO jubilant.wait [fastapi-demo] status changed: waiting (installing agent) -> waiting (agent initialising)
-INFO jubilant.wait [fastapi-demo/0] status changed: waiting (installing agent) -> waiting (agent initialising)
+INFO jubilant.wait [fastapi-demo] status changed: waiting (installing agent) -> waiting (agent initializing)
+INFO jubilant.wait [fastapi-demo/0] status changed: waiting (installing agent) -> waiting (agent initializing)
 ```
 
 ### Example of verbose logging
@@ -445,13 +445,13 @@ Sample output of `tox -e integration`:
 + .apps['fastapi-demo'].address = '10.152.183.180'
 2026-07-15T09:42:23Z DEBUG jubilant.wait wait: status changed:
 + .apps['fastapi-demo'].units['fastapi-demo/0'].provider_id = 'fastapi-demo-0'
-2026-07-15T09:42:24Z INFO jubilant.wait [fastapi-demo] status changed: waiting (installing agent) -> waiting (agent initialising)
-2026-07-15T09:42:24Z INFO jubilant.wait [fastapi-demo/0] status changed: waiting (installing agent) -> waiting (agent initialising)
+2026-07-15T09:42:24Z INFO jubilant.wait [fastapi-demo] status changed: waiting (installing agent) -> waiting (agent initializing)
+2026-07-15T09:42:24Z INFO jubilant.wait [fastapi-demo/0] status changed: waiting (installing agent) -> waiting (agent initializing)
 2026-07-15T09:42:24Z DEBUG jubilant.wait wait: status changed:
 - .apps['fastapi-demo'].app_status.message = 'installing agent'
-+ .apps['fastapi-demo'].app_status.message = 'agent initialising'
++ .apps['fastapi-demo'].app_status.message = 'agent initializing'
 - .apps['fastapi-demo'].units['fastapi-demo/0'].workload_status.message = 'installing agent'
-+ .apps['fastapi-demo'].units['fastapi-demo/0'].workload_status.message = 'agent initialising'
++ .apps['fastapi-demo'].units['fastapi-demo/0'].workload_status.message = 'agent initializing'
 + .apps['fastapi-demo'].units['fastapi-demo/0'].juju_status.version = '3.6.23'
 + .apps['fastapi-demo'].units['fastapi-demo/0'].leader = True
 + .apps['fastapi-demo'].units['fastapi-demo/0'].address = '10.1.0.108'
@@ -461,7 +461,7 @@ You can also configure pytest logging options on the command line.
 
 See more: [pytest | How to manage logging](https://docs.pytest.org/en/stable/how-to/logging.html)
 
-### Default behaviour
+### Default behavior
 
 If no logging configuration is set by `tool.pytest.ini_options` or pytest CLI arguments, pytest captures all log messages at `WARNING` level or above. You will still see messages from:
 

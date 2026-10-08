@@ -3,7 +3,7 @@
 `ops.main` entry point
 ======================
 
-The main entry point to initialise and run your charm.
+The main entry point to initialize and run your charm.
 
 .. autofunction:: ops.main
 

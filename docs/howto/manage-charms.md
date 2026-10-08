@@ -8,7 +8,7 @@ See first: {external+juju:ref}`Juju | Build a charm <build-a-charm>`, {external+
 
 You'll need the following tools:
 
-- **Charmcraft** - For initialising and packing your charm. See {external+charmcraft:ref}`Charmcraft | Manage Charmcraft <manage-charmcraft>`.
+- **Charmcraft** - For initializing and packing your charm. See {external+charmcraft:ref}`Charmcraft | Manage Charmcraft <manage-charmcraft>`.
 - **uv** - For managing your charm's dependencies, including Ops. See [Installing uv](https://docs.astral.sh/uv/getting-started/installation/).
 - **tox** - For running checks and tests. To install tox: `uv tool install tox --with tox-uv`.
 
@@ -22,9 +22,9 @@ See more:
 - [Prepare your environment to develop machine charms](#machine-charm-tutorial-environment)
 - [Prepare a continuous integration environment](#set-up-ci-integration)
 
-## Initialise your charm project
+## Initialize your charm project
 
-Use Charmcraft to quickly initialise your charm project. This generates the
+Use Charmcraft to quickly initialize your charm project. This generates the
 folder structure, creates placeholder configuration and code files, and
 configures development tooling.
 

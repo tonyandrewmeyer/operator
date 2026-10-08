@@ -28,7 +28,7 @@ Your charm is a Python project, with Juju-specific metadata in a file called `ch
 ```{toctree}
 :maxdepth: 1
 
-Initialise your project <initialise-your-project>
+Initialize your project <initialise-your-project>
 ```
 
 Your charm depends on Ops, with standard structures for handling events, status, and errors. As you write your charm, make sure to follow best practices.

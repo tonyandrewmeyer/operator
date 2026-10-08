@@ -117,7 +117,7 @@ Congratulations, you now know how to expose operational tasks via actions!
 
 ## Write unit tests
 
-Let's add a test to check the behaviour of the `get_db_info` action that we just set up. Our test sets up the context, defines the input state with a relation, then runs the action and checks whether the results match the expected values:
+Let's add a test to check the behavior of the `get_db_info` action that we just set up. Our test sets up the context, defines the input state with a relation, then runs the action and checks whether the results match the expected values:
 
 ```{literalinclude} ../../../examples/k8s-4-action/tests/unit/test_charm.py
 :language: python

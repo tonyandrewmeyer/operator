@@ -37,7 +37,7 @@ Avoid using `StoredState` objects in these situations.
 
 A `StoredState` object is capable of persisting simple data types, such as
 integers, strings, or floats, and lists, sets, and dictionaries containing those
-types. For more complex data, serialise the data first, for example to JSON.
+types. For more complex data, serialize the data first, for example to JSON.
 
 ### Implement the feature
 

@@ -42,7 +42,7 @@ To write a test function, use a `Context` object to encapsulate the charm type (
 
 This follows the typical test structure:
 
-- Arrange inputs, mock necessary functions/system calls, and initialise the charm
+- Arrange inputs, mock necessary functions/system calls, and initialize the charm
 - Act by calling `Context.run`
 - Assert expected outputs or function calls.
 
@@ -55,7 +55,7 @@ def _on_pebble_ready(self, event: ops.PebbleReadyEvent):
     # ...
 ```
 
-A test for this behaviour might look like:
+A test for this behavior might look like:
 
 ```python
 import yaml
@@ -127,7 +127,7 @@ loads the charm spec. You do not need to manually specify them.
 
 If your `charmcraft.yaml` defines keys that overlap with what the extension
 provides (e.g. a config option with the same name), the testing framework
-will raise a `ValueError`, matching the behaviour of `charmcraft pack`.
+will raise a `ValueError`, matching the behavior of `charmcraft pack`.
 Rename or remove the overlapping keys to fix this.
 ```
 

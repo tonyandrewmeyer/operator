@@ -3,7 +3,7 @@
 
 ## Implement the feature
 
-Applications modelled by charms have their own version; each application
+Applications modeled by charms have their own version; each application
 will have its own versioning scheme, and its own way of accessing that
 information. To make things easier for Juju admins, the charm should expose the
 workload version through Juju - it will be visible in `juju status` (in the

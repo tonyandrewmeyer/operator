@@ -37,7 +37,7 @@ the charm tracing integration counterpart posts in the databag.
 
 This release supports TLS 1.2 and 1.3 for HTTPS connections.
 
-Tracing behaviour across test frameworks
+Tracing behavior across test frameworks
 ----------------------------------------
 
 **ops[testing]** (formerly Scenario) replaces the OpenTelemetry tracer provider
@@ -47,5 +47,5 @@ details.
 
 **Harness** (legacy) is not affected. This framework does not have a Manager and
 does not call ``ops.main()`` and therefore the tracing subsystem remains
-uninitialised. It is still safe to create OpenTelemetry spans and events, as the
+uninitialized. It is still safe to create OpenTelemetry spans and events, as the
 root span is a ``NonRecordingSpan`` in this case.

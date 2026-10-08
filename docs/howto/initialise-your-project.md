@@ -5,9 +5,9 @@ myst:
 ---
 
 (init-charm)=
-# How to initialise your project
+# How to initialize your project
 
-Before you initialise your project, install charm development tools. See [](#prepare-your-environment).
+Before you initialize your project, install charm development tools. See [](#prepare-your-environment).
 
 This guide demonstrates how to name your charm and generate the recommended project structure. You should decide your charm's name before you create a repository for your charm.
 
@@ -29,7 +29,7 @@ Make sure that your charm's name only contains ASCII lowercase letters, numbers,
 
 The general naming pattern is `<workload name>[-<function>][-k8s]`, where `<function>` could be `server`, `dashboard`, and so on.
 
-Don't add an `operator` or `charm` prefix/suffix. Don't include an organisation or publisher name.
+Don't add an `operator` or `charm` prefix/suffix. Don't include an organization or publisher name.
 
 ### Charms without a workload
 
@@ -60,7 +60,7 @@ Create a repository with your source control of choice.
 
 If your charm operates a workload, name the repository `<charm name>-operator`. For advice about the charm name, see [](#decide-your-charms-name). If your charm doesn't operate a workload (as in the case of integrator charms and configurator charms), the `-operator` suffix isn't needed. For example, `foo-integrator` and `bar-configurator`.
 
-Repositories that contain multiple charms or one or more charms and other artefacts (like rocks) will need to use other naming patterns.
+Repositories that contain multiple charms or one or more charms and other artifacts (like rocks) will need to use other naming patterns.
 ```
 
 Examples:
@@ -73,7 +73,7 @@ Examples:
 - [request-authentication-configurator](https://github.com/canonical/request-authentication-configurator) - Contains a charm that configures Gateway to perform request authentication.
 
 (initialise-the-repository)=
-## Initialise the repository
+## Initialize the repository
 
 Next, use {external+charmcraft:doc}`Charmcraft <index>` to generate the recommended project structure in the repository:
 

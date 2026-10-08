@@ -33,7 +33,7 @@ requires:
 
 The traced charm must be the requirer in the relation. Trace data sinks, like Tempo, are the providers.
 
-The `limit` attribute is validated at charm initialisation time, because the tracing infrastructure can only handle one destination at a time. Thus it doesn't make sense for the traced app to be related to multiple providers simultaneously.
+The `limit` attribute is validated at charm initialization time, because the tracing infrastructure can only handle one destination at a time. Thus it doesn't make sense for the traced app to be related to multiple providers simultaneously.
 
 The `optional` attribute informs users that this charm can be deployed with or without tracing.
 

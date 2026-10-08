@@ -322,7 +322,7 @@ Now that our charm uses `fetch_database_relation_data` to extract database authe
 :pyobject: test_relation_data
 ```
 
-In this chapter, we also defined a new method `_on_collect_status` that checks various things, including whether the required database relation exists. If the relation doesn't exist, we wait and set the unit status to `blocked`. We can also add a test to cover this behaviour:
+In this chapter, we also defined a new method `_on_collect_status` that checks various things, including whether the required database relation exists. If the relation doesn't exist, we wait and set the unit status to `blocked`. We can also add a test to cover this behavior:
 
 ```{literalinclude} ../../../examples/k8s-3-postgresql/tests/unit/test_charm.py
 :language: python

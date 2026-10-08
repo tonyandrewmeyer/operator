@@ -210,7 +210,7 @@ Information about known vulnerabilities affecting Ops is published in:
 
 ## Risks
 
-The risks below follow from the trust boundaries described in [](#ops-product-architecture) and the design choices in [](#ops-secure-by-design); the mitigations are summarised in [](#ops-good-practices).
+The risks below follow from the trust boundaries described in [](#ops-product-architecture) and the design choices in [](#ops-secure-by-design); the mitigations are summarized in [](#ops-good-practices).
 
 Ops inherits the risks of Juju executing charms (for example, injecting data into the charm context or through the use of hook commands). Any compromise of Juju propagates into the charm process where Ops runs. Charm authors should be familiar with [](#ops-product-architecture), {external+juju:ref}`Juju security <juju-security>`, and {external+pebble:ref}`Pebble security <security>`.
 

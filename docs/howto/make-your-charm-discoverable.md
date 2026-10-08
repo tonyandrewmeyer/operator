@@ -21,7 +21,7 @@ Reach out in [Charm Development](https://matrix.to/#/#charmhub-charmdev:ubuntu.c
 
 Carry out your own review of your charm and its metadata. In particular, make sure that:
 
-* The charm does what it is meant to do. If it is straightforward to deploy the charm and use the workload, then ensure there is a tutorial that covers this. If the charm deployment is complex (for example, requires specialised hardware or an entire solution of charms), create a video that demonstrates both deploying the charm and some example use of the workload.
+* The charm does what it is meant to do. If it is straightforward to deploy the charm and use the workload, then ensure there is a tutorial that covers this. If the charm deployment is complex (for example, requires specialized hardware or an entire solution of charms), create a video that demonstrates both deploying the charm and some example use of the workload.
 * Some form of CI workflow exists that automatically releases the charm to an unstable channel on commits to the default branch.
 * The charm has integration tests that run on every change to the default branch, and are passing. At minimum, the tests verify that the charm can be deployed and ends up in a success state, and that the charm can be integrated with at least one example for each 'provides' and 'requires' specified (including optional integrations, but excluding tracing) ending up in a success state.
 
@@ -32,7 +32,7 @@ Review the charm's test coverage:
 * Charms may have additional tests in an external location, particularly if the charm has specific resource requirements (such as specific hardware). If this is the case, please mention it in the review request, ideally providing some mechanism for viewing the tests and their results.
 
 Ensure your charm's documentation focuses on the charm itself. For workload-specific or Juju-related content, link to the appropriate upstream documentation. A smaller charm can have single-page documentation for its description. A bigger charm should include a full [Diátaxis](https://diataxis.fr) navigation tree. Ensure that the charm has documentation that covers:
-* How to use the charm, including configuration, limitations, and deviations in behaviour from the 'non-charmed' version of the application.
+* How to use the charm, including configuration, limitations, and deviations in behavior from the 'non-charmed' version of the application.
 * A concise summary of the charm in the `charmcraft.yaml` 'summary' field, and a more detailed description in the `charmcraft.yaml` 'description' field.
 * Guidance for anyone that wants to contribute to the charm's development
 

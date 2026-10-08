@@ -117,9 +117,9 @@ return values, or raise exceptions and let them bubble back up to the charm for
 the charm author to handle as they see fit.
 ```
 
-### Test that the library initialises
+### Test that the library initializes
 
-In your `tests/unit/test_my_lib.py` file, add a test that validates that a charm can initialise
+In your `tests/unit/test_my_lib.py` file, add a test that validates that a charm can initialize
 the library, and that no events are unexpectedly emitted.
 
 ```python
@@ -165,7 +165,7 @@ def test_charm_runs(event):
 ### Test custom endpoint names
 
 If `DatabaseRequirer` is a relation endpoint wrapper, a frequent pattern is to
-allow customising the name of the endpoint that the object is wrapping.
+allow customizing the name of the endpoint that the object is wrapping.
 
 Examples: Traefik's [`ingress-per-unit`](https://github.com/canonical/traefik-k8s-operator/blob/main/lib/charms/traefik_k8s/v1/ingress_per_unit.py) lib
 
@@ -333,7 +333,7 @@ class TracingProviderAppData(pydantic.BaseModel):
 ```
 
 ```{tip}
-The Ops [](ops.Relation.load) and [](ops.Relation.save) methods serialise and deserialise the values
+The Ops [](ops.Relation.load) and [](ops.Relation.save) methods serialize and deserialize the values
 of each field, and default to using JSON, so you do not need to wrap fields in `pydantic.Json`.
 ```
 

@@ -17,13 +17,13 @@ cd operator/examples/k8s-4-action
 
 ````
 
-In a production deployment it is essential to observe and monitor the health of your application. A charm user will want to be able to collect real time metrics and application logs, set up alert rules, and visualise any collected data in a neat form on a dashboard.
+In a production deployment it is essential to observe and monitor the health of your application. A charm user will want to be able to collect real time metrics and application logs, set up alert rules, and visualize any collected data in a neat form on a dashboard.
 
 Our application is prepared for that -- as you might recall, it uses [`starlette-exporter`](https://pypi.org/project/starlette-exporter/) to generate real-time application metrics and to expose them via a `/metrics` endpoint that is designed to be scraped by [Prometheus](https://prometheus.io/). As a charm developer, you'll want to use that to make your charm observable.
 
-In the charming universe, what you would do is deploy the existing [Canonical Observability Stack (COS) lite bundle](https://charmhub.io/cos-lite) -- a convenient collection of charms that includes all of [Prometheus](https://charmhub.io/prometheus-k8s), [Loki](https://charmhub.io/loki-k8s), and [Grafana](https://charmhub.io/grafana-k8s) -- and then integrate your charm with Prometheus to collect real-time application metrics; with Loki to collect application logs; and with Grafana to create dashboards and visualise collected data.
+In the charming universe, what you would do is deploy the existing [Canonical Observability Stack (COS) lite bundle](https://charmhub.io/cos-lite) -- a convenient collection of charms that includes all of [Prometheus](https://charmhub.io/prometheus-k8s), [Loki](https://charmhub.io/loki-k8s), and [Grafana](https://charmhub.io/grafana-k8s) -- and then integrate your charm with Prometheus to collect real-time application metrics; with Loki to collect application logs; and with Grafana to create dashboards and visualize collected data.
 
-In this part of the tutorial we will follow this process to collect various metrics and logs about your application and visualise them on a dashboard.
+In this part of the tutorial we will follow this process to collect various metrics and logs about your application and visualize them on a dashboard.
 
 ## Fetch libraries
 
@@ -111,7 +111,7 @@ First, at the top of the file, import the `prometheus_scrape` library:
 :end-at: from charms.prometheus_k8s.v0.prometheus_scrape
 ```
 
-Now, in your charm's `__init__` method, initialise the `MetricsEndpointProvider` instance with the desired scrape target, as below. Note that this uses the relation name that you specified earlier in the `charmcraft.yaml` file. Also, reflecting the fact that you've made your charm's port configurable (see previous chapter {ref}`Make the charm configurable <make-your-charm-configurable>`), the target job is set to be consumed from config. The URL path is not included because it is predictable (defaults to /metrics), so the Prometheus library uses it automatically. The last line, which sets the `refresh_event` to the `config_change` event, ensures that the Prometheus charm will change its scraping target every time someone changes the port configuration. Overall, this code will allow your application to be scraped by Prometheus once they've been integrated.
+Now, in your charm's `__init__` method, initialize the `MetricsEndpointProvider` instance with the desired scrape target, as below. Note that this uses the relation name that you specified earlier in the `charmcraft.yaml` file. Also, reflecting the fact that you've made your charm's port configurable (see previous chapter {ref}`Make the charm configurable <make-your-charm-configurable>`), the target job is set to be consumed from config. The URL path is not included because it is predictable (defaults to /metrics), so the Prometheus library uses it automatically. The last line, which sets the `refresh_event` to the `config_change` event, ensures that the Prometheus charm will change its scraping target every time someone changes the port configuration. Overall, this code will allow your application to be scraped by Prometheus once they've been integrated.
 
 ```{literalinclude} ../../../examples/k8s-5-observe/src/charm.py
 :language: python
@@ -147,7 +147,7 @@ First, import the `loki_push_api` lib:
 :end-at: from charms.loki_k8s.v1.loki_push_api
 ```
 
-Then, in your charm's `__init__` method, initialise the `LogForwarder` instance as shown below. The `logging` relation name comes from the `charmcraft.yaml` file. Overall this code ensures that your application can push logs to Loki (or any other charms that implement the `loki_push_api` interface).
+Then, in your charm's `__init__` method, initialize the `LogForwarder` instance as shown below. The `logging` relation name comes from the `charmcraft.yaml` file. Overall this code ensures that your application can push logs to Loki (or any other charms that implement the `loki_push_api` interface).
 
 ```{literalinclude} ../../../examples/k8s-5-observe/src/charm.py
 :language: python
@@ -159,7 +159,7 @@ Congratulations, your charm can now also integrate with Loki!
 
 ## Integrate with Grafana
 
-Follow the steps below to make your charm capable of integrating with the existing [Grafana](https://charmhub.io/grafana-k8s) charm. This will allow your charm user to visualise the data collected from Prometheus and Loki.
+Follow the steps below to make your charm capable of integrating with the existing [Grafana](https://charmhub.io/grafana-k8s) charm. This will allow your charm user to visualize the data collected from Prometheus and Loki.
 
 ### Define the Grafana relation interface
 
@@ -183,7 +183,7 @@ First, at the top of the file, import the `grafana_dashboard` lib:
 :end-at: from charms.grafana_k8s.v0.grafana_dashboard
 ```
 
-Now, in your charm's `__init__` method, initialise the `GrafanaDashboardProvider` instance, as below. The `grafana-dashboard` is the relation name you defined earlier in your `charmcraft.yaml` file. Overall, this code states that your application supports the Grafana interface.
+Now, in your charm's `__init__` method, initialize the `GrafanaDashboardProvider` instance, as below. The `grafana-dashboard` is the relation name you defined earlier in your `charmcraft.yaml` file. Overall, this code states that your application supports the Grafana interface.
 
 ```{literalinclude} ../../../examples/k8s-5-observe/src/charm.py
 :language: python
@@ -217,7 +217,7 @@ Next, test your charm's ability to integrate with Prometheus, Loki, and Grafana 
 
 ### Deploy COS Lite
 
-Create a Juju model called `cos-lite` and, to this model, deploy the Canonical Observability Stack bundle [`cos-lite`](https://charmhub.io/topics/canonical-observability-stack), as below. This will deploy all the COS applications (`alertmanager`, `catalogue`, `grafana`, `loki`, `prometheus`, `traefik`), already suitably integrated with one  another.  Note that these also include the applications that you've been working to make your charm integrate with -- Prometheus, Loki, and Grafana.
+Create a Juju model called `cos-lite` and, to this model, deploy the Canonical Observability Stack bundle [`cos-lite`](https://charmhub.io/topics/canonical-observability-stack), as below. This will deploy all the COS applications (`alertmanager`, `catalog`, `grafana`, `loki`, `prometheus`, `traefik`), already suitably integrated with one  another.  Note that these also include the applications that you've been working to make your charm integrate with -- Prometheus, Loki, and Grafana.
 
 ```text
 juju add-model cos-lite
@@ -327,7 +327,7 @@ Leave the script running for the rest of the tutorial. To stop the script later,
 
 ### Access Grafana from your host machine
 
-Grafana allows you to visualise metrics on a dashboard. We'll now open Grafana's web UI to monitor the health of our application.
+Grafana allows you to visualize metrics on a dashboard. We'll now open Grafana's web UI to monitor the health of our application.
 
 COS Lite exposes Grafana through a load balancer that is provided by the [Traefik](https://charmhub.io/traefik-k8s) ingress integrator. In a production deployment, you'd access Grafana by connecting to the external endpoint that Traefik exposes. We don't have a production deployment, so we'll access Grafana by connecting to the load balancer's Kubernetes service.
 

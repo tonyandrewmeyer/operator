@@ -210,7 +210,7 @@ Next, we'll add a test that sets the port in the input state and asserts that th
 
 We need the `mock_version` fixture because `_on_config_changed` calls `_replan_workload`, which gets the workload version using `fastapi_demo.get_version`. The fixture patches `get_version` to avoid making a real HTTP call, so that the unit test stays deterministic.
 
-In `_on_config_changed`, we specifically don't allow port 22 to be used. If port 22 is configured, we set the unit status to `blocked`. So, we can add a test to cover this behaviour by setting the port to 22 in the input state and asserting that the unit status is blocked:
+In `_on_config_changed`, we specifically don't allow port 22 to be used. If port 22 is configured, we set the unit status to `blocked`. So, we can add a test to cover this behavior by setting the port to 22 in the input state and asserting that the unit status is blocked:
 
 ```{literalinclude} ../../../examples/k8s-2-configurable/tests/unit/test_charm.py
 :language: python

@@ -29,7 +29,7 @@ This is a mature, production framework used by thousands of charms. Changes requ
 - **Document** all breaking changes in commit messages
 - **Always** preserve existing behavior unless fixing a bug
 
-### Test Organisation
+### Test Organization
 - Tests for `ops/main.py` go in `test/test_main.py`
 - Large test suites may get their own file: `test/test_main_foo.py`
 - Scenario tests have a different structure - follow existing patterns
@@ -110,7 +110,7 @@ def my_function(param: str, count: int = 1) -> list[str]:
 - Be **concise**: No long introductions, get to the point
 - Use short sentences and simple phrasing
 - Be consistent with choice of words
-- Avoid words or phrases specific to US or UK English where possible, and use British English otherwise
+- Avoid words or phrases specific to US or UK English where possible, and use American English otherwise
 - State conditions **positively**: What should happen, not what shouldn't
 - Spell out abbreviations and avoid Latin: "for example" not "e.g."
 - Use **sentence case** for headings

@@ -152,7 +152,7 @@ In the `__init__` function of your charm class, we'll tell Ops which method of y
 
 ```{tip}
 
-**Pro tip:** Use `__init__` to hold references (pointers) to other `Object`s or immutable state only. That is because a charm is reinitialised on every event. You can't persist data between Juju events by storing it in memory.
+**Pro tip:** Use `__init__` to hold references (pointers) to other `Object`s or immutable state only. That is because a charm is reinitialized on every event. You can't persist data between Juju events by storing it in memory.
 
 ```
 
@@ -340,7 +340,7 @@ Replace the contents of `tests/unit/test_charm.py` with:
 :start-at: import ops
 ```
 
-This test checks the behaviour of the `_on_demo_server_pebble_ready` function that you set up earlier. The test simulates your charm receiving the pebble-ready event, then checks that the unit and workload container have the correct state.
+This test checks the behavior of the `_on_demo_server_pebble_ready` function that you set up earlier. The test simulates your charm receiving the pebble-ready event, then checks that the unit and workload container have the correct state.
 
 The unit tests don't have access to the application image, so we provide `ROCK_LAYER` to represent the base configuration of the workload container. If you're developing a charm in the same repository as a rock workload, use [`testing.layer_from_rockcraft`](ops.testing.layer_from_rockcraft) to read `ROCK_LAYER` from `rockcraft.yaml`.
 

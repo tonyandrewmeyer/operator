@@ -241,7 +241,7 @@ In a charm following the reconciler pattern, the `_reconcile` method is attached
 - the `upgrade-charm` event
 - the `update-status` event
 
-Consider relations: if a charm declares a relation, it's natural to expect that this unit's behaviour or the remote app behaviour depends on the databag content of the relation.
+Consider relations: if a charm declares a relation, it's natural to expect that this unit's behavior or the remote app behavior depends on the databag content of the relation.
 Therefore, the reconcile method has to read the relation data to apply the latest data, or overwrite its own databag with the latest computed data.
 Thus, the reconciler loop ought to run for every event on this relation.
 Following the same logic, the reconciler loop ought to run for every configuration, storage, and container event.

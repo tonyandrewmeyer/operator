@@ -314,9 +314,9 @@ class MyDatabaseCharm(ops.CharmBase):
         event.relation.data[event.unit]['secret-id'] = secret.id
 ```
 
-If a secret has been labelled in this way, the charm can retrieve the secret object at any time by calling `get_secret` with the "label" argument. This way, a charm can perform any secret management operation even if all it knows is the label. The secret ID is normally only used to exchange a reference to the secret *between* applications. Within a single application, all you need is the secret label.
+If a secret has been labeled in this way, the charm can retrieve the secret object at any time by calling `get_secret` with the "label" argument. This way, a charm can perform any secret management operation even if all it knows is the label. The secret ID is normally only used to exchange a reference to the secret *between* applications. Within a single application, all you need is the secret label.
 
-So, having labelled the secret on creation, the database charm could add a new revision as follows:
+So, having labeled the secret on creation, the database charm could add a new revision as follows:
 
 ```python
     def _rotate_webserver_secret(self):

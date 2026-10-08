@@ -16,7 +16,7 @@ Here we'll look at just how to do that. You will learn how to:
 This guide will refer to a local LXD cloud and a machine charm, but you can easily generalize the approach to Kubernetes.
 
 
-## Analyse the charm
+## Analyze the charm
 
 
 We start by looking at the charm we intend to translate; as an example, we will take [`microsample`](https://github.com/erik78se/charm-microsample), an educational charm, because it is simple and includes a number of hooks, while implementing little-to-no business logic (the charm does very little).

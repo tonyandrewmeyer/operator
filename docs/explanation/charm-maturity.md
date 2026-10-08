@@ -25,14 +25,14 @@ After passing review, the charm will show up in searches on Charmhub, and web se
 
 See more: [How to request Charmhub public listing](#make-your-charm-discoverable)
 
-Reviewing charms encourages the involvement of the community. 'Community' refers to individuals and organisations creating or contributing to charms, Juju and the wider charming ecosystem. Reviews take place in public GitHub issues so that anyone from the community can participate.
+Reviewing charms encourages the involvement of the community. 'Community' refers to individuals and organizations creating or contributing to charms, Juju and the wider charming ecosystem. Reviews take place in public GitHub issues so that anyone from the community can participate.
 
 ### Roles
 
 | Role | Description |
 |------|-------------|
-| Author | Author of the charm or person representing the organisation. The person submitting the charm for review is called the author in this documentation. |
-| Publisher | The responsible person or organisation for publishing the charm. |
+| Author | Author of the charm or person representing the organization. The person submitting the charm for review is called the author in this documentation. |
+| Publisher | The responsible person or organization for publishing the charm. |
 | Review group | A group of people who watch for review requests, then request changes or assign a suitable reviewer. This is currently the Canonical Charm Tech team. |
 | Reviewer | Person conducting the review. |
 
@@ -42,7 +42,7 @@ Public listing is not the end of a charm's growth. Truly mature charms offer mor
 
 ### The charm has sensible defaults
 
-A user can deploy the charm with a sensible default configuration. Optimised deployments will require configuration, but a charm should be opinionated and start out with reasonable defaults.
+A user can deploy the charm with a sensible default configuration. Optimized deployments will require configuration, but a charm should be opinionated and start out with reasonable defaults.
 
 For example, if the workload requires initial passwords to be set, auto-generate them and provide them to the Juju user. You could implement an action or a secret.
 

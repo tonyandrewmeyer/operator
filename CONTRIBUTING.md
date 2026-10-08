@@ -30,7 +30,7 @@ We have a team [Python style guide](https://github.com/canonical/charm-tech/blob
 ## Dependencies
 
 The Python dependencies of `ops` are kept as minimal as possible, to avoid
-bloat and to minimise conflict with the charm's dependencies. The dependencies
+bloat and to minimize conflict with the charm's dependencies. The dependencies
 are listed in [pyproject.toml](pyproject.toml) in the `project.dependencies` section.
 
 When adding a new dependency, also add it to the appropriate group in
@@ -153,11 +153,11 @@ The published docs at [canonical.com/juju/docs/ops](https://canonical.com/juju/d
 
 The documentation uses Canonical's [Sphinx Stack](https://github.com/canonical/sphinx-stack).
 
-Sphinx Stack provides [`docs/conf.py`](./docs/conf.py), which we've customised with project metadata (as expected). We've also added config that goes beyond the provisions of Sphinx Stack. Search for `[BEYOND SPHINX STACK]` in `docs/conf.py`.
+Sphinx Stack provides [`docs/conf.py`](./docs/conf.py), which we've customized with project metadata (as expected). We've also added config that goes beyond the provisions of Sphinx Stack. Search for `[BEYOND SPHINX STACK]` in `docs/conf.py`.
 
 Sphinx Stack provides [`docs/Makefile`](./docs/Makefile). We've replaced the stock `$(DOCS_VENVDIR)` target by a custom version that uses uv to ensure that `ops-scenario` and `ops-tracing` are installed in the virtual environment.
 
-Keep these customisations in mind when upgrading Sphinx Stack. To upgrade Sphinx Stack, see [Update the new Sphinx Stack](https://documentation.ubuntu.com/sphinx-stack/latest/how-to/update-sphinx-stack/new-sphinx-stack/).
+Keep these customizations in mind when upgrading Sphinx Stack. To upgrade Sphinx Stack, see [Update the new Sphinx Stack](https://documentation.ubuntu.com/sphinx-stack/latest/how-to/update-sphinx-stack/new-sphinx-stack/).
 
 ## Contributing docs
 
@@ -205,7 +205,7 @@ We do note when features behave differently when using different versions of Juj
 In docstrings:
 
 - Use `.. jujuadded:: x.y` to indicate that the feature is only available when using version x.y (or higher) of Juju.
-- Use `.. jujuchanged:: x.y` when the feature's behaviour changed in version x.y of Juju.
+- Use `.. jujuchanged:: x.y` when the feature's behavior changed in version x.y of Juju.
 - Use `.. jujuremoved:: x.y` when the feature was removed in version x.y of Juju.
 
 Similar directives also work in MyST Markdown. For example:

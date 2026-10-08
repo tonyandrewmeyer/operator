@@ -5,7 +5,7 @@ These guides provide technical information about Ops APIs.
 
 ## Core APIs
 
-`ops.main` is the entry point to initialise and run your charm. `ops` is the API to respond to Juju events and manage the application.
+`ops.main` is the entry point to initialize and run your charm. `ops` is the API to respond to Juju events and manage the application.
 
 ```{toctree}
 :maxdepth: 1

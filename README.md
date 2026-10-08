@@ -19,7 +19,7 @@ Let's use `ops` to build a Kubernetes charm:
 
 ### Write your charm
 
-On your Multipass VM, create a charm directory and use Charmcraft to initialise your charm file structure:
+On your Multipass VM, create a charm directory and use Charmcraft to initialize your charm file structure:
 
 ```shell-script
 mkdir ops-example

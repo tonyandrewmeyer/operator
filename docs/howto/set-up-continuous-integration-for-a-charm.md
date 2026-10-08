@@ -127,7 +127,7 @@ Your charm needs two things:
 
 For a configuration you can copy, see the [httpbin-demo charm](https://github.com/canonical/operator/tree/main/examples/httpbin-demo).
 
-Charmcraft also has an experimental `charmcraft test` command, which is a wrapper around Spread. We suggest using Spread directly until `charmcraft test` is finalised. The workflow below uses `charmcraft test` as a convenient way to install and configure Spread.
+Charmcraft also has an experimental `charmcraft test` command, which is a wrapper around Spread. We suggest using Spread directly until `charmcraft test` is finalized. The workflow below uses `charmcraft test` as a convenient way to install and configure Spread.
 
 A minimal workflow looks like:
 

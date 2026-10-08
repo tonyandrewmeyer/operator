@@ -63,7 +63,7 @@ If multiple containers are specified in `charmcraft.yaml` (as above), each Pod w
 - a container running the `redis-image`
 - a container running the charm code
 
-The Juju controller emits [`PebbleReadyEvent`](ops.PebbleReadyEvent)s to charms when Pebble has initialised its API in a container. These events are named `<container_name>_pebble_ready`. Using the example above, the charm would receive two Pebble related events (assuming the Pebble API starts correctly in each workload):
+The Juju controller emits [`PebbleReadyEvent`](ops.PebbleReadyEvent)s to charms when Pebble has initialized its API in a container. These events are named `<container_name>_pebble_ready`. Using the example above, the charm would receive two Pebble related events (assuming the Pebble API starts correctly in each workload):
 
 - `myapp_pebble_ready`
 - `redis_pebble_ready`.
@@ -83,7 +83,7 @@ resources:
 # ...
 ```
 
-Once the containers are initialised, the charm needs to tell Pebble how to start the workload. Pebble uses a series of "layers" for its configuration. Layers contain a description of the processes to run, along with the path and arguments to the executable, any environment variables to be specified for the running process and any relevant process ordering (more information available in the {external+pebble:doc}`Pebble documentation<index>`).
+Once the containers are initialized, the charm needs to tell Pebble how to start the workload. Pebble uses a series of "layers" for its configuration. Layers contain a description of the processes to run, along with the path and arguments to the executable, any environment variables to be specified for the running process and any relevant process ordering (more information available in the {external+pebble:doc}`Pebble documentation<index>`).
 
 ```{note}
 
@@ -93,7 +93,7 @@ In many cases, using the container's specified entrypoint may be desired. You ca
 `$ docker inspect <image>`
 ```
 
-When using an OCI-image that is not built specifically for use with Pebble, layers are defined at runtime using Pebble’s API. Recall that when Pebble has initialised in a container (and the API is ready), the Juju controller emits a [`PebbleReadyEvent`](ops.PebbleReadyEvent) event to the charm. Often it is in the callback bound to this event that layers are defined, and services started:
+When using an OCI-image that is not built specifically for use with Pebble, layers are defined at runtime using Pebble’s API. Recall that when Pebble has initialized in a container (and the API is ready), the Juju controller emits a [`PebbleReadyEvent`](ops.PebbleReadyEvent) event to the charm. Often it is in the callback bound to this event that layers are defined, and services started:
 
 ```python
 # ...

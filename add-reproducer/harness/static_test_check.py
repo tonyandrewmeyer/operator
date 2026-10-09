@@ -360,6 +360,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _unfaked_hook_tools(tree)
     reasons += _uncaught_hook_tool_error(tree)
     reasons += _databag_not_read(tree)
+    reasons += _string_databag_key(tree)
     reasons += _backend_keywords(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
@@ -3148,6 +3149,142 @@ def _not_read_reason(node: ast.AST, around: str, fails: int | None, drop: str, n
         "`RelationDataContent` loads lazily, so this runs no `relation-get` and cannot raise an "
         f"`ops.ModelError`, with or without the bug, {around}{not_raised}; read the databag instead{drop} and compare "
         f"it with what the issue says it should be{gone}: {_read_and_assert(node, fails)}"
+    )
+
+
+def _string_databag_key(tree: ast.Module) -> list[str]:
+    """A relation databag indexed with a string, `relation.data['provider']`,
+    in a fake-hook-tool test, where that certainly raises `KeyError`.
+
+    `RelationData` is keyed by `ops.Unit` and `ops.Application` objects, and
+    its `__getitem__()` is a plain dict lookup, so any string raises
+    `KeyError` at the subscript, before anything is read and without running
+    a hook tool (checked by running, on ops 3.8.3 and `main`, with the app's
+    name, a unit's name, this charm's own, and the endpoint's). Live on
+    `#2709`, two of §19's tests did this (`spike-step-5/static-retry/
+    RESULT.md` §19, §20), and the rules there let both through.
+
+    `R` is a relation the test assigned at its top (`_scan_tests()`), from
+    `get_relation(name, id)`, `relations[name][i]`, or `get_relation(name)`
+    once `relation-ids` certainly prints one ID, so it is a `Relation` and
+    not `None` or a list; or a relation access whose fakes cannot raise a
+    `ModelError` (`_quiet_relation()`), so a handler that swallows one cannot
+    skip the subscript. The statement is one `_certain_places()` is sure
+    runs, with every handler and `pytest.raises` around it catching only
+    `ModelError` subclasses or failing the test, so the `KeyError` gets out,
+    and the subscript is evaluated whenever the statement is, before any
+    other call in it when a handler around it could swallow a `ModelError`.
+    Only a string literal: a name, an attribute, a call or anything else is
+    let through. The rule is off when the file assigns a `.data` attribute or
+    calls `setattr` or anything named `patch`.
+
+    The reason says what to index with instead: `R.app` for the remote
+    application, `model.get_unit(name)` for a unit, and `model.app` /
+    `model.unit` for this charm's own.
+    """
+    ops = _ops()
+    if ops is None:
+        return []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "data" and isinstance(node.ctx, ast.Store):
+            return []
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else None
+            if name in ("setattr", "patch") or (name == "object" and "patch" in ast.unparse(func)):
+                return []
+    scripts = _fake_scripts(tree)
+    helpers = _fake_helpers(tree)
+    reasons = []
+    for function, index, place, scope in _scan_tests(tree):
+        target = place.statement
+        if not isinstance(target, _SIMPLE_STATEMENTS):
+            continue
+        before = function.body[:index]
+        for node in ast.walk(target):
+            if not (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.ctx, ast.Load)
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "data"
+            ):
+                continue
+            relation = node.value.value
+            if isinstance(relation, ast.Name):
+                if not _assigned_a_relation(relation.id, function, scope, scripts, helpers):
+                    continue
+            elif not _quiet_relation(relation, scope, scripts, helpers, before):
+                continue
+            if not _unconditional(node, target) or (place.strict and not _called_first(target, node)):
+                continue
+            reasons.append(_string_key_reason(node, relation, scope))
+    return list(dict.fromkeys(reasons))
+
+
+def _assigned_a_relation(name: str, function: ast.FunctionDef, scope: _Scope, scripts, helpers) -> bool:
+    """Whether `name` is a relation `_scan_tests()` tracks that is certainly
+    an `ops.Relation` once its assignment has run: from `get_relation(name,
+    id)`, `relations[name][i]`, or `get_relation(name)` with `relation-ids`
+    certainly printing exactly one ID by then (none gives `None`)."""
+    if name not in scope.relations:
+        return False
+    for index, statement in enumerate(function.body):
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == name
+        ):
+            value = statement.value
+            if isinstance(value, ast.Subscript):
+                return isinstance(value.value, ast.Subscript)
+            if _call_arg(value, 1, "relation_id") is not None:
+                return True
+            ids = _certain_fake(scripts, helpers, function.body[:index], "relation-ids", _relation_id_count)
+            return ids == 1
+    return False
+
+
+def _string_key_reason(node: ast.Subscript, relation: ast.AST, scope: _Scope) -> str:
+    key = node.slice.value
+    shown = ast.unparse(relation)
+    root = relation
+    if isinstance(root, ast.Name):
+        assign = scope.names.assignments.get(root.id)
+        root = assign.value if assign is not None else root
+    while isinstance(root, (ast.Subscript, ast.Attribute, ast.Call)):
+        root = root.func if isinstance(root, ast.Call) else root.value
+    model = root.id if isinstance(root, ast.Name) and root.id in scope.models else "model"
+    own_unit = None
+    call = scope.names.assignments.get(model)
+    if call is not None:
+        backend = _call_arg(call.value, 1, "backend") if isinstance(call.value, ast.Call) else None
+        backend = scope.names.value_of(backend) if backend is not None else None
+        unit = _call_arg(backend, 0, "unit_name") if isinstance(backend, ast.Call) else None
+        if isinstance(unit, ast.Constant) and isinstance(unit.value, str):
+            own_unit = unit.value
+    remote_app = f"`{shown}.data[{shown}.app]` for the remote application's databag"
+    remote_unit = f"`{shown}.data[{model}.get_unit('<unit name>')]` for a remote unit's"
+    own = f"`{shown}.data[{model}.app]` or `{shown}.data[{model}.unit]` for this charm's own"
+    if key == own_unit:
+        use = f"`{shown}.data[{model}.unit]` for this unit's databag"
+        others = [remote_app, f"`{shown}.data[{model}.app]` for this application's"]
+    elif own_unit is not None and key == own_unit.split("/")[0]:
+        use = f"`{shown}.data[{model}.app]` for this application's databag"
+        others = [remote_app, f"`{shown}.data[{model}.unit]` for this unit's"]
+    elif "/" in key:
+        use = f"`{shown}.data[{model}.get_unit({key!r})]` for that unit's databag (the same object as the one in `{shown}.units`)"
+        others = [remote_app, own]
+    else:
+        use = remote_app
+        others = [remote_unit, own]
+    return (
+        f"line {node.lineno}: `{ast.unparse(node)}` indexes the databag with the string `{key!r}`, but "
+        "`Relation.data` is keyed by `ops.Application` and `ops.Unit` objects, not by name, so this raises "
+        f"`KeyError: {key!r}` at the subscript, before anything is read, with or without the bug; "
+        f"index it with the object instead: {use} ({'; '.join(others)})"
     )
 
 

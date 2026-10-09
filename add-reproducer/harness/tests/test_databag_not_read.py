@@ -64,8 +64,13 @@ EXPECTED = {
         ["`model.get_relation('db')` needs `relation-list`", _NOT_JSON],
         [_LOOKED_UP, 'fails with "DID NOT RAISE"'],
     ],
-    # Under a second handler that fails the test.
-    ("retry-hooktool3b-2709.json", 2): [[_UNDECLARED], [_NOT_FAKED + " `relation-ids` and `relation-list`"]],
+    # Under a second handler that fails the test; and a string databag key
+    # (§21, `test_string_databag_key.py`).
+    ("retry-hooktool3b-2709.json", 2): [
+        [_UNDECLARED],
+        [_NOT_FAKED + " `relation-ids` and `relation-list`"],
+        ["indexes the databag with the string `'provider'`"],
+    ],
 }
 
 
@@ -108,14 +113,21 @@ REPAIRED = {
     ("retry-hooktool3-2709.json", 6): AssertionError,
     ("retry-hooktool3b-2709.json", 1): AssertionError,
     # Indexes the databag with the string `'provider'`, which no rule here
-    # catches: `KeyError`, turned into `pytest.fail` by its second handler.
+    # catches (§21's does): `KeyError`, turned into `pytest.fail` by its
+    # second handler.
     ("retry-hooktool3b-2709.json", 2): pytest.fail.Exception,
 }
 
 
 @pytest.mark.parametrize("record", list(_corpus("2709-hooktool3-repaired.json")))
 def test_the_hand_repairs_pass_the_check(record):
-    assert check(record["test_file"]["body"]).passed, check(record["test_file"]["body"]).reasons
+    result = check(record["test_file"]["body"])
+    if (record["source"], record["run"]) == ("retry-hooktool3b-2709.json", 2):
+        # Since §21, its string key is rejected too.
+        (reason,) = result.reasons
+        assert "indexes the databag with the string `'provider'`" in reason
+        return
+    assert result.passed, result.reasons
 
 
 @pytest.mark.skipif(not _IS_LEADER_RUNS, reason="the installed ops has the #2709 fix")

@@ -1,0 +1,11 @@
+[
+  {
+    "source": "retry-hooktool3b-2709.json",
+    "run": 2,
+    "repair": "§21 reason",
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import os\nimport pytest\nimport ops\nfrom ops.model import _ModelBackend\n\n\ndef fake_hook_tool(bin_dir, name, script):\n    path = bin_dir / name\n    path.write_text('#!/bin/sh\\n' + script + '\\n')\n    path.chmod(0o755)\n\n\ndef test_permission_denied_maps_to_relation_not_found(tmp_path, monkeypatch):\n    bin_dir = tmp_path / 'bin'\n    bin_dir.mkdir()\n    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])\n    monkeypatch.setenv('JUJU_VERSION', '3.6.0')\n    fake_hook_tool(bin_dir, 'relation-ids', 'echo \\'[\"dbc:1\"]\\'')\n    fake_hook_tool(bin_dir, 'relation-list', 'echo \\'[\"provider/0\"]\\'')\n    fake_hook_tool(bin_dir, 'is-leader', 'echo true')\n    fake_hook_tool(bin_dir, 'relation-get', \"echo 'ERROR permission denied' >&2; exit 1\")\n    model = ops.Model(ops.CharmMeta.from_yaml('name: myapp\\nrequires:\\n  dbc: {interface: dbc}\\n'), _ModelBackend('myapp/0'))\n    try:\n        model.relations['dbc'][0].data[model.relations['dbc'][0].app]\n    except ops.RelationNotFoundError:\n        pass\n    except Exception as e:\n        pytest.fail(f'Expected RelationNotFoundError, got {type(e)}')"
+    }
+  }
+]

@@ -530,8 +530,10 @@ def test_a_meta_it_cannot_read_lets_the_test_through(meta_expr):
 
 
 def test_a_meta_built_twice_lets_the_test_through():
+    # A second `CharmMeta` the test can see. One built in another test
+    # function is that test's own (`tests/test_per_function_names.py`).
     source = _endpoint_test("name: myapp\n", "model.get_relation('db', 2)")
-    source += "\n\ndef test_other():\n    ops.CharmMeta.from_yaml('name: other\\nrequires: {db: {interface: db}}')\n"
+    source += "\n\nOTHER = ops.CharmMeta.from_yaml('name: other\\nrequires: {db: {interface: db}}')\n"
     assert not _endpoint_reasons(source)
 
 

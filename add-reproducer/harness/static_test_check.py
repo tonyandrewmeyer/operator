@@ -362,6 +362,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _databag_not_read(tree)
     reasons += _string_databag_key(tree)
     reasons += _backend_keywords(tree)
+    reasons += _hand_built_relations(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -1641,30 +1642,69 @@ def _file_binding_counts(tree: ast.Module) -> dict[str, int] | None:
     return counts
 
 
+def _local_binding_counts(function: ast.FunctionDef) -> dict[str, int] | None:
+    """How many times each name local to `function` is bound in it (its
+    parameters and body, nested scopes included, which only ever counts
+    more), or `None` when an `import *` makes that unknowable. A name the
+    function declares `global` or `nonlocal` anywhere in it is not local."""
+    counts = _file_binding_counts(ast.Module(body=list(function.body), type_ignores=[]))
+    if counts is None:
+        return None
+    for node in ast.walk(function.args):
+        if isinstance(node, ast.arg):
+            counts[node.arg] = counts.get(node.arg, 0) + 1
+    declared = {
+        name for node in ast.walk(function) if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names
+    }
+    return {name: n for name, n in counts.items() if name not in declared}
+
+
 class _Names:
     """What the file's names certainly are: imports bound exactly once, and
-    names assigned exactly once by a plain `name = value` statement."""
+    names assigned exactly once by a plain `name = value` statement.
 
-    def __init__(self, tree: ast.Module, counts: dict[str, int]):
+    With `function`, as seen from inside that module-level function: a name
+    local to it is counted, and found, only in it, since another function's
+    binding of the same name is a different variable. Two tests that each
+    assign `model` then each have a known `model` (`spike-step-5/
+    static-retry/RESULT.md` §23, §24). Every other name is counted across
+    the whole file, as without it."""
+
+    def __init__(self, tree: ast.Module, counts: dict[str, int], function: ast.FunctionDef | None = None):
+        local: set[str] = set()
+        inside: set[int] = set()
+        if function is not None:
+            local_counts = _local_binding_counts(function) or {}
+            counts = {**counts, **local_counts}
+            local = set(local_counts)
+            inside = {id(node) for node in ast.walk(function)}
+
+        def elsewhere(node: ast.AST, name: str) -> bool:
+            # A binding of a name local to `function`, outside it.
+            return name in local and id(node) not in inside
+
         self.counts = counts
         self.imports: dict[str, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.asname:
-                        self.imports[alias.asname] = alias.name
+                        if not elsewhere(node, alias.asname):
+                            self.imports[alias.asname] = alias.name
                     else:
                         root = alias.name.split(".")[0]
-                        self.imports[root] = root
+                        if not elsewhere(node, root):
+                            self.imports[root] = root
             elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                 for alias in node.names:
-                    self.imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+                    if not elsewhere(node, alias.asname or alias.name):
+                        self.imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
         self.imports = {name: dotted for name, dotted in self.imports.items() if counts.get(name) == 1}
         self.assignments: dict[str, ast.Assign] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                 name = node.targets[0].id
-                if counts.get(name) == 1:
+                if counts.get(name) == 1 and not elsewhere(node, name):
                     self.assignments[name] = node
 
     def dotted(self, node: ast.AST) -> str | None:
@@ -1739,6 +1779,14 @@ def _meta_endpoints(call: ast.Call, names: _Names) -> frozenset | None:
     """The endpoints a `CharmMeta` built by `call` from literals declares, by
     building it with the installed ops; `None` when `call` is not that, or
     the literal does not build."""
+    meta = _built_meta(call, names, follow=False)
+    return None if meta is None else frozenset(meta.relations)
+
+
+def _built_meta(call: ast.Call, names: _Names, *, follow: bool = True):
+    """The `CharmMeta` a `CharmMeta(...)` / `CharmMeta.from_yaml(...)` call
+    builds, with the installed ops, when every argument is a literal (or,
+    with `follow`, a name assigned exactly once to one); `None` otherwise."""
     ops = _ops()
     if ops is None:
         return None
@@ -1752,17 +1800,41 @@ def _meta_endpoints(call: ast.Call, names: _Names) -> frozenset | None:
     if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
         return None
     try:
-        args = [ast.literal_eval(a) for a in call.args]
-        kwargs = {k.arg: ast.literal_eval(k.value) for k in call.keywords}
+        value = names.value_of if follow else (lambda node: node)
+        args = [ast.literal_eval(value(a)) for a in call.args]
+        kwargs = {k.arg: ast.literal_eval(value(k.value)) for k in call.keywords}
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
         return None
     if build is not ops.CharmMeta and not all(isinstance(v, str) for v in [*args, *kwargs.values()]):
         return None
     try:
-        meta = build(*args, **kwargs)
-        return frozenset(meta.relations)
+        return build(*args, **kwargs)
     except Exception:
         return None
+
+
+def _remote_endpoints(tree: ast.Module, names: _Names) -> frozenset:
+    """The endpoints every `CharmMeta` the file builds declares under
+    `requires` or `provides` and not under `peers` (`_built_meta()`); empty
+    when the file builds none, or one that does not build, or builds an
+    `ops.Model` over anything but one of them."""
+    ops = _ops()
+    metas = [node for node in ast.walk(tree) if _is_meta_call(node, names)]
+    if ops is None or not metas:
+        return frozenset()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and names.resolve(node.func) is ops.Model:
+            meta = _call_arg(node, 0, "meta")
+            if meta is None or not any(names.value_of(meta) is m for m in metas):
+                return frozenset()
+    found = None
+    for call in metas:
+        meta = _built_meta(call, names)
+        if meta is None:
+            return frozenset()
+        remote = frozenset((set(meta.requires) | set(meta.provides)) - set(meta.peers))
+        found = remote if found is None else found & remote
+    return found or frozenset()
 
 
 def _is_meta_call(node: ast.AST, names: _Names) -> bool:
@@ -1992,8 +2064,27 @@ def _undeclared_endpoints(tree: ast.Module) -> list[str]:
     counts = _file_binding_counts(tree)
     if counts is None:
         return []
-    names = _Names(tree, counts)
-    metas = [node for node in ast.walk(tree) if _is_meta_call(node, names)]
+    parents = _parents(tree)
+    reasons = _undeclared_in(tree, parents, _Names(tree, counts), list(ast.walk(tree)))
+    # Then each test function on its own, with its own names and only the
+    # `CharmMeta`s it can see (its own and those outside every function):
+    # two similar tests each assigning `model` and building a `CharmMeta`
+    # hid both tests' undeclared endpoints (§23, §24).
+    tests = _test_functions(tree)
+    outside = [
+        node
+        for statement in tree.body
+        if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for node in ast.walk(statement)
+    ]
+    for function in tests if len(tests) > 1 else []:
+        reasons += _undeclared_in(tree, parents, _Names(tree, counts, function), outside + list(ast.walk(function)))
+    return list(dict.fromkeys(reasons))
+
+
+def _undeclared_in(tree: ast.Module, parents: dict, names: _Names, nodes: list[ast.AST]) -> list[str]:
+    """`_undeclared_endpoints()` over `nodes`, with `names`."""
+    metas = [node for node in nodes if _is_meta_call(node, names)]
     if len(metas) != 1:
         return []
     meta = metas[0]
@@ -2007,12 +2098,11 @@ def _undeclared_endpoints(tree: ast.Module) -> list[str]:
     }
     if not models:
         return []
-    parents = _parents(tree)
     faked = set(_faked_hook_tools(tree))
     declared = ", ".join(f"`{e}`" for e in sorted(endpoints))
     has = f"it declares only {declared}" if endpoints else "it declares no relations"
     reasons = []
-    for node in ast.walk(tree):
+    for node in nodes:
         endpoint = _endpoint_read(node, models)
         if endpoint is None:
             continue
@@ -2084,10 +2174,15 @@ def _tool_output(tool: str, endpoint: str | None, relation_id: int | None) -> st
         example = f"{endpoint or 'db'}:{relation_id if relation_id is not None else 1}"
         return f'`relation-ids` prints the endpoint\'s relation IDs as a JSON list, like `["{example}"]`'
     if tool == "relation-list":
+        # Live, the old wording's "if it prints `[]`, ops runs
+        # `relation-list --app` next" led 3 of 7 re-asks to a separate
+        # `--app` fake that is never run, and 2 to a fake printing `[]`
+        # (`spike-step-5/static-retry/RESULT.md` §23, §24).
         return (
-            '`relation-list` prints the remote units as a JSON list, like `["provider/0"]` (if it '
-            "prints `[]`, ops runs `relation-list --app` next, which has to print the remote "
-            'application as a JSON string, like `"provider"`)'
+            "`relation-list` prints the remote units as a JSON list: fake it once, with a script "
+            "that prints a unit list whatever its arguments are, like `echo '[\"provider/0\"]'`; that "
+            "one fake also answers `relation-list --app`, which ops only runs when the list is "
+            "empty, so do not fake `--app` separately and do not print `[]`"
         )
     if tool == "relation-get":
         return "`relation-get` prints the databag as a JSON object, like `{}`"
@@ -2631,6 +2726,14 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
     `relation-ids` prints any IDs, so when the test's one `relation-ids` fake
     certainly prints some (`_relation_id_count()`), that is checked too
     (§20; by running, the same on ops 3.8.3 and `main`).
+
+    A `relation-list` fake that certainly prints `[]` whatever its arguments
+    are is rejected too, for an access that builds a relation on an endpoint
+    every `CharmMeta` in the file declares and not as a peer one, when nothing
+    in the file names `JUJU_RELATION_ID` or `JUJU_REMOTE_APP`: with no units,
+    ops asks the same fake for the remote app (`relation-list --app`), gets
+    `[]`, and fails with `TypeError: unhashable type: 'list'` on 3.8.3 and
+    `main` (§23, §24; checked by running in `tests/test_relation_list_fakes.py`).
     """
     reasons = []
     found = _hook_tool_accesses(tree)
@@ -2644,6 +2747,18 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
         if len(found) == 1 and found[0] is not None and _security_event_runs_is_leader():
             return _authz_failure(found[0])
         return None
+
+    # Where `relation-list` printing `[]` certainly makes ops run it again
+    # with `--app`: a declared endpoint that is not a peer one (for a peer
+    # relation the remote app is this charm's own), and nothing in the file
+    # setting `JUJU_RELATION_ID` / `JUJU_REMOTE_APP` (which ops reads instead).
+    counts = _file_binding_counts(tree)
+    remote = _remote_endpoints(tree, _Names(tree, counts)) if counts is not None else frozenset()
+    if any(
+        isinstance(n, ast.Constant) and isinstance(n.value, str) and ("JUJU_RELATION_ID" in n.value or "JUJU_REMOTE_APP" in n.value)
+        for n in ast.walk(tree)
+    ):
+        remote = frozenset()
 
     for access in found:
         node, tools, endpoint, relation_id = access.node, access.tools, access.endpoint, access.relation_id
@@ -2671,6 +2786,22 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
                     f"line {node.lineno}: `{ast.unparse(node)}` needs `{tool}`, and its "
                     f"fake prints {shown}, which is not JSON, so ops fails with "
                     "`JSONDecodeError` before it reaches the bug; "
+                    f"{_tool_output(tool, endpoint, relation_id)}"
+                )
+            elif (
+                tool == "relation-list"
+                and "relation-get" not in tools
+                and endpoint in remote
+                and len(found_scripts) == 1
+                and found_scripts[0] is not None
+                and _certain_json(found_scripts[0]) == []
+            ):
+                reasons.append(
+                    f"line {node.lineno}: `{ast.unparse(node)}` needs `relation-list`, and its "
+                    "fake prints `[]` whatever its arguments are: with no remote units, ops runs "
+                    "`relation-list --app` for the remote application's name, gets `[]` again "
+                    "from the same fake, and fails with `TypeError: unhashable type: 'list'` "
+                    "before it reaches the bug, on every version of ops; "
                     f"{_tool_output(tool, endpoint, relation_id)}"
                 )
         missing = [t for t in tools if t not in faked]
@@ -2735,13 +2866,15 @@ def _scan_tests(tree: ast.Module):
     ops = _ops()
     if counts is None or ops is None:
         return
-    names = _Names(tree, counts)
-    models = _models(names)
-    backends = _backends(names)
     functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
     scripts = _fake_scripts(tree)
     helpers = _fake_helpers(tree)
     for function in _test_functions(tree):
+        # Names as this test sees them, so a second test assigning the same
+        # names does not make both unknown (§24).
+        names = _Names(tree, counts, function)
+        models = _models(names)
+        backends = _backends(names)
         assigned: set[str] = set()
         relations: dict[str, tuple[str, int | None, bool]] = {}
         contents: dict[str, str] = {}
@@ -2768,7 +2901,7 @@ def _scan_tests(tree: ast.Module):
                 isinstance(statement, ast.Assign)
                 and len(statement.targets) == 1
                 and isinstance(statement.targets[0], ast.Name)
-                and counts.get(statement.targets[0].id) == 1
+                and names.counts.get(statement.targets[0].id) == 1
             ):
                 name = statement.targets[0].id
                 assigned.add(name)
@@ -3696,6 +3829,84 @@ def _backend_keywords(tree: ast.Module) -> list[str]:
                     f"line {node.lineno}: `{ast.unparse(node.func)}(...)` has no `{keyword.arg}` "
                     f"argument; `_ModelBackend.{method}()` takes {accepted[1]}"
                 )
+    return list(dict.fromkeys(reasons))
+
+
+def _hand_built_relations(tree: ast.Module) -> list[str]:
+    """An `ops.Relation(...)` (or `ops.model.Relation(...)`) call that does
+    not bind to the installed `Relation.__init__()`.
+
+    Live on `#2709`, a test built `ops.Relation('relation', 1, model)` by
+    hand, which raises `TypeError` on ops 3.8.3 and `main` alike (it also
+    takes `is_peer`, `our_unit`, `backend` and `cache`), so it never got to
+    the read it asserted on (`spike-step-5/static-retry/RESULT.md` §23,
+    §24). The same guess at an API as the `ops.testing` keywords
+    `_testing_names()` rejects, so the same bar: the call is checked against
+    the installed signature wherever it is, and only when the name resolves
+    to `ops.model.Relation` (not `ops.testing.Relation`, a different class)
+    and the call has no `*args` or `**kwargs`. The reason says to get the
+    relation from the model instead.
+    """
+    ops = _ops()
+    counts = _file_binding_counts(tree)
+    if ops is None or counts is None:
+        return []
+    try:
+        signature = inspect.signature(ops.model.Relation)
+    except (TypeError, ValueError):
+        return []
+    names = _Names(tree, counts)
+    models = sorted(_models(names))
+    model = models[0] if len(models) == 1 else "model"
+    faked = set(_faked_hook_tools(tree))
+    reasons = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and names.resolve(node.func) is ops.model.Relation):
+            continue
+        if any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords):
+            continue
+        keywords = {k.arg: k.value for k in node.keywords}
+        try:
+            signature.bind(*node.args, **keywords)
+            continue
+        except TypeError as exc:
+            error = str(exc)
+        try:
+            bound = signature.bind_partial(*node.args, **keywords)
+        except TypeError:
+            pass
+        else:
+            missing = [
+                p for p in signature.parameters.values() if p.default is p.empty and p.name not in bound.arguments
+            ]
+            error = f"it is missing {_and_list(f'`{p.name}`' for p in missing)}"
+        endpoint = _call_arg(node, 0, "relation_name")
+        relation_id = _call_arg(node, 1, "relation_id")
+        name = endpoint.value if isinstance(endpoint, ast.Constant) and isinstance(endpoint.value, str) else "db"
+        rid = relation_id.value if isinstance(relation_id, ast.Constant) and type(relation_id.value) is int else 1
+        fix = (
+            f"get the relation from the model instead, `{model}.get_relation({name!r}, {rid})`, with "
+            f"`{name}` declared in the `CharmMeta` YAML under `requires` (or `provides`)"
+        )
+        if faked:
+            unfaked = [t for t in ("relation-ids", "relation-list") if t not in faked]
+            fix += "; that call runs the `relation-ids` and `relation-list` hook tools"
+            if unfaked:
+                fix += (
+                    f", and the test does not fake {_and_list(f'`{t}`' for t in unfaked)}, so fake "
+                    f"{'it' if len(unfaked) == 1 else 'them'} too: "
+                    + "; ".join(_tool_output(t, name, rid) for t in unfaked)
+                )
+        shown = ", ".join(
+            p.name if p.default is p.empty else f"{p.name}={p.default!r}"
+            for p in signature.parameters.values()
+            if not p.name.startswith("_")
+        )
+        reasons.append(
+            f"line {node.lineno}: `{ast.unparse(node.func)}(...)` does not match the installed "
+            f"`ops.Relation({shown})` ({error}), so it raises `TypeError` before anything is "
+            f"read, with or without the bug; `ops.Relation` is not built by hand: {fix}"
+        )
     return list(dict.fromkeys(reasons))
 
 

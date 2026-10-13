@@ -363,6 +363,9 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _string_databag_key(tree)
     reasons += _backend_keywords(tree)
     reasons += _hand_built_relations(tree)
+    reasons += _lookup_expected_to_raise(tree)
+    reasons += _unbound_after_try(tree)
+    reasons += _testing_relation_dicts(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -3418,6 +3421,480 @@ def _string_key_reason(node: ast.Subscript, relation: ast.AST, scope: _Scope) ->
         "`Relation.data` is keyed by `ops.Application` and `ops.Unit` objects, not by name, so this raises "
         f"`KeyError: {key!r}` at the subscript, before anything is read, with or without the bug; "
         f"index it with the object instead: {use} ({'; '.join(others)})"
+    )
+
+
+def _lookup_expected_to_raise(tree: ast.Module) -> list[str]:
+    """A relation lookup that runs no `relation-get`, in a block that only
+    passes if the lookup raises: `with pytest.raises(X):`, a `try` that
+    certainly fails when its body completes, or a `try` whose handlers alone
+    bind a name the test then reads (`except ops.ModelError as e: result =
+    e`, then `assert isinstance(result, ...)`).
+
+    Live on `#2709`, a test was posted as a reproduction that fails the same
+    way with the fix (`spike-step-5/static-retry/RESULT.md` §25, 5-7):
+    `pytest.raises(ops.RelationNotFoundError)` around `model.get_relation('db',
+    1)`, which runs `relation-ids` and `relation-list` and never
+    `relation-get`, so "DID NOT RAISE" on ops 3.8.3 and `main`. §23's 4-4
+    and §25's 5-4, repaired, are the same misreading in the `try` form, and
+    die with `UnboundLocalError` on both.
+
+    A lookup is `M.get_relation(<name>)`, `M.get_relation(<name>, <int>)`,
+    `M.relations[<name>]` or `M.relations[<name>][<int>]`, as a statement or
+    the value of a plain assignment. In a fake-hook-tool test, `M` is a
+    tracked model and the lookup certainly raises nothing at all: the
+    endpoint is declared in every `CharmMeta` the file builds, the test's
+    one `relation-ids` fake certainly prints IDs (at most one for
+    `get_relation(name)`, more than the index for `[<int>]`) and its one
+    `relation-list` fake certainly prints unit names, each exiting 0 (the
+    lookup's own hook tools are where a version of ops could raise; checked
+    by running: with `relation-list` denied, 3.8.3 raises `ModelError` and
+    `main` raises nothing). In a `testing.Context` test with no `Harness`,
+    `M` is `self.model` inside a `CharmBase` subclass, only
+    `get_relation(<name>, <int>)` and `relations[<name>]` count, and only
+    inside `pytest.raises` of something that cannot catch the `KeyError` an
+    undeclared endpoint raises (`testing.Context` answers both from the
+    `State`, raising nothing for a declared endpoint, on 3.8.3 and `main`;
+    checked by running). The block's body has only lookups, `pass` and
+    statements that call and look up nothing (`_inert()`), and nothing in it
+    reads a databag, so whatever the exception type, the block fails the
+    test on every version of ops.
+    """
+    ops = _ops()
+    if ops is None:
+        return []
+    reasons: list[str] = []
+    if _faked_hook_tools(tree):
+        scripts = _fake_scripts(tree)
+        helpers = _fake_helpers(tree)
+        for function, index, place, scope in _scan_tests(tree):
+            statement = place.statement
+            if not isinstance(statement, (ast.With, ast.Try)):
+                continue
+            before = function.body[:index]
+            declared = _declared_endpoints(tree, scope.names)
+
+            def quiet(node: ast.AST, scope=scope, before=before, declared=declared) -> bool:
+                return _raises_nothing(node, scope, scripts, helpers, before, declared)
+
+            fails = _relation_get_fails(scripts, helpers, before)
+            top = statement is function.body[index]
+            reasons += _expected_raise(
+                statement,
+                function if top else None,
+                index,
+                scope.names,
+                quiet,
+                lambda node, drop, around, fails=fails: _lookup_fix(node, drop, around, fails),
+            )
+    elif not _mentions_harness(tree):
+        uses_context = any(isinstance(n, ast.Call) and _is_context_call(n) for n in ast.walk(tree))
+        counts = _file_binding_counts(tree)
+        if uses_context and counts is not None:
+            names = _Names(tree, counts)
+            for cls in tree.body:
+                if not (isinstance(cls, ast.ClassDef) and _is_charm_class(cls)):
+                    continue
+                for node in ast.walk(cls):
+                    if isinstance(node, ast.With) and len(node.items) == 1:
+                        raised = _raises_types(node.items[0], names)
+                        if raised is None or _may_catch(raised, KeyError, names):
+                            continue
+                        reasons += _expected_raise(node, None, 0, names, _charm_lookup, _charm_lookup_fix)
+    return list(dict.fromkeys(reasons))
+
+
+def _mentions_harness(tree: ast.Module) -> bool:
+    return any(
+        (isinstance(n, ast.Name) and n.id == "Harness")
+        or (isinstance(n, ast.Attribute) and n.attr == "Harness")
+        or (isinstance(n, ast.alias) and n.name.split(".")[-1] == "Harness")
+        for n in ast.walk(tree)
+    )
+
+
+def _expected_raise(block: ast.With | ast.Try, function, index: int, names: _Names, quiet, fix, lazy=None) -> list[str]:
+    """The reasons for `block` when it can only pass by its body raising,
+    and its body certainly raises nothing (see `_lookup_expected_to_raise()`
+    and `_unbound_after_try()`): `quiet(node)` says whether a lookup raises
+    nothing, `fix(node, drop, around)` says what to do instead. With `function`
+    (the test whose top-level statement `index` is `block`), a `try` whose
+    handlers alone bind a name read later counts too. Without `lazy`, the
+    body has only lookups (`_lookup_expected_to_raise()`); with it, only
+    that last `try` form, and a body with at least one unread databag
+    lookup, `lazy(node)` (`_unbound_after_try()`)."""
+    body = block.body
+    if isinstance(block, ast.With):
+        if len(block.items) != 1:
+            return []
+        raised = _raises_types(block.items[0], names)
+        if raised is None:
+            return []
+        statements = body
+        around = f'the `pytest.raises({ast.unparse(raised)})` around it fails with "DID NOT RAISE" on every version of ops'
+        drop = " outside the `pytest.raises`"
+    else:
+        if not block.handlers or block.finalbody:
+            return []
+        swallowing = [h for h in block.handlers if not _certainly_fails(h.body, names, handler=True)]
+        excepts = _and_list(f"`except {ast.unparse(h.type)}`" if h.type is not None else "`except`" for h in block.handlers)
+        if lazy is not None:
+            fails_at = None
+            statements = body
+        elif swallowing and _certainly_fails(block.orelse, names):
+            statements, fails_at = body, block.orelse[0]
+        elif swallowing and _certainly_fails(body[-1:], names):
+            statements, fails_at = body[:-1], body[-1]
+        else:
+            fails_at = None
+            statements = body
+        if fails_at is not None:
+            around = f"the {excepts} after it never runs, and the test fails on line {fails_at.lineno} on every version of ops"
+        else:
+            unbound = _bound_only_in_handlers(block, function, index) if function is not None and not block.orelse else None
+            if unbound is None:
+                return []
+            name, line = unbound
+            around = (
+                f"the {excepts} after it never runs, so `{name}` is never bound, and line {line} fails with "
+                f"`UnboundLocalError` on every version of ops"
+            )
+        drop = " outside the `try`"
+    lookups, unread = [], []
+    for statement in statements:
+        if isinstance(statement, ast.Pass) or _inert(statement):
+            continue
+        value = None
+        if isinstance(statement, ast.Expr):
+            value = statement.value
+        elif isinstance(statement, ast.Assign) and all(isinstance(t, ast.Name) for t in statement.targets):
+            value = statement.value
+        if value is not None and quiet(value):
+            lookups.append(value)
+            continue
+        if lazy is not None and isinstance(statement, ast.Expr) and lazy(statement.value):
+            unread.append(statement.value)
+            continue
+        return []
+    if lazy is None:
+        return [fix(node, drop, around) for node in lookups]
+    if not unread:
+        return []
+    return [fix(node, drop, around) for node in unread]
+
+
+def _bound_only_in_handlers(block: ast.Try, function: ast.FunctionDef, index: int) -> tuple[str, int] | None:
+    """(name, line) when a name is bound in `function` only inside `block`'s
+    handlers (by `except ... as` or a plain assignment), is not `global` or
+    `nonlocal`, and the first later top-level statement of the test that
+    mentions it reads it unconditionally, with nothing in between that could
+    end the test without failing it. If the handlers never run, that read
+    raises `UnboundLocalError`."""
+    inside = {id(n) for h in block.handlers for n in ast.walk(h)}
+    bound_in_handlers: dict[str, None] = {}
+    for handler in block.handlers:
+        if handler.name:
+            bound_in_handlers[handler.name] = None
+        for node in ast.walk(handler):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                bound_in_handlers[node.id] = None
+    for name in bound_in_handlers:
+        elsewhere = False
+        for node in ast.walk(function):
+            if id(node) in inside:
+                continue
+            if (
+                (isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load) and node.id == name)
+                or (isinstance(node, ast.arg) and node.arg == name)
+                or (isinstance(node, ast.ExceptHandler) and node.name == name)
+                or (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name and node is not function)
+                or (isinstance(node, (ast.Import, ast.ImportFrom)) and any((a.asname or a.name).split(".")[0] == name for a in node.names))
+                or (isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names)
+            ):
+                elsewhere = True
+                break
+        if elsewhere:
+            continue
+        for statement in function.body[index + 1 :]:
+            if _stops_the_test(statement):
+                break
+            reads = [n for n in ast.walk(statement) if isinstance(n, ast.Name) and n.id == name]
+            if not reads:
+                continue
+            if isinstance(statement, _SIMPLE_STATEMENTS) and any(_unconditional(n, statement) for n in reads):
+                return name, statement.lineno
+            break
+    return None
+
+
+def _raises_nothing(node: ast.AST, scope: _Scope, scripts, helpers, before, declared: frozenset) -> bool:
+    """Whether `node` is a relation lookup on a tracked model that certainly
+    raises nothing (see `_lookup_expected_to_raise()`)."""
+    if not isinstance(node, (ast.Call, ast.Subscript)):
+        return False
+    access = _relation_access(node, scope.models, scope.ids)
+    if access is None:
+        return False
+    tools, endpoint, relation_id = access
+    if endpoint not in declared:
+        return False
+    # `_relation_id_count()` and `_unit_names()` only read an `echo`, with
+    # an optional `exit 0`, so a fake they read certainly exits 0.
+    ids = _certain_fake(scripts, helpers, before, "relation-ids", _relation_id_count)
+    if ids is None:
+        return False
+    if isinstance(node, ast.Call) and relation_id is None and ids > 1:
+        return False  # `TooManyRelatedAppsError`
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Subscript):
+        position = node.slice.value
+        if not -ids <= position < ids:
+            return False  # `IndexError`
+    if "relation-list" in tools or ids:
+        if _certain_fake(scripts, helpers, before, "relation-list", _unit_names) is None:
+            return False
+    return True
+
+
+def _declared_endpoints(tree: ast.Module, names: _Names) -> frozenset:
+    """The endpoints every `CharmMeta` the file builds declares, under any
+    of `requires`, `provides` and `peers` (`_built_meta()`); empty when the
+    file builds none, or one that does not build, or builds an `ops.Model`
+    over anything but one of them."""
+    ops = _ops()
+    metas = [node for node in ast.walk(tree) if _is_meta_call(node, names)]
+    if ops is None or not metas:
+        return frozenset()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and names.resolve(node.func) is ops.Model:
+            meta = _call_arg(node, 0, "meta")
+            if meta is None or not any(names.value_of(meta) is m for m in metas):
+                return frozenset()
+    found = None
+    for call in metas:
+        meta = _built_meta(call, names)
+        if meta is None:
+            return frozenset()
+        declared = frozenset(meta.relations)
+        found = declared if found is None else found & declared
+    return found or frozenset()
+
+
+def _lookup_fix(node: ast.AST, drop: str, around: str, fails: int | None) -> str:
+    shown = ast.unparse(node)
+    relation = f"{shown}[0]" if isinstance(node, ast.Subscript) and not isinstance(node.value, ast.Subscript) else shown
+    bag = ast.parse("relation.data[relation.app]", mode="eval").body
+    return (
+        f"line {node.lineno}: `{shown}` never reads the databag: `get_relation()` and "
+        "`model.relations[...]` run only `relation-ids` and `relation-list`, never `relation-get`, and "
+        "the test's fakes for those print what ops expects, so it raises nothing, with or without the bug, "
+        f"and {around}; the bug can only show when `relation.data[...]` is read: get the relation{drop}, "
+        f"`relation = {relation}`, then read the databag of the gone relation and assert what it returns "
+        f"(a relation that is gone reads as `{{}}`): {_read_and_assert(bag, fails)}"
+    )
+
+
+def _charm_lookup(node: ast.AST) -> bool:
+    """`self.model.get_relation(<name>, <int>)` or `self.model.relations[<name>]`."""
+    model = ast.parse("self.model", mode="eval").body
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+        return (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "relations"
+            and ast.dump(node.value.value) == ast.dump(model)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        )
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get_relation"
+        and ast.dump(node.func.value) == ast.dump(model)
+        and not any(isinstance(a, ast.Starred) for a in node.args)
+        and all(k.arg in {"relation_name", "relation_id"} for k in node.keywords)
+    ):
+        return False
+    endpoint = _call_arg(node, 0, "relation_name")
+    relation_id = _call_arg(node, 1, "relation_id")
+    return (
+        isinstance(endpoint, ast.Constant)
+        and isinstance(endpoint.value, str)
+        and isinstance(relation_id, ast.Constant)
+        and type(relation_id.value) is int
+        and len(node.args) + len(node.keywords) == 2
+    )
+
+
+def _charm_lookup_fix(node: ast.AST, drop: str, around: str) -> str:
+    shown = ast.unparse(node)
+    relation = f"{shown}[0]" if isinstance(node, ast.Subscript) else shown
+    return (
+        f"line {node.lineno}: `{shown}` never reads the databag: `get_relation()` and "
+        "`model.relations[...]` never run `relation-get`, and `testing.Context` answers them from the "
+        f"`State`, so it raises nothing, with or without the bug, and {around}; the bug can only show "
+        f"when `relation.data[...]` is read: get the relation{drop}, `relation = {relation}`, then read "
+        "the databag of the gone relation in the handler, store what it returns in a module-level dict, "
+        "and assert on that after `ctx.run(...)` returns (a relation that is gone reads as `{}`)"
+    )
+
+
+def _unbound_after_try(tree: ast.Module) -> list[str]:
+    """A `try` whose body certainly raises nothing and whose handlers alone
+    bind a name the test reads after it: a certain `UnboundLocalError`.
+
+    §23's 4-4 and §25's 5-4, repaired, are this shape with a lookup in the
+    `try`, which `_lookup_expected_to_raise()` rejects with a reason about
+    the databag. This rule takes the rest: a `try` whose body also has an
+    unread databag lookup, `R.data[K]` as a statement, with `R` a relation
+    the test assigned at its top and `K` that relation's `.app`, or the
+    tracked model's `.app` or `.unit`, which are always keys of `R.data`.
+    `RelationDataContent` loads lazily, so the lookup runs no hook tool and
+    raises nothing (§20; by running on 3.8.3 and `main`, the read is never
+    reached and `result` is unbound on both)."""
+    ops = _ops()
+    if ops is None or not _faked_hook_tools(tree):
+        return []
+    scripts = _fake_scripts(tree)
+    helpers = _fake_helpers(tree)
+    reasons: list[str] = []
+    for function, index, place, scope in _scan_tests(tree):
+        statement = place.statement
+        if not (isinstance(statement, ast.Try) and statement is function.body[index]):
+            continue
+        before = function.body[:index]
+        declared = _declared_endpoints(tree, scope.names)
+
+        def quiet(node: ast.AST, scope=scope, before=before, declared=declared) -> bool:
+            return _raises_nothing(node, scope, scripts, helpers, before, declared)
+
+        fails = _relation_get_fails(scripts, helpers, before)
+        reasons += _expected_raise(
+            statement,
+            function,
+            index,
+            scope.names,
+            quiet,
+            lambda node, drop, around, fails=fails: _unbound_fix(node, around, fails),
+            lambda node, scope=scope: _lazy_lookup(node, scope),
+        )
+    return list(dict.fromkeys(reasons))
+
+
+def _lazy_lookup(node: ast.AST, scope: _Scope) -> bool:
+    if not (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, ast.Load)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "data"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id in scope.relations
+    ):
+        return False
+    relation = node.value.value.id
+    key = node.slice
+    return (
+        isinstance(key, ast.Attribute)
+        and key.attr in ("app", "unit")
+        and isinstance(key.value, ast.Name)
+        and ((key.value.id == relation and key.attr == "app") or key.value.id in scope.models)
+    )
+
+
+def _unbound_fix(node: ast.AST, around: str, fails: int | None) -> str:
+    return (
+        f"line {node.lineno}: `{ast.unparse(node)}` only looks the databag up and never reads it: "
+        "`RelationDataContent` loads lazily, so this runs no `relation-get` and raises nothing, with or "
+        f"without the bug, so {around}; read the databag inside the `try` and bind "
+        f"the result there too, then compare it with what the issue says it should be (a relation that is "
+        f"gone reads as `{{}}`): {_read_and_assert(node, fails)}"
+    )
+
+
+def _testing_relation_dicts(tree: ast.Module) -> list[str]:
+    """A dict literal passed as `testing.State(relations=...)`, or as an
+    element of it.
+
+    `relations` takes `testing.Relation` (or `PeerRelation`,
+    `SubordinateRelation`) objects. Live on `#2709`, an answer passed
+    `relations={'db': {1: {...}}}` (`spike-step-5/static-retry/RESULT.md`
+    §25, 5-1): iterating a dict gives its keys, so running that `State`
+    fails with `AttributeError: 'str' object has no attribute 'endpoint'`,
+    and a dict inside the list fails `State(...)` itself with `TypeError:
+    unhashable type: 'dict'`, both on 3.8.3 and `main` (checked by running).
+    An empty `{}` is no relations, and runs; a `State` with a dict that is
+    built and never run does not fail, so a non-empty dict is only rejected
+    when the `State(...)` is an argument of a `.run(...)` call, directly or
+    through a name assigned once."""
+    testing = testing_module()
+    counts = _file_binding_counts(tree)
+    if testing is None or counts is None:
+        return []
+    modules, imported = _testing_aliases(tree)
+    ops_rebound = "ops" in _testing_aliases_rebinding(tree)
+    names = _Names(tree, counts)
+
+    def is_state(call: ast.AST) -> bool:
+        if not isinstance(call, ast.Call):
+            return False
+        func = call.func
+        if isinstance(func, ast.Name):
+            return imported.get(func.id) == "State"
+        if isinstance(func, ast.Attribute) and func.attr == "State":
+            owner = func.value
+            if isinstance(owner, ast.Name):
+                return owner.id in modules
+            return not ops_rebound and ast.unparse(owner) == "ops.testing"
+        return False
+
+    run_args = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "run":
+            for arg in [*node.args, *(k.value for k in node.keywords)]:
+                run_args.add(id(names.value_of(arg)))
+    reasons = []
+    for node in ast.walk(tree):
+        if not is_state(node):
+            continue
+        relations = next((k.value for k in node.keywords if k.arg == "relations"), None)
+        if isinstance(relations, ast.Dict) and relations.keys and None not in relations.keys and id(node) in run_args:
+            reasons.append(
+                f"line {node.lineno}: `relations=` is a dict, but `testing.State` takes a list of "
+                "`testing.Relation` objects: iterating the dict gives its keys, so running this `State` "
+                "fails with `AttributeError: 'str' object has no attribute 'endpoint'`, with or without "
+                f"the bug; {_relation_objects(relations)}"
+            )
+        elif isinstance(relations, (ast.List, ast.Tuple, ast.Set)):
+            element = next((e for e in relations.elts if isinstance(e, ast.Dict)), None)
+            if element is not None:
+                reasons.append(
+                    f"line {element.lineno}: an element of `relations=` is a dict, but `testing.State` "
+                    "takes `testing.Relation` objects, so building the `State` fails with `TypeError: "
+                    f"unhashable type: 'dict'`, with or without the bug; {_relation_objects(element)}"
+                )
+    return list(dict.fromkeys(reasons))
+
+
+_RELATION_NAME_KEYS = ("endpoint", "name", "relation_name")
+_RELATION_ID_KEYS = ("id", "relation_id")
+
+
+def _relation_objects(literal: ast.Dict) -> str:
+    """What to write instead of a dict in `testing.State(relations=...)`,
+    with the endpoint and ID the dict names: its `endpoint` / `name` /
+    `relation_name` and `id` / `relation_id` values, or else its first
+    string key (`{'db': {...}}`)."""
+    endpoint, relation_id = None, 1
+    pairs = [(k.value, v) for k, v in zip(literal.keys, literal.values) if isinstance(k, ast.Constant)]
+    for key, value in pairs:
+        if key in _RELATION_NAME_KEYS and isinstance(value, ast.Constant) and isinstance(value.value, str):
+            endpoint = endpoint or value.value
+        if key in _RELATION_ID_KEYS and isinstance(value, ast.Constant) and type(value.value) is int:
+            relation_id = value.value
+    if endpoint is None and pairs and isinstance(pairs[0][0], str) and pairs[0][0] not in _RELATION_ID_KEYS:
+        endpoint = pairs[0][0]
+    return (
+        "build `testing.Relation(...)` objects instead (`testing.PeerRelation(...)` for a peer endpoint), "
+        f"`relations=[testing.Relation({endpoint or 'db'!r}, id={relation_id}, remote_app_data={{...}})]`, "
+        "with the databag contents in its `local_app_data`, `remote_app_data` and `remote_units_data`"
     )
 
 

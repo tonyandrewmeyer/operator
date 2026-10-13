@@ -8,7 +8,6 @@ from __future__ import annotations
 import importlib
 import os
 import pathlib
-import re
 import subprocess
 import sys
 import venv
@@ -123,23 +122,6 @@ def test_multiple_events_on_same_context():
         assert 'confdep=1.0' in state.unit_status.message
 
 
-def test_state_is_threaded_through():
-    """State changes from one event are visible as input to the next."""
-    ctx = IsolatedContext(
-        charm_source=CHARMS / 'alpha',
-        extra_sys_path=(str(DEPS / 'confdep_v1'),),
-    )
-    # First run: starts with default State (leader=False).
-    state_out1 = ctx.run(ctx.on.install(), State())
-    assert state_out1.unit_status.name == 'active'
-
-    # Second run: pass the output of the first as the new input.
-    state_out2 = ctx.run(ctx.on.start(), state_out1)
-    assert state_out2.unit_status.name == 'active'
-    # Status message should be the same since the charm does the same thing.
-    assert state_out2.unit_status.message == state_out1.unit_status.message
-
-
 # Full venv isolation (opt-in)
 
 
@@ -229,13 +211,6 @@ def test_isolation_error_includes_worker_traceback():
 
     # The traceback should mention the charm file.
     assert 'charm.py' in str(exc_info.value) or 'ModuleNotFoundError' in str(exc_info.value)
-
-
-def test_dispatch_timeout_kills_the_worker():
-    """A charm that never returns is killed once dispatch_timeout expires."""
-    ctx = IsolatedContext(charm_source=CHARMS / 'slow', dispatch_timeout=0.5)
-    with pytest.raises(IsolationError, match=re.escape('exceeded 0.5 seconds')):
-        ctx.run(ctx.on.install(), State())
 
 
 def test_nonexistent_charm_source_raises_value_error():

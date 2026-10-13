@@ -235,9 +235,11 @@ def test_charm_exception_keeps_worker_reusable():
     ctx = IsolatedContext(charm_source=ALPHA)  # no confdep injected
     with pytest.raises(IsolationError, match='confdep'):
         ctx.run(ctx.on.install(), State())
-    # The worker is still alive and not marked crashed, so a subsequent
-    # (this time satisfiable) dispatch reuses it.
-    assert ctx._worker is not None and not ctx._worker._crashed
+    # A crashed worker would report that it isn't re-spawned; this one is
+    # still there to try the import again.
+    with pytest.raises(IsolationError, match='confdep') as caught:
+        ctx.run(ctx.on.install(), State())
+    assert 'not re-spawned' not in str(caught.value)
     ctx.close()
 
 

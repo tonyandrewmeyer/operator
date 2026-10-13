@@ -33,6 +33,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import inspect
+import io
 import json
 import os
 import pathlib
@@ -129,6 +130,17 @@ def _read_mocking_config(charm_root: pathlib.Path | None, charm_name: str) -> _M
             f'{charm_name}: unknown key {unknown[0]!r} in [tool.ops.testing.mocking]. '
             f'The keys are {", ".join(sorted(_CONFIG_KEYS))}.'
         )
+    for key in ('path', 'module', 'function'):
+        if key in table and not isinstance(table[key], str):
+            raise JujuError(f'{charm_name}: {key} in [tool.ops.testing.mocking] must be a string.')
+    for key in ('dependency-groups', 'disable'):
+        value = table.get(key, [])
+        if not (value == 'all' and key == 'disable') and not (
+            isinstance(value, list) and all(isinstance(v, str) for v in cast('list[Any]', value))
+        ):
+            raise JujuError(
+                f'{charm_name}: {key} in [tool.ops.testing.mocking] must be a list of strings.'
+            )
     if 'path' in table and 'module' in table:
         raise JujuError(
             f'{charm_name}: [tool.ops.testing.mocking] sets both path and module; set one.'
@@ -137,8 +149,6 @@ def _read_mocking_config(charm_root: pathlib.Path | None, charm_name: str) -> _M
     if disable == 'all':
         disabled = frozenset(_DEFAULT_NAMES)
     else:
-        if isinstance(disable, str):
-            disable = [disable]
         for name in disable:
             if name not in _DEFAULT_NAMES:
                 raise JujuError(
@@ -323,7 +333,8 @@ class CharmMocking:
             self._libraries = _charmlibs_mocking.find(self._app_name, self._charm_sources)
         root = self._charm_root
         if self._given_function is not None:
-            self._function = self._bound(self._given_function, 'mocking')
+            self._function = self._given_function
+            self._check_arguments(self._function, 'mocking')
             return
         if root is None:
             self._no_function()
@@ -341,10 +352,8 @@ class CharmMocking:
                 f'{self._app_name}: the mocking module {module.__name__} has no '
                 f'function {config.function!r}.'
             )
-        self._function = self._bound(
-            cast('Callable[..., contextlib.AbstractContextManager[Any]]', function),
-            config.function,
-        )
+        self._function = cast('Callable[..., contextlib.AbstractContextManager[Any]]', function)
+        self._check_arguments(self._function, config.function)
 
     def _no_function(self) -> None:
         if self._mocking:
@@ -353,9 +362,9 @@ class CharmMocking:
                 'but the charm has no mocking of its own to pass it to.'
             )
 
-    def _bound(
+    def _check_arguments(
         self, function: Callable[..., contextlib.AbstractContextManager[Any]], name: str
-    ) -> Callable[..., contextlib.AbstractContextManager[Any]]:
+    ) -> None:
         """Check that ``mocked=`` matches the function's arguments."""
         try:
             inspect.signature(function).bind(**self._mocking)
@@ -364,7 +373,6 @@ class CharmMocking:
                 f'{self._app_name}: mocked= does not match the arguments of the '
                 f"charm's {name}(): {e}."
             ) from None
-        return function
 
     def _import_module(self, root: pathlib.Path) -> Any:
         config = self._config
@@ -379,8 +387,6 @@ class CharmMocking:
         path = root / config.path
         if not path.exists():
             return None  # The default path, and the charm has no mocking.
-        if self._module_name in sys.modules:
-            return sys.modules[self._module_name]
         spec = importlib.util.spec_from_file_location(self._module_name, path)
         if spec is None or spec.loader is None:
             raise JujuError(f'{self._app_name}: cannot load the mocking file {path}.')
@@ -412,12 +418,12 @@ class CharmMocking:
         unit_name: str,
         model_name: str,
         *,
-        model_type: str = 'kubernetes',
-        model_uuid: str = '',
-        machines: Mapping[str, int] | None = None,
-        trusted: bool = True,
-        filesystem_root: str | os.PathLike[str] | None = None,
-        allow: Sequence[str | os.PathLike[str]] = (),
+        model_type: str,
+        model_uuid: str,
+        machines: Mapping[str, int],
+        trusted: bool,
+        filesystem_root: str | os.PathLike[str] | None,
+        allow: Sequence[str | os.PathLike[str]],
     ) -> Generator[None]:
         """The scope to run one dispatch in: the defaults, then the charm's own mocking.
 
@@ -518,15 +524,17 @@ def _juju_environment() -> Generator[None]:
     ``SCENARIO_*`` settings are the test harness's own, so they stay.
     """
     saved = dict(os.environ)
-    os.environ.clear()
+    # Deleting key by key: os.environ.clear() is quadratic in the number of
+    # variables, and this runs around every dispatch.
+    for key in saved:
+        if not key.startswith('SCENARIO_'):
+            del os.environ[key]
     os.environ['PATH'] = _JUJU_PATH
-    for key, value in saved.items():
-        if key.startswith('SCENARIO_'):
-            os.environ[key] = value
     try:
         yield
     finally:
-        os.environ.clear()
+        for key in [key for key in os.environ if key not in saved]:
+            del os.environ[key]
         os.environ.update(saved)
 
 
@@ -579,8 +587,6 @@ class _SucceededProcess:
 
 
 def _empty_stream(text: bool) -> Any:
-    import io
-
     return io.StringIO('') if text else io.BytesIO(b'')
 
 

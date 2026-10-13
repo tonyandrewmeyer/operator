@@ -78,7 +78,7 @@ def find(app_name: str, sources: Iterable[pathlib.Path]) -> list[LibraryMocking]
     found: list[LibraryMocking] = []
     for package in sorted(used):
         entry_point = registered[package]
-        library = libraries.get(package)
+        library = libraries.get(_normalise(package))
         testing = entry_point.dist
         if library is not None and testing is not None and testing.version != library.version:
             raise JujuError(
@@ -143,7 +143,7 @@ def _python_files(sources: Iterable[pathlib.Path]) -> list[pathlib.Path]:
 
 
 def _installed_libraries() -> dict[str, importlib.metadata.Distribution]:
-    """Installed ``charmlibs`` library distributions, keyed by import package.
+    """Installed ``charmlibs`` library distributions, keyed by normalised import package.
 
     Testing packages are left out: they're found through their entry points.
     """
@@ -154,7 +154,7 @@ def _installed_libraries() -> dict[str, importlib.metadata.Distribution]:
         if not normalised.startswith('charmlibs-') or normalised.endswith('-testing'):
             continue
         for package in _import_packages(dist):
-            libraries.setdefault(package, dist)
+            libraries.setdefault(_normalise(package), dist)
     return libraries
 
 
@@ -165,7 +165,8 @@ def _import_packages(dist: importlib.metadata.Distribution) -> set[str]:
     ``__init__.py`` (``charmlibs`` and ``charmlibs.interfaces`` are namespace
     packages). An editable install lists no package files, so then the
     package is taken from the distribution name, which ``charmlibs`` keeps the
-    same as the import path: ``charmlibs-interfaces-tls_certificates`` is
+    same as the import path once both are normalised:
+    ``charmlibs-interfaces-tls-certificates`` is
     ``charmlibs.interfaces.tls_certificates``.
     """
     inits = [
@@ -177,7 +178,7 @@ def _import_packages(dist: importlib.metadata.Distribution) -> set[str]:
     outermost = {p for p in packages if not any(p.startswith(f'{q}.') for q in packages)}
     if outermost:
         return outermost
-    return {(dist.metadata['Name'] or '').replace('-', '.')}
+    return {dist.metadata['Name'] or ''}
 
 
 def _owning_package(name: str, packages: Mapping[str, object]) -> str | None:

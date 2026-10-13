@@ -193,7 +193,6 @@ class UnitFilesystem:
 
 class _Translator:
     def __init__(self, filesystem: UnitFilesystem, allow: Collection[str]):
-        self._fs = filesystem
         self._root = filesystem.root
         self._hidden = filesystem.hidden
         passthrough = {self._root, '/dev', *_python_paths()}
@@ -795,9 +794,9 @@ def make_workload_root(
     files aren't on the charm's own filesystem.
     """
     root = parent / f'{app_name}-{unit_id}-workload'
+    root.mkdir()
     for name in containers:
         (root / 'containers' / name).mkdir(parents=True)
-    root.mkdir(exist_ok=True)
     return root
 
 

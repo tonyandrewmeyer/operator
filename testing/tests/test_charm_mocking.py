@@ -349,6 +349,9 @@ def test_a_mocking_file_that_fails_to_import_says_why(tmp_path: pathlib.Path):
         ('pth = "x.py"', "unknown key 'pth'"),
         ('disable = ["no-such-default"]', "'no-such-default'.*not one of the default mocks"),
         ('path = "a.py"\nmodule = "b"', 'both path and module'),
+        ('dependency-groups = "unit"', 'dependency-groups .* must be a list of strings'),
+        ('disable = 5', 'disable .* must be a list of strings'),
+        ('function = 1', 'function .* must be a string'),
     ],
 )
 def test_the_configuration_is_checked(tmp_path: pathlib.Path, table: str, message: str):

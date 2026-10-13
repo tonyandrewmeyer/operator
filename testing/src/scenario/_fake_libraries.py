@@ -22,6 +22,8 @@ import urllib.parse
 from collections.abc import AsyncIterator, Callable, Generator, Iterator
 from typing import Any, cast
 
+import ops
+
 #: What :func:`patched` sets: an object, an attribute name, and the new value.
 Patch = tuple[Any, str, Any]
 
@@ -402,8 +404,6 @@ def _k8s_patch_lib_patches() -> list[Patch]:
         return False
 
     def active(self: Any) -> Any:
-        import ops
-
         return ops.ActiveStatus()
 
     def patcher_init(

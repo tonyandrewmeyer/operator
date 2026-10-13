@@ -195,13 +195,30 @@ def test_a_testing_package_at_another_version_is_an_error(
 
 
 def test_an_editable_library_is_found_from_its_name(tmp_path: pathlib.Path, site: pathlib.Path):
-    # An editable install's RECORD lists a .pth file rather than the package.
-    install_library(site, record=False)
-    install_testing(site)
+    # An editable install's RECORD lists a .pth file rather than the package,
+    # and the distribution name has '-' where the package name has '_'.
+    distribution(
+        site,
+        'charmlibs-fake-lib',
+        '1.2.0',
+        {'charmlibs/fake_lib/__init__.py': LIBRARY},
+        record=False,
+    )
+    distribution(
+        site,
+        'charmlibs-fake-lib-testing',
+        '1.1.0',
+        {'charmlibs/fake_lib_testing/__init__.py': TESTING.replace('fakelib', 'fake_lib')},
+        entry_points=ENTRY_POINTS.replace('fakelib', 'fake_lib'),
+    )
+    root = charm(tmp_path)
+    source = root / 'src' / 'charm.py'
+    source.write_text(source.read_text().replace('fakelib', 'fake_lib'))
     with testing.Juju() as juju:
-        app = juju.deploy(charm(tmp_path))
-        juju.settle()
-        assert app.leader.state.unit_status == testing.ActiveStatus('mocked')
+        with pytest.raises(
+            testing.errors.JujuError, match=r'charmlibs\.fake_lib 1\.2\.0.*is 1\.1\.0'
+        ):
+            juju.deploy(root)
 
 
 def test_a_charm_spec_gets_the_default_for_its_class_s_module(

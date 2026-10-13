@@ -61,7 +61,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
 from uuid import UUID, uuid4, uuid5
 
-from . import _charm_mocking, _environment, _isolated_serde, _unit_filesystem
+from . import _charm_mocking, _environment, _state_serde, _unit_filesystem
 from . import state as _state_module
 from ._isolated_worker import (
     _charm_exception,
@@ -2961,8 +2961,8 @@ def _dispatch_key(
         return (
             app.name,
             unit.id,
-            _isolated_serde.encode_event(event),
-            state._to_json(),
+            _state_serde.encode_event(event),
+            _state_serde.encode_state(state),
         )
     except TypeError:
         return None

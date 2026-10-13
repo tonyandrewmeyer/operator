@@ -1,647 +1,286 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Unit tests for the typed State JSON encoder/decoder."""
-
 from __future__ import annotations
 
 import datetime
+import enum
 import json
 import pathlib
-import re
+from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
-from scenario._state_serde import (
-    _decode,
-    _decode_state,
-    _encode_state,
-    _StateVersionMismatchError,
-)
-from scenario.state import (
-    ActiveStatus,
-    BlockedStatus,
-    CheckInfo,
-    Container,
-    DeferredEvent,
-    MaintenanceStatus,
-    Model,
-    Mount,
-    Notice,
-    PeerRelation,
-    Relation,
-    Resource,
-    Secret,
-    State,
-    StoredState,
-    TCPPort,
-    UnknownStatus,
-    WaitingStatus,
-    _EntityStatus,
-)
+from scenario import _state_serde
 
+import ops
 import ops.version
-from ops import SecretRotate, pebble
-
-# Helpers
-
-
-def _roundtrip(state: State) -> State:
-    return _decode_state(_encode_state(state))
-
-
-# Leaf-type round-trips
-
-
-def test_empty():
-    state = State()
-    out = _roundtrip(state)
-    assert out.relations == frozenset()
-    assert out.containers == frozenset()
-
-
-def test_with_relations():
-    state = State(
-        relations=frozenset([
-            Relation(endpoint='db', remote_app_name='pg'),
-        ])
-    )
-    out = _roundtrip(state)
-    rels = list(out.relations)
-    assert len(rels) == 1
-    rel = rels[0]
-    assert isinstance(rel, Relation)
-    assert rel.endpoint == 'db'
-    assert rel.remote_app_name == 'pg'
-
-
-def test_naive_datetime():
-    dt = datetime.datetime(2030, 6, 15, 12, 0, 0)
-    state = State(
-        secrets=frozenset([
-            Secret(
-                tracked_content={'k': 'v'},
-                expire=dt,
-            )
-        ])
-    )
-    out = _roundtrip(state)
-    secret = next(iter(out.secrets))
-    assert secret.expire == dt
-
-
-def test_aware_datetime():
-    dt = datetime.datetime(2030, 1, 1, tzinfo=datetime.timezone.utc)
-    state = State(secrets=frozenset([Secret(tracked_content={'k': 'v'}, expire=dt)]))
-    out = _roundtrip(state)
-    assert next(iter(out.secrets)).expire == dt
-
-
-def test_none_datetime():
-    state = State(secrets=frozenset([Secret(tracked_content={'k': 'v'})]))
-    out = _roundtrip(state)
-    assert next(iter(out.secrets)).expire is None
-
-
-def test_repeat_after():
-    td = datetime.timedelta(hours=2, minutes=30)
-    notice = Notice(key='example.com/test', repeat_after=td)
-    state = State(containers=frozenset([Container(name='c', notices=[notice])]))
-    out = _roundtrip(state)
-    container = next(iter(out.containers))
-    assert container.notices[0].repeat_after == td
-
-
-def test_expire_after():
-    td = datetime.timedelta(days=7)
-    notice = Notice(key='example.com/test', expire_after=td)
-    state = State(containers=frozenset([Container(name='c', notices=[notice])]))
-    out = _roundtrip(state)
-    assert next(iter(out.containers)).notices[0].expire_after == td
-
-
-def test_none_timedelta():
-    notice = Notice(key='example.com/test')
-    state = State(containers=frozenset([Container(name='c', notices=[notice])]))
-    out = _roundtrip(state)
-    assert next(iter(out.containers)).notices[0].repeat_after is None
-
-
-def test_path_in_resource():
-    p = pathlib.Path('/tmp/resource.tar.gz')  # ruff: ignore[hardcoded-temp-file]
-    state = State(resources=frozenset([Resource(name='oci-image', path=p)]))
-    out = _roundtrip(state)
-    resource = next(iter(out.resources))
-    assert resource.path == p
-    assert isinstance(resource.path, pathlib.Path)
-
-
-def test_string_path_stays_string():
-    state = State(resources=frozenset([Resource(name='bin', path='/usr/bin/tool')]))
-    out = _roundtrip(state)
-    resource = next(iter(out.resources))
-    assert resource.path == '/usr/bin/tool'
-    assert isinstance(resource.path, str)
-
-
-def test_pure_posix_path_in_mount():
-    loc = pathlib.PurePosixPath('/etc/config')
-    state = State(
-        containers=frozenset([
-            Container(
-                name='myapp',
-                mounts={'cfg': Mount(location=loc, source=pathlib.Path('/tmp/cfg'))},  # ruff: ignore[hardcoded-temp-file]
-            )
-        ])
-    )
-    out = _roundtrip(state)
-    container = next(iter(out.containers))
-    mount = container.mounts['cfg']
-    assert mount.location == loc
-    assert isinstance(mount.location, pathlib.PurePosixPath)
-
-
-def test_string_location_stays_string():
-    state = State(
-        containers=frozenset([
-            Container(
-                name='myapp',
-                mounts={'cfg': Mount(location='/etc/config', source='/tmp/cfg')},  # ruff: ignore[hardcoded-temp-file]
-            )
-        ])
-    )
-    out = _roundtrip(state)
-    container = next(iter(out.containers))
-    assert container.mounts['cfg'].location == '/etc/config'
-    assert isinstance(container.mounts['cfg'].location, str)
-
-
-def test_service_status():
-    state = State(
-        containers=frozenset([
-            Container(
-                name='app',
-                service_statuses={'svc': pebble.ServiceStatus.ACTIVE},
-            )
-        ])
-    )
-    out = _roundtrip(state)
-    container = next(iter(out.containers))
-    assert container.service_statuses['svc'] is pebble.ServiceStatus.ACTIVE
-
-
-def test_notice_type():
-    notice = Notice(key='example.com/n', type=pebble.NoticeType.CUSTOM)
-    state = State(containers=frozenset([Container(name='c', notices=[notice])]))
-    out = _roundtrip(state)
-    assert next(iter(out.containers)).notices[0].type is pebble.NoticeType.CUSTOM
-
-
-def test_check_status():
-    ci = CheckInfo(name='http', status=pebble.CheckStatus.DOWN, failures=3)
-    state = State(containers=frozenset([Container(name='app', check_infos=frozenset([ci]))]))
-    out = _roundtrip(state)
-    container = next(iter(out.containers))
-    info = container.get_check_info('http')
-    assert info.status is pebble.CheckStatus.DOWN
-    assert info.failures == 3
-
-
-def test_check_level():
-    ci = CheckInfo(name='ready', level=pebble.CheckLevel.READY)
-    state = State(containers=frozenset([Container(name='app', check_infos=frozenset([ci]))]))
-    out = _roundtrip(state)
-    info = next(iter(out.containers)).get_check_info('ready')
-    assert info.level is pebble.CheckLevel.READY
-
-
-def test_secret_rotate():
-    state = State(
-        secrets=frozenset([
-            Secret(tracked_content={'k': 'v'}, rotate=SecretRotate.HOURLY, owner='app')
-        ])
-    )
-    out = _roundtrip(state)
-    secret = next(iter(out.secrets))
-    assert secret.rotate is SecretRotate.HOURLY
-
-
-def test_layer_in_container():
-    layer = pebble.Layer({
-        'services': {
-            'app': {
-                'command': '/bin/app --port 8080',
-                'startup': 'enabled',
-                'override': 'replace',
-            }
-        }
-    })
-    state = State(containers=frozenset([Container(name='app', layers={'base': layer})]))
-    out = _roundtrip(state)
-    container = next(iter(out.containers))
-    assert 'app' in container.layers['base'].services
-
-
-def test_empty_layer():
-    layer = pebble.Layer({})
-    state = State(containers=frozenset([Container(name='c', layers={'l': layer})]))
-    out = _roundtrip(state)
-    assert 'l' in next(iter(out.containers)).layers
-
-
-def test_remote_grants():
-    state = State(
-        secrets=frozenset([
-            Secret(
-                tracked_content={'pass': 'abc'},
-                owner='app',
-                remote_grants={0: {'related-app'}, 2: {'other-app/0'}},
-            )
-        ])
-    )
-    out = _roundtrip(state)
-    secret = next(iter(out.secrets))
-    assert secret.remote_grants[0] == {'related-app'}
-    assert secret.remote_grants[2] == {'other-app/0'}
-    assert all(isinstance(k, int) for k in secret.remote_grants)
-
-
-def test_remote_units_data():
-    state = State(
-        relations=frozenset([
-            Relation(
-                endpoint='db',
-                remote_units_data={0: {'key': 'val'}, 1: {'key': 'other'}},
-            )
-        ])
-    )
-    out = _roundtrip(state)
-    rel = next(iter(out.relations))
-    assert isinstance(rel, Relation)
-    assert rel.remote_units_data[0] == {'key': 'val'}
-    assert rel.remote_units_data[1] == {'key': 'other'}
-    assert all(isinstance(k, int) for k in rel.remote_units_data)
-
-
-# StoredState escape hatch
-
-
-def test_bytes_in_stored_state():
-    data = b'\x00\x01\x02\xff'
-    state = State(stored_states=frozenset([StoredState(content={'blob': data})]))
-    out = _roundtrip(state)
-    ss = next(iter(out.stored_states))
-    assert ss.content['blob'] == data
-    assert isinstance(ss.content['blob'], bytes)
-
-
-def test_empty_bytes():
-    state = State(stored_states=frozenset([StoredState(content={'b': b''})]))
-    out = _roundtrip(state)
-    assert next(iter(out.stored_states)).content['b'] == b''
-
-
-def test_tuple_in_stored_state():
-    pair = (1, 'hello', True)
-    state = State(stored_states=frozenset([StoredState(content={'pair': pair})]))
-    out = _roundtrip(state)
-    ss = next(iter(out.stored_states))
-    assert ss.content['pair'] == pair
-    assert isinstance(ss.content['pair'], tuple)
-
-
-def test_nested_tuple():
-    nested = ((1, 2), (3, 4))
-    state = State(stored_states=frozenset([StoredState(content={'n': nested})]))
-    out = _roundtrip(state)
-    assert next(iter(out.stored_states)).content['n'] == nested
-
-
-def test_list_stays_list():
-    lst = [1, 2, 3]
-    state = State(stored_states=frozenset([StoredState(content={'lst': lst})]))
-    out = _roundtrip(state)
-    ss_content = next(iter(out.stored_states)).content['lst']
-    assert ss_content == lst
-    assert isinstance(ss_content, list)
-
-
-def test_set_in_stored_state():
-    s = {'a', 'b', 'c'}
-    state = State(stored_states=frozenset([StoredState(content={'s': s})]))
-    out = _roundtrip(state)
-    ss = next(iter(out.stored_states))
-    assert ss.content['s'] == s
-    assert isinstance(ss.content['s'], set)
-
-
-# Error paths
-
-
-def test_unrecognised_type_raises():
-    state = State(stored_states=frozenset([StoredState(content={'obj': object()})]))
-    with pytest.raises(TypeError, match="No JSON encoding for type 'object'"):
-        _encode_state(state)
-
-
-def test_error_includes_path():
-    state = State(stored_states=frozenset([StoredState(content={'bad': object()})]))
-    with pytest.raises(TypeError, match='path'):
-        _encode_state(state)
-
-
-def test_unrecognised_enum_raises():
-    import enum
-
-    class MyEnum(enum.Enum):
-        VAL = 'val'
-
-    state = State(stored_states=frozenset([StoredState(content={'e': MyEnum.VAL})]))
-    with pytest.raises(TypeError, match='Unrecognised enum type'):
-        _encode_state(state)
-
-
-def test_unknown_type_tag_raises():
-    with pytest.raises(TypeError, match='Unknown wire type tag'):
-        _decode({'__t__': '__no_such_type__', 'v': None})
-
-
-def test_unknown_dataclass_raises():
-    with pytest.raises(TypeError, match='Unknown dataclass'):
-        _decode({'__t__': 'dc', 'cls': 'NoSuchClass', 'f': {}})
-
-
-def test_unknown_enum_class_raises():
-    with pytest.raises(TypeError, match='Unknown enum class'):
-        _decode({'__t__': 'enum', 'cls': 'NoSuchEnum', 'name': 'FOO'})
-
-
-def test_current_version_matches():
-    state = State()
-    encoded = _encode_state(state)
-    data = json.loads(encoded)
-    assert data['ops_testing_version'] == ops.version.version
-
-
-def test_matching_version_round_trips():
-    # _encode_state always stamps the running version, so a plain
-    # round-trip exercises the match path.
-    state = State()
-    out = _roundtrip(state)
-    assert out == state
-
-
-def test_mismatched_version_raises():
-    payload = json.dumps({'ops_testing_version': '0.0.0-does-not-exist', 'state': {}})
-    with pytest.raises(_StateVersionMismatchError, match=re.escape('0.0.0-does-not-exist')):
-        _decode_state(payload)
-
-
-def test_mismatched_version_names_both_versions():
-    payload = json.dumps({'ops_testing_version': '0.0.0-does-not-exist', 'state': {}})
-    with pytest.raises(_StateVersionMismatchError, match=re.escape(ops.version.version)):
-        _decode_state(payload)
-
-
-def test_missing_version_raises():
-    payload = json.dumps({'state': {}})
-    with pytest.raises(_StateVersionMismatchError):
-        _decode_state(payload)
-
-
-# Status round-trips
+from ops import pebble, testing
+
+FIRST = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _secret_at_revision_2(*, track_latest: bool) -> testing.Secret:
+    secret = testing.Secret({'password': 'hunter2'})
+    secret._update_metadata(content={'password': 'hunter3'})
+    if track_latest:
+        secret._track_latest_revision()
+    return secret
+
+
+def _container(**kwargs: Any) -> testing.State:
+    return testing.State(containers={testing.Container('app', **kwargs)})
+
+
+def _stored(content: dict[str, Any]) -> testing.State:
+    return testing.State(stored_states={testing.StoredState(content=content)})
+
+
+NON_TRIVIAL = testing.State(
+    config={'log_level': 'debug', 'port': 8080, 'enabled': True},
+    relations={
+        testing.Relation(
+            'db',
+            remote_app_name='postgresql',
+            remote_units_data={0: {'host': '10.0.0.1'}, 1: {'host': '10.0.0.2'}},
+            remote_app_data={'version': '14'},
+        ),
+        testing.PeerRelation('peers', peers_data={1: {'leader': 'true'}}),
+    },
+    containers={
+        testing.Container(
+            'myapp',
+            can_connect=True,
+            layers={'base': pebble.Layer({'services': {'app': {'command': '/bin/app'}}})},
+            service_statuses={'app': pebble.ServiceStatus.ACTIVE},
+            notices=[
+                testing.Notice(
+                    'example.com/event',
+                    type=pebble.NoticeType.CUSTOM,
+                    repeat_after=datetime.timedelta(minutes=30),
+                    first_occurred=FIRST,
+                    last_occurred=FIRST,
+                    last_repeated=FIRST,
+                )
+            ],
+            check_infos={
+                testing.CheckInfo(
+                    'http', level=pebble.CheckLevel.ALIVE, status=pebble.CheckStatus.UP
+                )
+            },
+        )
+    },
+    secrets={
+        testing.Secret(
+            {'password': 'hunter2'},
+            owner='app',
+            expire=datetime.datetime(2030, 12, 31, tzinfo=datetime.timezone.utc),
+            rotate=ops.SecretRotate.DAILY,
+            remote_grants={0: {'related-app'}},
+        )
+    },
+    resources={testing.Resource(name='oci-image', path=pathlib.Path('/srv/image.tar'))},
+    stored_states={
+        testing.StoredState(
+            '_stored',
+            owner_path='MyCharm',
+            content={
+                'count': 42,
+                'raw': b'\xde\xad\xbe\xef',
+                'coords': (1, 2, 3),
+                'tags': {'alpha', 'beta'},
+                'mapping': {'nested': True},
+            },
+        )
+    },
+    opened_ports={testing.TCPPort(8080)},
+    leader=True,
+    unit_status=testing.ActiveStatus('ready'),
+    app_status=testing.BlockedStatus('needs database'),
+    workload_version='1.2.3',
+    planned_units=3,
+    deferred=[
+        testing.DeferredEvent(
+            'MyCharm/on/config_changed[1]', owner='MyCharm', observer='_on_config_changed'
+        )
+    ],
+)
 
 
 @pytest.mark.parametrize(
-    'status,cls',
+    'state',
     [
-        (ActiveStatus('ready'), ActiveStatus),
-        (BlockedStatus('needs config'), BlockedStatus),
-        (WaitingStatus('waiting for db'), WaitingStatus),
-        (MaintenanceStatus('updating'), MaintenanceStatus),
-        (UnknownStatus(), UnknownStatus),
+        pytest.param(testing.State(), id='empty'),
+        pytest.param(NON_TRIVIAL, id='non-trivial'),
+        pytest.param(
+            testing.State(
+                secrets={testing.Secret({'k': 'v'}, expire=datetime.datetime(2030, 6, 15, 12))}
+            ),
+            id='naive-datetime',
+        ),
+        pytest.param(testing.State(secrets={testing.Secret({'k': 'v'})}), id='no-datetime'),
+        pytest.param(
+            _container(
+                notices=[testing.Notice('example.com/n', expire_after=datetime.timedelta(days=7))]
+            ),
+            id='timedelta',
+        ),
+        pytest.param(
+            testing.State(resources={testing.Resource(name='bin', path='/usr/bin/tool')}),
+            id='str-path',
+        ),
+        pytest.param(
+            _container(
+                mounts={
+                    'cfg': testing.Mount(
+                        location=pathlib.PurePosixPath('/etc/config'),
+                        source=pathlib.Path('/srv/cfg'),
+                    )
+                }
+            ),
+            id='pure-posix-path',
+        ),
+        pytest.param(
+            _container(mounts={'cfg': testing.Mount(location='/etc/config', source='/srv/cfg')}),
+            id='str-mount',
+        ),
+        pytest.param(
+            _container(check_infos={testing.CheckInfo('ready', level=pebble.CheckLevel.READY)}),
+            id='check-level',
+        ),
+        pytest.param(_container(layers={'l': pebble.Layer({})}), id='empty-layer'),
+        pytest.param(
+            testing.State(
+                secrets={
+                    testing.Secret({'k': 'v'}, owner='app', remote_grants={2: {'other-app/0'}})
+                }
+            ),
+            id='int-keys',
+        ),
+        pytest.param(_stored({'b': b''}), id='empty-bytes'),
+        pytest.param(_stored({'n': ((1, 2), (3, 4))}), id='nested-tuple'),
+        pytest.param(_stored({'l': [1, 2, 3]}), id='list'),
+        pytest.param(_stored({'l': ['__t__']}), id='list-of-the-tag'),
+        pytest.param(
+            testing.State(secrets={_secret_at_revision_2(track_latest=False)}),
+            id='secret-revisions',
+        ),
+        pytest.param(
+            testing.State(secrets={_secret_at_revision_2(track_latest=True)}),
+            id='secret-tracking-latest',
+        ),
+        *(
+            pytest.param(testing.State(unit_status=status, app_status=status), id=status.name)
+            for status in (
+                testing.ActiveStatus('ready'),
+                testing.BlockedStatus('needs config'),
+                testing.WaitingStatus('waiting for db'),
+                testing.MaintenanceStatus('updating'),
+                testing.ErrorStatus('hook failed: "start"'),
+                testing.UnknownStatus(),
+            )
+        ),
     ],
 )
-def test_status_roundtrip(status: _EntityStatus, cls: type[_EntityStatus]):
-    state = State(unit_status=status, app_status=status)
-    out = _roundtrip(state)
-    assert isinstance(out.unit_status, cls)
-    assert out.unit_status == status
+def test_state_round_trips(state: testing.State):
+    out = _state_serde.decode_state(_state_serde.encode_state(state))
+    assert out == state
+    # Equality doesn't see every type (an enum and its value, a Path and a str)
+    # or the attributes that aren't fields, but the encoding does.
+    assert _state_serde.encode_state(out) == _state_serde.encode_state(state)
 
 
-# Full State round-trip (non-trivial fixture)
+class _Charm(ops.CharmBase):
+    pass
 
 
-def test_non_trivial_state():
-    first = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
-    state = State(
-        config={'log_level': 'debug', 'port': 8080, 'enabled': True},
-        relations=frozenset([
-            Relation(
-                endpoint='db',
-                remote_app_name='postgresql',
-                remote_units_data={0: {'host': '10.0.0.1'}, 1: {'host': '10.0.0.2'}},
-                remote_app_data={'version': '14'},
-            ),
-            PeerRelation(
-                endpoint='peers',
-                peers_data={1: {'leader': 'true'}},
-            ),
-        ]),
-        containers=frozenset([
-            Container(
-                name='myapp',
-                can_connect=True,
-                layers={
-                    'base': pebble.Layer({
-                        'services': {
-                            'app': {
-                                'command': '/bin/app',
-                                'startup': 'enabled',
-                                'override': 'replace',
-                            }
-                        }
-                    })
-                },
-                service_statuses={'app': pebble.ServiceStatus.ACTIVE},
-                notices=[
-                    Notice(
-                        key='example.com/event',
-                        type=pebble.NoticeType.CUSTOM,
-                        repeat_after=datetime.timedelta(minutes=30),
-                        first_occurred=first,
-                        last_occurred=first,
-                        last_repeated=first,
-                    )
-                ],
-                check_infos=frozenset([
-                    CheckInfo(
-                        name='http',
-                        level=pebble.CheckLevel.ALIVE,
-                        status=pebble.CheckStatus.UP,
-                    )
-                ]),
-            )
-        ]),
-        secrets=frozenset([
-            Secret(
-                tracked_content={'password': 'hunter2'},
-                owner='app',
-                expire=datetime.datetime(2030, 12, 31, tzinfo=datetime.timezone.utc),
-                rotate=SecretRotate.DAILY,
-                remote_grants={0: {'related-app'}},
-            )
-        ]),
-        resources=frozenset([Resource(name='oci-image', path=pathlib.Path('/tmp/image.tar'))]),  # ruff: ignore[hardcoded-temp-file]
-        stored_states=frozenset([
-            StoredState(
-                name='_stored',
-                owner_path='MyCharm',
-                content={
-                    'count': 42,
-                    'raw': b'\xde\xad\xbe\xef',
-                    'coords': (1, 2, 3),
-                    'tags': {'alpha', 'beta'},
-                    'mapping': {'nested': True},
-                },
-            )
-        ]),
-        opened_ports=frozenset([TCPPort(8080)]),
-        leader=True,
-        unit_status=ActiveStatus('ready'),
-        app_status=ActiveStatus('running'),
-        workload_version='1.2.3',
-        planned_units=3,
-        deferred=[
-            DeferredEvent(
-                handle_path='MyCharm/on/config_changed[1]',
-                owner='MyCharm',
-                observer='_on_config_changed',
-            )
-        ],
-    )
-
-    out = _roundtrip(state)
-
-    # Config
-    assert out.config == state.config
-
-    # Relations
-    db_in = next(r for r in state.relations if r.endpoint == 'db')
-    db_out = next(r for r in out.relations if r.endpoint == 'db')
-    assert isinstance(db_in, Relation)
-    assert isinstance(db_out, Relation)
-    assert db_out.remote_units_data == db_in.remote_units_data
-    assert db_out.remote_app_data == db_in.remote_app_data
-    assert all(isinstance(k, int) for k in db_out.remote_units_data)
-
-    # Peers
-    peer_in = next(r for r in state.relations if r.endpoint == 'peers')
-    peer_out = next(r for r in out.relations if r.endpoint == 'peers')
-    assert isinstance(peer_in, PeerRelation)
-    assert isinstance(peer_out, PeerRelation)
-    assert peer_out.peers_data == peer_in.peers_data
-
-    # Container
-    c_out = next(iter(out.containers))
-    assert c_out.name == 'myapp'
-    assert c_out.can_connect is True
-    assert 'app' in c_out.layers['base'].services
-    assert c_out.service_statuses['app'] is pebble.ServiceStatus.ACTIVE
-    notice_out = c_out.notices[0]
-    assert notice_out.key == 'example.com/event'
-    assert notice_out.type is pebble.NoticeType.CUSTOM
-    assert notice_out.repeat_after == datetime.timedelta(minutes=30)
-    ci_out = c_out.get_check_info('http')
-    assert ci_out.status is pebble.CheckStatus.UP
-    assert ci_out.level is pebble.CheckLevel.ALIVE
-
-    # Secret
-    secret_out = next(iter(out.secrets))
-    assert secret_out.tracked_content == {'password': 'hunter2'}
-    assert secret_out.rotate is SecretRotate.DAILY
-    assert secret_out.remote_grants[0] == {'related-app'}
-    assert isinstance(next(iter(secret_out.remote_grants.keys())), int)
-
-    # Resource
-    res_out = next(iter(out.resources))
-    assert res_out.name == 'oci-image'
-    assert isinstance(res_out.path, pathlib.Path)
-
-    # StoredState escape hatch
-    ss_out = next(iter(out.stored_states))
-    assert ss_out.content['count'] == 42
-    assert ss_out.content['raw'] == b'\xde\xad\xbe\xef'
-    assert isinstance(ss_out.content['raw'], bytes)
-    assert ss_out.content['coords'] == (1, 2, 3)
-    assert isinstance(ss_out.content['coords'], tuple)
-    assert ss_out.content['tags'] == {'alpha', 'beta'}
-    assert isinstance(ss_out.content['tags'], set)
-
-    # Ports
-    assert out.opened_ports == frozenset([TCPPort(8080)])
-
-    # Metadata
-    assert out.leader is True
-    assert out.unit_status == ActiveStatus('ready')
-    assert out.app_status == ActiveStatus('running')
-    assert out.workload_version == '1.2.3'
-    assert out.planned_units == 3
-
-    # Deferred events
-    assert len(out.deferred) == 1
-    assert out.deferred[0].handle_path == 'MyCharm/on/config_changed[1]'
-    assert out.deferred[0].owner == 'MyCharm'
+@pytest.mark.parametrize(
+    ('name', 'kwargs'),
+    [
+        ('install', {}),
+        ('relation_changed', {'relation': testing.Relation('db', remote_app_name='pg')}),
+    ],
+)
+def test_event_round_trips(name: str, kwargs: dict[str, Any]):
+    ctx = testing.Context(_Charm, meta={'name': 'c', 'requires': {'db': {'interface': 'db'}}})
+    event = getattr(ctx.on, name)(**kwargs)
+    assert _state_serde.decode_event(_state_serde.encode_event(event)) == event
 
 
-# Attributes that are not dataclass fields
+class _OtherEnum(enum.Enum):
+    VALUE = 'value'
 
 
-def test_secret_revisions_survive_the_round_trip():
-    """Secret's revision counters are not fields, but they still round-trip."""
-    secret = Secret({'password': 'hunter2'})
-    secret._update_metadata(content={'password': 'hunter3'})
-    assert secret._latest_revision == 2
-    assert secret._tracked_revision == 1
-
-    out = _roundtrip(State(secrets={secret}))
-    decoded = next(iter(out.secrets))
-    assert decoded._latest_revision == 2
-    assert decoded._tracked_revision == 1
+class _StrEnum(str, enum.Enum):
+    VALUE = 'value'
 
 
-def test_secret_tracked_revision_survives_the_round_trip():
-    """Tracking the latest revision survives too, so peek and get still agree."""
-    secret = Secret({'password': 'hunter2'})
-    secret._update_metadata(content={'password': 'hunter3'})
-    secret._track_latest_revision()
-
-    decoded = next(iter(_roundtrip(State(secrets={secret})).secrets))
-    assert decoded._tracked_revision == decoded._latest_revision == 2
-
-
-# Dict keys
-
-
-def test_non_string_dict_key_is_rejected():
-    """A key that str() would silently mangle raises rather than round-tripping wrong."""
-    state = State(
-        stored_states={StoredState(name='s', content=cast('dict[str, Any]', {(1, 2): 'x'}))}
-    )
-    with pytest.raises(TypeError, match='keys must be all str or all int'):
-        _encode_state(state)
+@pytest.mark.parametrize(
+    ('content', 'message'),
+    [
+        ({'bad': object()}, "No JSON encoding for type 'object' at path '.*content.bad'"),
+        ({'e': _OtherEnum.VALUE}, 'Unrecognised enum type'),
+        ({'e': _StrEnum.VALUE}, 'Unrecognised enum type'),
+        ({'p': pathlib.PureWindowsPath('C:/x')}, "No JSON encoding for type 'PureWindowsPath'"),
+        ({(1, 2): 'x'}, 'keys must be all str or all int'),
+        ({True: 1}, 'keys must be all str or all int'),
+        ({'d': {'__t__': 'bytes', 'v': 'AAAA'}}, "key '__t__' at path '.*content.d'"),
+        ({'l': ['__tuple__', 1]}, "starting with '__tuple__' at path '.*content.l'"),
+    ],
+)
+def test_values_without_an_encoding_are_rejected(content: dict[Any, Any], message: str):
+    state = _stored(cast('dict[str, Any]', content))
+    with pytest.raises(TypeError, match=message):
+        _state_serde.encode_state(state)
 
 
-def test_bool_dict_key_is_rejected():
-    """bool is a subclass of int, but int('True') does not round-trip."""
-    state = State(stored_states={StoredState(name='s', content=cast('dict[str, Any]', {True: 1}))})
-    with pytest.raises(TypeError, match='keys must be all str or all int'):
-        _encode_state(state)
+@pytest.mark.parametrize(
+    ('encoded', 'message'),
+    [
+        ({'__t__': '__no_such_type__', 'v': None}, 'Unknown type tag'),
+        ({'__t__': 'dc', 'cls': 'NoSuchClass', 'f': {}}, 'Unknown dataclass'),
+        ({'__t__': 'enum', 'cls': 'NoSuchEnum', 'name': 'FOO'}, 'Unknown enum class'),
+        ({'__t__': 'status', 'name': 'no-such-status', 'msg': ''}, 'Unknown status name'),
+        ('not-a-state', 'not a State'),
+    ],
+)
+def test_unknown_encodings_are_rejected(encoded: Any, message: str):
+    payload = json.dumps({'ops_testing_version': ops.version.version, 'state': encoded})
+    with pytest.raises(TypeError, match=message):
+        _state_serde.decode_state(payload)
+
+
+def test_an_event_payload_must_hold_an_event():
+    payload = json.dumps({'ops_testing_version': ops.version.version, 'event': 'install'})
+    with pytest.raises(TypeError, match='not an event'):
+        _state_serde.decode_event(payload)
+
+
+@pytest.mark.parametrize(
+    ('kind', 'decode'),
+    [('state', _state_serde.decode_state), ('event', _state_serde.decode_event)],
+)
+@pytest.mark.parametrize('version', ['0.0.0-does-not-exist', None])
+def test_a_payload_from_another_version_is_rejected(
+    kind: str, decode: Callable[[str], object], version: str | None
+):
+    payload = json.dumps({'ops_testing_version': version, kind: {}})
+    with pytest.raises(testing.errors.IsolationError) as caught:
+        decode(payload)
+    assert str(version) in str(caught.value)
+    assert ops.version.version in str(caught.value)
 
 
 def test_sets_encode_the_same_whatever_order_they_were_built_in():
     names = [f'name{i}' for i in range(20)]
-    model = Model('m', uuid='00000000-0000-4000-8000-000000000000')
-    forwards = State(model=model, stored_states={StoredState(n) for n in names})
-    backwards = State(model=model, stored_states={StoredState(n) for n in reversed(names)})
-    assert forwards._to_json() == backwards._to_json()
+    model = testing.Model('m', uuid='00000000-0000-4000-8000-000000000000')
+    forwards = testing.State(model=model, stored_states={testing.StoredState(n) for n in names})
+    backwards = testing.State(
+        model=model, stored_states={testing.StoredState(n) for n in reversed(names)}
+    )
+    assert _state_serde.encode_state(forwards) == _state_serde.encode_state(backwards)
+
+
+def test_the_payload_records_the_version():
+    payload = json.loads(_state_serde.encode_state(testing.State()))
+    assert payload['ops_testing_version'] == ops.version.version

@@ -1,64 +1,12 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Typed JSON encoder/decoder for ops.testing.State.
+"""Typed JSON encoding of ``State`` and events, for the isolated worker.
 
-Internal surface. The entry points are the private ``State`` methods that
-wrap these::
-
-    State._to_json() -> str            (calls _encode_state)
-    State._from_json(payload) -> State (calls _decode_state)
-
-Wire format
-~~~~~~~~~~~
-Every payload is a JSON object with a top-level ``ops_testing_version``
-string and the encoded state tree::
-
-    {"ops_testing_version": "3.8.1", "state": <encoded>}
-
-Every per-charm venv is required to carry the same ``ops.testing`` version as
-the parent process (no cross-version negotiation). ``_decode_state`` asserts
-that ``ops_testing_version`` equals the version of the running process, and
-raises :class:`_StateVersionMismatchError`, naming both versions, if it does
-not. That is a subclass of :class:`~ops.testing.errors.IsolationError`, which
-is what a test sees: a version mismatch is one of the ways a charm can fail to
-run in its worker.
-
-Type envelopes
-~~~~~~~~~~~~~~
-Non-primitive values are wrapped in a small envelope dict keyed on ``"__t__"``::
-
-    ``"dc"``          - any dataclass from ``scenario.state``
-    ``"status"``      - ``_EntityStatus`` subclasses (special ``__init__``)
-    ``"frozenset"``   - ``frozenset``
-    ``"set"``         - ``set``
-    ``"datetime"``    - ISO-8601 string
-    ``"timedelta"``   - ``total_seconds()`` float
-    ``"Path"``        - ``pathlib.Path`` string
-    ``"PurePosixPath"`` - ``pathlib.PurePosixPath`` string
-    ``"layer"``       - ``pebble.Layer`` via ``to_dict()``/``Layer(dict)``
-    ``"enum"``        - ``enum.Enum`` subclass (class name + member name)
-    ``"bytes"``       - base64-encoded bytes
-    ``"idict"``       - ``dict`` with ``int`` keys
-
-Tuples use a list-based envelope: ``["__tuple__", elem, ...]``.
-
-Plain ``list`` and ``dict`` with string keys carry no envelope.
-
-StoredState escape hatch
-~~~~~~~~~~~~~~~~~~~~~~~~
-``StoredState.content`` (and ``Container._base_plan``) may contain types
-that are a superset of JSON: ``bytes``, ``tuple``-vs-``list`` distinction,
-and bare ``set``s. The typed escape hatch is **always-on**:
-
-* ``bytes``  → base64 via the ``"bytes"`` envelope.
-* ``tuple``  → ``["__tuple__", ...]`` list-based envelope.
-* ``set``    → ``"set"`` envelope.
-
-Any value that cannot be encoded raises ``TypeError`` from the encoder,
-including the dotted path through ``State`` at which the unrecognised type
-was found. The decoder mirrors: an unknown ``"__t__"`` tag raises
-``TypeError``.
+Values JSON can't hold are wrapped in an envelope tagged with ``"__t__"``,
+and a tuple is a list that starts with ``"__tuple__"``. The encoding is
+internal: both ends run the same ``ops.testing``, which the payload records
+and the decoder checks.
 """
 
 from __future__ import annotations
@@ -80,39 +28,21 @@ from . import state as _state
 from .errors import IsolationError
 
 
-class _StateVersionMismatchError(IsolationError):
-    """A payload was produced by a different ``ops.testing`` version than this process's.
-
-    Every per-charm venv is required to carry the same ``ops.testing`` version
-    as the parent test process; there is no cross-version negotiation.
-    """
+class _VersionMismatchError(IsolationError):
+    """A payload was encoded by a different ``ops.testing`` from this process's."""
 
 
-#: Any value that survives a ``json.dumps``/``json.loads`` round trip. The
-#: encoder produces one of these and the decoder consumes one, which keeps the
-#: untyped ``Any`` from ``json.loads`` confined to a single narrowing point.
+#: Any value that survives a ``json.dumps``/``json.loads`` round trip.
 _JSON: TypeAlias = Union[bool, int, float, str, 'list[_JSON]', 'dict[str, _JSON]', None]
-
-# ``State._to_json`` and ``State._from_json`` import these lazily, to avoid a
-# circular import, so nothing in this module references them and the type
-# checker would otherwise report them as unused.
-__all__ = [
-    '_decode_state',
-    '_encode_state',
-]
 
 _T = '__t__'
 _TUPLE_SENTINEL = '__tuple__'
 
-#: Attributes that carry state but are not dataclass fields, so
-#: ``dataclasses.fields()`` does not see them and ``cls(**fields)`` cannot
-#: restore them. They are encoded alongside the fields and written back with
-#: ``object.__setattr__`` after construction.
+#: Attributes that aren't dataclass fields, so ``cls(**fields)`` can't
+#: restore them. They're set with ``object.__setattr__`` after construction.
 _NON_FIELD_ATTRS: dict[str, tuple[str, ...]] = {
     'Secret': ('_tracked_revision', '_latest_revision'),
 }
-
-# Type registries
 
 _PEBBLE_ENUM_TYPES: dict[str, type[enum.Enum]] = {
     'CheckLevel': pebble.CheckLevel,
@@ -124,9 +54,7 @@ _PEBBLE_ENUM_TYPES: dict[str, type[enum.Enum]] = {
     'ServiceStatus': pebble.ServiceStatus,
 }
 
-# ``UnknownStatus`` is deliberately absent: alone among the statuses its
-# ``__init__`` takes no message, so it is special-cased in the decoder and every
-# entry here shares the one-message-argument signature.
+# UnknownStatus is handled in the decoder, because it takes no message.
 _STATUS_TYPES: dict[str, Callable[[str], _state._EntityStatus]] = {
     'active': _state.ActiveStatus,
     'blocked': _state.BlockedStatus,
@@ -135,73 +63,105 @@ _STATUS_TYPES: dict[str, Callable[[str], _state._EntityStatus]] = {
     'waiting': _state.WaitingStatus,
 }
 
-_DC_TYPES: dict[str, type[Any]] = {}
+_DC_TYPES: dict[str, type[Any]] = {
+    name: value
+    for name, value in vars(_state).items()
+    if inspect.isclass(value)
+    and dataclasses.is_dataclass(value)
+    and value.__module__ == _state.__name__
+}
 
 
-def _build_dc_registry() -> None:
-    """Populate ``_DC_TYPES`` with every dataclass from ``scenario.state``."""
-    if _DC_TYPES:
-        return
-    for name in dir(_state):
-        value = getattr(_state, name)
-        if (
-            inspect.isclass(value)
-            and dataclasses.is_dataclass(value)
-            and value.__module__ == _state.__name__
-        ):
-            _DC_TYPES[value.__name__] = value
+def encode_state(state: _state.State) -> str:
+    """Encode a ``State`` as JSON.
+
+    Raises:
+        TypeError: if a value has no encoding, naming its path through the
+            ``State``.
+    """
+    return _encode_payload(state, 'state')
+
+
+def decode_state(payload: str) -> _state.State:
+    """Decode a ``State`` encoded by :func:`encode_state`."""
+    result = _decode_payload(payload, 'state')
+    if not isinstance(result, _state.State):
+        raise TypeError(f'The payload is not a State: got {type(result).__name__!r}.')
+    return result
+
+
+def encode_event(event: _state._Event) -> str:
+    """Encode an event as JSON."""
+    return _encode_payload(event, 'event')
+
+
+def decode_event(payload: str) -> _state._Event:
+    """Decode an event encoded by :func:`encode_event`."""
+    result = _decode_payload(payload, 'event')
+    if not isinstance(result, _state._Event):
+        raise TypeError(f'The payload is not an event: got {type(result).__name__!r}.')
+    return result
+
+
+def _encode_payload(obj: Any, kind: str) -> str:
+    return json.dumps({'ops_testing_version': ops.version.version, kind: _encode(obj, kind)})
+
+
+def _decode_payload(payload: str, kind: str) -> Any:
+    data = _as_dict(json.loads(payload), 'payload')
+    version = data.get('ops_testing_version')
+    if version != ops.version.version:
+        raise _VersionMismatchError(
+            f'The {kind} was encoded by ops.testing {version!r}, but this process has '
+            f'{ops.version.version!r}. The environment is stale, or this is a bug.'
+        )
+    return _decode(data[kind])
 
 
 # Encoder
 
 
 def _sorted_members(members: Iterable[Any], path: str) -> list[_JSON]:
+    # Sorted so that equal sets encode the same, whatever the hash seed.
     encoded = [_encode(x, f'{path}[]') for x in members]
     return sorted(encoded, key=lambda x: json.dumps(x, sort_keys=True))
 
 
-def _encode(obj: Any, path: str = 'state') -> _JSON:
-    """Recursively encode *obj* into a JSON-compatible structure.
-
-    Raises:
-        TypeError: if *obj* (or any nested value) has no registered encoding,
-            including the dotted *path* through ``State`` in the message.
-    """
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-
-    if isinstance(obj, bytes):
-        return {_T: 'bytes', 'v': base64.b64encode(obj).decode('ascii')}
-
-    # _EntityStatus check must precede the generic dataclass check because
-    # status subclasses have custom __init__ signatures that cls(**fields) won't satisfy.
-    if isinstance(obj, _state._EntityStatus):
-        return {_T: 'status', 'name': obj.name, 'msg': obj.message}
-
-    if isinstance(obj, pebble.Layer):
-        return {_T: 'layer', 'v': cast('dict[str, _JSON]', obj.to_dict())}
-
-    # Enum check before dataclass: pebble enums are not dataclasses.
+def _encode(obj: Any, path: str) -> _JSON:
+    # Before the primitives, so that a str or int enum keeps its type.
     if isinstance(obj, enum.Enum):
         cls_name = type(obj).__name__
         if cls_name not in _PEBBLE_ENUM_TYPES:
             raise TypeError(f'Unrecognised enum type {type(obj).__qualname__!r} at path {path!r}.')
         return {_T: 'enum', 'cls': cls_name, 'name': obj.name}
 
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+
+    if isinstance(obj, bytes):
+        return {_T: 'bytes', 'v': base64.b64encode(obj).decode('ascii')}
+
+    # Before the dataclasses, because the status classes take positional arguments.
+    if isinstance(obj, _state._EntityStatus):
+        return {_T: 'status', 'name': obj.name, 'msg': obj.message}
+
+    if isinstance(obj, pebble.Layer):
+        return {_T: 'layer', 'v': cast('dict[str, _JSON]', obj.to_dict())}
+
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        encoded_fields: dict[str, _JSON] = {}
-        for f in dataclasses.fields(obj):
-            # init=False fields (for example, _Event._juju_name) are derived in
-            # __post_init__ from other fields and can't be passed to
-            # cls(**fields) on the decode side; skip them.
-            if not f.init:
-                continue
-            val = getattr(obj, f.name)
-            encoded_fields[f.name] = _encode(val, f'{path}.{f.name}')
-        encoded: dict[str, _JSON] = {_T: 'dc', 'cls': type(obj).__name__, 'f': encoded_fields}
-        extra = {name: getattr(obj, name) for name in _NON_FIELD_ATTRS.get(type(obj).__name__, ())}
+        # init=False fields are derived in __post_init__, so they're left out.
+        fields = {
+            f.name: _encode(getattr(obj, f.name), f'{path}.{f.name}')
+            for f in dataclasses.fields(obj)
+            if f.init
+        }
+        encoded: dict[str, _JSON] = {_T: 'dc', 'cls': type(obj).__name__, 'f': fields}
+        extra = {
+            name: _encode(getattr(obj, name), f'{path}.{name}')
+            for name in _NON_FIELD_ATTRS.get(type(obj).__name__, ())
+        }
         if extra:
-            encoded['x'] = cast('_JSON', extra)
+            encoded['x'] = extra
         return encoded
 
     if isinstance(obj, datetime.datetime):
@@ -210,31 +170,18 @@ def _encode(obj: Any, path: str = 'state') -> _JSON:
     if isinstance(obj, datetime.timedelta):
         return {_T: 'timedelta', 'v': obj.total_seconds()}
 
-    # pathlib.Path is a concrete subclass of PurePosixPath on Linux; check it first
-    # so that concrete paths always get the 'Path' tag, not 'PurePosixPath'.
+    # Path before PurePosixPath, which it subclasses on Linux.
     if isinstance(obj, pathlib.Path):
         return {_T: 'Path', 'v': str(obj)}
 
     if isinstance(obj, pathlib.PurePosixPath):
         return {_T: 'PurePosixPath', 'v': str(obj)}
 
-    if isinstance(obj, pathlib.PurePath):
-        # Catch-all for PureWindowsPath and any other PurePath subclasses.
-        return {_T: 'PurePosixPath', 'v': str(obj)}
-
-    # The isinstance narrowing below leaves the element types unknown, since
-    # *obj* is Any; the casts pin them to Any so that the encoded results are
-    # fully typed.
-    # Sets are encoded in a canonical order, so that equal sets give the same
-    # bytes whatever order iteration happens to produce: that depends on the
-    # string hash seed and on the order the members were added.
     if isinstance(obj, frozenset):
-        frozen = cast('frozenset[Any]', obj)
-        return {_T: 'frozenset', 'v': _sorted_members(frozen, path)}
+        return {_T: 'frozenset', 'v': _sorted_members(cast('frozenset[Any]', obj), path)}
 
     if isinstance(obj, set):
-        members = cast('set[Any]', obj)
-        return {_T: 'set', 'v': _sorted_members(members, path)}
+        return {_T: 'set', 'v': _sorted_members(cast('set[Any]', obj), path)}
 
     if isinstance(obj, tuple):
         elements = cast('tuple[Any, ...]', obj)
@@ -242,78 +189,59 @@ def _encode(obj: Any, path: str = 'state') -> _JSON:
 
     if isinstance(obj, list):
         items = cast('list[Any]', obj)
+        if items and items[0] == _TUPLE_SENTINEL:
+            raise TypeError(f'A list starting with {_TUPLE_SENTINEL!r} at path {path!r}.')
         return [_encode(x, f'{path}[{i}]') for i, x in enumerate(items)]
 
     if isinstance(obj, dict):
         mapping = cast('dict[Any, Any]', obj)
-        # bool is a subclass of int, but int('True') does not round-trip, so
-        # bool keys are rejected rather than tagged as an int-keyed dict.
-        int_keys = mapping and all(type(k) is int for k in mapping)
-        if not int_keys:
-            for k in mapping:
-                if not isinstance(k, str):
-                    raise TypeError(
-                        f'No JSON encoding for dict key {k!r} of type '
-                        f'{type(k).__qualname__!r} at path {path!r}: keys must be '
-                        'all str or all int.'
-                    )
-            return {k: _encode(v, f'{path}.{k}') for k, v in mapping.items()}
-        # JSON requires string keys; preserve int-keyed dicts with a tag.
-        return {
-            _T: 'idict',
-            'v': {str(k): _encode(v, f'{path}[{k}]') for k, v in mapping.items()},
-        }
+        # type() rather than isinstance(), because int(str(True)) fails.
+        if mapping and all(type(k) is int for k in mapping):
+            return {
+                _T: 'idict',
+                'v': {str(k): _encode(v, f'{path}[{k}]') for k, v in mapping.items()},
+            }
+        for k in mapping:
+            if not isinstance(k, str):
+                raise TypeError(
+                    f'No JSON encoding for dict key {k!r} of type {type(k).__qualname__!r} '
+                    f'at path {path!r}: keys must be all str or all int.'
+                )
+        if _T in mapping:
+            raise TypeError(f'A dict with the key {_T!r} at path {path!r}.')
+        return {k: _encode(v, f'{path}.{k}') for k, v in mapping.items()}
 
     raise TypeError(f'No JSON encoding for type {type(obj).__qualname__!r} at path {path!r}.')
-
-
-def _encode_state(state: _state.State) -> str:
-    """Serialise a :class:`~ops.testing.State` to a JSON string.
-
-    The entry point is :meth:`~ops.testing.State._to_json`; this is its
-    implementation. The payload embeds the producing ``ops.testing`` version,
-    and round-trips through :meth:`~ops.testing.State._from_json` in a process
-    running that same version.
-
-    Raises:
-        TypeError: if any field value in *state* has no registered encoding.
-    """
-    return _encode_envelope(state, 'state')
 
 
 # Decoder
 
 
 def _as_str(value: _JSON, field: str) -> str:
-    """Narrow a decoded payload field to ``str``, or say what was wrong with it."""
     if not isinstance(value, str):
-        raise TypeError(f'Expected a string for {field} in wire payload, got {value!r}.')
+        raise TypeError(f'Expected a string for {field} in the payload, got {value!r}.')
     return value
 
 
 def _as_number(value: _JSON, field: str) -> float:
-    """Narrow a decoded payload field to a number, or say what was wrong with it."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f'Expected a number for {field} in wire payload, got {value!r}.')
+        raise TypeError(f'Expected a number for {field} in the payload, got {value!r}.')
     return value
 
 
 def _as_list(value: _JSON, field: str) -> list[_JSON]:
-    """Narrow a decoded payload field to ``list``, or say what was wrong with it."""
     if not isinstance(value, list):
-        raise TypeError(f'Expected a list for {field} in wire payload, got {value!r}.')
+        raise TypeError(f'Expected a list for {field} in the payload, got {value!r}.')
     return value
 
 
 def _as_dict(value: _JSON, field: str) -> dict[str, _JSON]:
-    """Narrow a decoded payload field to ``dict``, or say what was wrong with it."""
     if not isinstance(value, dict):
-        raise TypeError(f'Expected an object for {field} in wire payload, got {value!r}.')
+        raise TypeError(f'Expected an object for {field} in the payload, got {value!r}.')
     return value
 
 
 def _decode(obj: _JSON) -> Any:
-    """Decode a value produced by :func:`_encode`."""
     if isinstance(obj, list):
         if obj and obj[0] == _TUPLE_SENTINEL:
             return tuple(_decode(x) for x in obj[1:])
@@ -330,11 +258,10 @@ def _decode(obj: _JSON) -> Any:
     if kind == 'status':
         name = _as_str(obj['name'], 'status name')
         if name == 'unknown':
-            # Alone among the statuses, UnknownStatus carries no message.
             return _state.UnknownStatus()
         cls = _STATUS_TYPES.get(name)
         if cls is None:
-            raise TypeError(f'Unknown status name {name!r} in wire payload.')
+            raise TypeError(f'Unknown status name {name!r} in the payload.')
         return cls(_as_str(obj['msg'], 'status message'))
 
     if kind == 'layer':
@@ -344,19 +271,18 @@ def _decode(obj: _JSON) -> Any:
         cls_name = _as_str(obj['cls'], 'enum class')
         enum_cls = _PEBBLE_ENUM_TYPES.get(cls_name)
         if enum_cls is None:
-            raise TypeError(f'Unknown enum class {cls_name!r} in wire payload.')
+            raise TypeError(f'Unknown enum class {cls_name!r} in the payload.')
         return enum_cls[_as_str(obj['name'], 'enum member')]
 
     if kind == 'dc':
-        _build_dc_registry()
         cls_name = _as_str(obj['cls'], 'dataclass name')
         dc_cls = _DC_TYPES.get(cls_name)
         if dc_cls is None:
-            raise TypeError(f'Unknown dataclass {cls_name!r} in wire payload.')
+            raise TypeError(f'Unknown dataclass {cls_name!r} in the payload.')
         fields = {k: _decode(v) for k, v in _as_dict(obj['f'], 'dataclass fields').items()}
         instance = dc_cls(**fields)
         for name, value in _as_dict(obj.get('x', {}), 'dataclass extras').items():
-            object.__setattr__(instance, name, value)
+            object.__setattr__(instance, name, _decode(value))
         return instance
 
     if kind == 'datetime':
@@ -383,51 +309,4 @@ def _decode(obj: _JSON) -> Any:
     if kind == 'idict':
         return {int(k): _decode(v) for k, v in _as_dict(obj['v'], 'idict').items()}
 
-    raise TypeError(f'Unknown wire type tag {kind!r} in payload.')
-
-
-def _decode_state(payload: str) -> _state.State:
-    """Decode a JSON string produced by :meth:`~ops.testing.State._to_json`.
-
-    Raises:
-        _StateVersionMismatchError: if the payload's producing ``ops.testing``
-            version does not match this process's.
-        TypeError: if the payload contains an unknown type tag.
-    """
-    result = _decode_envelope(payload, 'state')
-    if not isinstance(result, _state.State):
-        raise TypeError(f'Decoded payload root is not a State: got {type(result).__name__!r}.')
-    return result
-
-
-# Envelope shared by the State and event codecs
-
-
-def _encode_envelope(obj: Any, kind: str) -> str:
-    """Wrap an encoded object in the versioned envelope both codecs use.
-
-    ``kind`` names the payload for the error message the decoder raises on a
-    version mismatch.
-    """
-    return json.dumps({
-        'ops_testing_version': ops.version.version,
-        kind: _encode(obj, kind),
-    })
-
-
-def _decode_envelope(payload: str, kind: str) -> Any:
-    """Unwrap a payload written by :func:`_encode_envelope`.
-
-    Raises:
-        _StateVersionMismatchError: if the payload's producing ``ops.testing``
-            version does not match this process's.
-    """
-    data = _as_dict(json.loads(payload), 'payload')
-    producing_version = data.get('ops_testing_version')
-    if producing_version != ops.version.version:
-        raise _StateVersionMismatchError(
-            f'{kind.capitalize()} was encoded by ops.testing {producing_version!r}, '
-            f'but this process is running ops.testing {ops.version.version!r}. '
-            "Install a matching ops.testing (the 'ops[testing]' extra) in the charm's venv."
-        )
-    return _decode(data[kind])
+    raise TypeError(f'Unknown type tag {kind!r} in the payload.')

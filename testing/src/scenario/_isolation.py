@@ -42,8 +42,7 @@ mid-test — create a new :class:`IsolatedContext` to continue.
 Serialisation
 ~~~~~~~~~~~~~
 The event and state cross the process boundary as **JSON**. The wire format is
-the typed codec in :mod:`scenario._isolated_serde` (which delegates State to
-the canonical :mod:`scenario._state_serde`); it round-trips frozen dataclasses,
+the typed codec in :mod:`scenario._state_serde`; it round-trips frozen dataclasses,
 ``set``/``frozenset``/``tuple``, ``datetime``, ``pathlib.Path``, the
 ``_EntityStatus`` family, pebble enums, ``bytes``, and ``pebble.Layer``.
 
@@ -77,7 +76,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import _isolated_serde, _worker_protocol
+from . import _state_serde, _worker_protocol
 from .context import _DEFAULT_JUJU_VERSION, CharmEvents
 from .errors import IsolationError, MetadataNotFoundError
 from .state import State, _CharmSpec, _Event
@@ -253,7 +252,7 @@ def _dispatch_spawn(
     if 'error' in response:
         raise _isolated_error(response)
 
-    return State._from_json(response['state_out'])
+    return _state_serde.decode_state(response['state_out'])
 
 
 # Persistent worker (default transport)
@@ -474,7 +473,7 @@ class _PersistentWorker:
                 raise _isolated_error(response)
 
             self._arm_timer()
-            return State._from_json(response['state_out'])
+            return _state_serde.decode_state(response['state_out'])
 
     def close(self) -> None:
         """Shut the worker down cleanly (idempotent)."""
@@ -675,8 +674,8 @@ class IsolatedContext:
             'filesystem_root': None if self.filesystem_root is None else str(self.filesystem_root),
             'workload_root': None if self.workload_root is None else str(self.workload_root),
             'secret_seed': secret_seed,
-            'event': _isolated_serde.encode_event(event),
-            'state_in': state._to_json(),
+            'event': _state_serde.encode_event(event),
+            'state_in': _state_serde.encode_state(state),
         }
 
     def run(self, event: _Event, state: State) -> State:

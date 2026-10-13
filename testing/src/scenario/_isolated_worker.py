@@ -64,7 +64,7 @@ is detected by the parent as a missing response, not via this dict.
 Serialisation compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ``State`` and ``_Event`` are round-tripped through
-:mod:`scenario._state_serde`, which the event codec also uses. The parent and
+:mod:`scenario._state_serde`. The parent and
 worker must therefore have the **same** ``ops`` version; only the charm's *own*
 runtime dependencies may differ.
 """
@@ -202,7 +202,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context, State, _charm_mocking, _isolated_serde, _unit_filesystem
+    from scenario import Context, _charm_mocking, _state_serde, _unit_filesystem
     from scenario.errors import UncaughtCharmError
 
     charm_source = request['charm_source']
@@ -232,8 +232,8 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         if charm_cache is not None:
             charm_cache[charm_source] = charm_type
 
-    event = _isolated_serde.decode_event(request['event'])
-    state_in = State._from_json(request['state_in'])
+    event = _state_serde.decode_event(request['event'])
+    state_in = _state_serde.decode_state(request['state_in'])
 
     ctx = Context(
         charm_type,
@@ -273,7 +273,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
                     state_out = ctx.run(event, state_in)
     except UncaughtCharmError as e:
         return {'error': _charm_traceback(e), 'hook_failed': True}
-    return {'state_out': state_out._to_json()}
+    return {'state_out': _state_serde.encode_state(state_out)}
 
 
 def _machine_id(request: dict[str, Any]) -> str | None:

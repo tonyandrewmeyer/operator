@@ -14,7 +14,7 @@ import pathlib
 import sys
 from typing import Any
 
-from scenario import _isolated_serde
+from scenario import _state_serde
 from scenario._deployment import Juju
 
 import ops
@@ -82,13 +82,17 @@ def run(*, isolated: bool = False, built: bool = False) -> list[str]:
         out.extend(_encode_trace(juju.settle()))
         for app in (db, web, client):
             for unit in app.units:
-                out.append(f'final {unit.name} {unit.state._to_json()}')
+                out.append(f'final {unit.name} {_state_serde.encode_state(unit.state)}')
         return out
 
 
 def _encode_trace(trace: list[testing.Dispatch]) -> list[str]:
     return [
-        f'{d.unit_name} {_isolated_serde.encode_event(d.event)} {d.state_out._to_json()}'
+        ' '.join((
+            d.unit_name,
+            _state_serde.encode_event(d.event),
+            _state_serde.encode_state(d.state_out),
+        ))
         for d in trace
     ]
 

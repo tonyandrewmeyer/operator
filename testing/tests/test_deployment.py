@@ -18,7 +18,7 @@ import subprocess
 import sys
 import textwrap
 import uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import Any, Literal
 
 import pytest
@@ -641,6 +641,48 @@ def test_remove_unit_machine_rejects_the_last_unit(machine_juju: testing.Juju):
     app = deploy_mycharm(machine_juju)
     with pytest.raises(testing.errors.JujuError, match='last unit'):
         machine_juju.remove_unit(app.units[0])
+
+
+def test_remove_unit_kubernetes_counts_only_units_not_already_leaving(juju: testing.Juju):
+    app = deploy_mycharm(juju, num_units=3)
+    juju.remove_unit(app, num_units=1)
+    juju.remove_unit(app, num_units=1)
+    with pytest.raises(testing.errors.JujuError, match='only 1'):
+        juju.remove_unit(app, num_units=1)
+    juju.settle()
+    assert [u.id for u in app.units] == [0]
+
+
+def test_remove_unit_machine_rejects_a_unit_already_leaving(machine_juju: testing.Juju):
+    app = deploy_mycharm(machine_juju, num_units=3)
+    leaving = app.units[2]
+    machine_juju.remove_unit(leaving)
+    with pytest.raises(testing.errors.JujuError, match='already been removed'):
+        machine_juju.remove_unit(leaving)
+    machine_juju.settle()
+    assert [u.id for u in app.units] == [0, 1]
+
+
+def _add_unit(juju: testing.Juju, app: testing.App):
+    juju.add_unit(app)
+
+
+def _config(juju: testing.Juju, app: testing.App):
+    juju.config(app, {'log_level': 'debug'})
+
+
+def _remove_unit(juju: testing.Juju, app: testing.App):
+    juju.remove_unit(app, num_units=1)
+
+
+@pytest.mark.parametrize('operation', [_add_unit, _config, _remove_unit])
+def test_operations_reject_an_app_from_another_juju(
+    juju: testing.Juju, operation: Callable[[testing.Juju, testing.App], None]
+):
+    with testing.Juju(model_name='other-model') as other:
+        app = deploy_mycharm(other, num_units=2)
+        with pytest.raises(testing.errors.JujuError, match='not deployed in this Juju'):
+            operation(juju, app)
 
 
 def test_remove_unit_drops_it_from_peer_databags(machine_juju: testing.Juju):

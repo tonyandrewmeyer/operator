@@ -307,12 +307,6 @@ def _startup_events(app: App, unit_id: int) -> list[tuple[_Event, _Rebind | None
     return events
 
 
-def _teardown_events(app: App, unit_id: int) -> list[tuple[_Event, _Rebind | None]]:
-    """The events a departing unit sees, in Juju's order."""
-    del app, unit_id  # Same for every unit today; kept for symmetry with startup.
-    return [(_Event('stop'), None), (_Event('remove'), None)]
-
-
 # Runners
 #
 # Two ways to execute an event: in this process (a charm class, or a charm
@@ -332,16 +326,6 @@ class _Runner:
 
     def close(self) -> None:
         raise NotImplementedError
-
-
-class _NotStarted(_Runner):
-    """The runner of an application that :class:`Juju` hasn't started yet."""
-
-    def run(self, unit_id: int, event: _Event, state: State, secret_seed: str) -> State:
-        raise JujuError('This application has not been started by Juju.deploy().')
-
-    def close(self) -> None:
-        pass
 
 
 class _InProcessRunner(_Runner):
@@ -649,9 +633,9 @@ class App:
         self._mocked = dict(mocked) if mocked is not None else {}
         _charm_mocking.check_mocking_json(self._mocked)
         self._juju_version = juju_version
-        # Set by Juju once it knows where the charm runs; see _run_in_process
-        # and _run_in_worker.
-        self._runner: _Runner = _NotStarted()
+        # Set by _run_in_process or _run_in_worker, which Juju calls straight
+        # after this.
+        self._runner: _Runner
         # How to start a worker for this charm: the interpreter, the extra
         # sys.path, and the front of PYTHONPATH. A charm on disk that runs in
         # the test process uses the test's own interpreter.
@@ -1047,9 +1031,8 @@ class _JujuState:
         self.user_secrets: dict[str, _UserSecret] = {}
         # Units whose charm raised, keyed by application name and unit ID,
         # with what it raised. Like a unit in a failed hook in Juju, each
-        # gets no more events: those queued for it wait in ``held``.
+        # gets no more events.
         self.failed: dict[tuple[str, int], _HookFailedError] = {}
-        self.held: dict[tuple[str, int], list[_Queued]] = {}
 
     def pending(self) -> int:
         """How many entries are queued, across every application."""
@@ -1391,6 +1374,7 @@ class Juju:
             The new :class:`Unit`.
         """
         self._check_open()
+        self._check_deployed(app)
         return self._add_unit(app)
 
     def remove_unit(self, *app_or_unit: App | Unit, num_units: int = 0) -> None:
@@ -1452,20 +1436,21 @@ class Juju:
                     'positive num_units=.'
                 )
             for app in apps:
+                self._check_deployed(app)
                 if app._substrate != 'kubernetes':
                     raise JujuError(
                         f'{app.name} is on a {app._substrate} substrate, which '
                         f'addresses units by name, not count. Use '
                         f'remove_unit(unit) or remove_unit(u1, u2, ...) instead.'
                     )
-                if num_units >= len(app._units):
+                if num_units >= len(app._live_units):
                     raise JujuError(
                         f'Cannot remove {num_units} units from {app.name}; it has '
-                        f'only {len(app._units)}. Remove the application instead '
-                        'to take it down entirely.'
+                        f'only {len(app._live_units)}.'
                     )
             for app in apps:
-                doomed_ids = set(sorted(app._units, reverse=True)[:num_units])
+                live_ids = sorted((u.id for u in app._live_units), reverse=True)
+                doomed_ids = set(live_ids[:num_units])
                 for unit_id in sorted(doomed_ids, reverse=True):
                     self._remove_one_unit(app, unit_id, doomed_ids)
                 self._update_planned_units(app)
@@ -1481,6 +1466,7 @@ class Juju:
         for unit in units:
             by_app.setdefault(unit.app, []).append(unit)
         for app, doomed in by_app.items():
+            self._check_deployed(app)
             if app._substrate == 'kubernetes':
                 raise JujuError(
                     f'{app.name} is on a kubernetes substrate, which is scaled '
@@ -1488,12 +1474,10 @@ class Juju:
                     f'remove_unit({app.name}, num_units=...) instead.'
                 )
             for unit in doomed:
-                if unit.id not in app._units:
-                    raise JujuError(f'{unit.name} is not part of {app.name} (already removed?).')
-            if len(app._units) - len(doomed) < 1:
-                raise JujuError(
-                    f'Cannot remove the last unit of {app.name}; remove the application instead.'
-                )
+                if unit.id not in app._units or unit.id in app._dying:
+                    raise JujuError(f'{unit.name} has already been removed.')
+            if len({u.id for u in doomed}) >= len(app._live_units):
+                raise JujuError(f'Cannot remove the last unit of {app.name}.')
         for app, doomed in by_app.items():
             doomed_ids = {u.id for u in doomed}
             for unit in doomed:
@@ -1558,8 +1542,8 @@ class Juju:
                     )
         for relation in sorted(departing._state.relations, key=lambda r: r.id):
             self._enqueue_leaving(app, departing, relation, departing_unit_id=unit_id)
-        for event, rebind in _teardown_events(app, unit_id):
-            self._enqueue(app, unit_id, event, rebind)
+        self._enqueue(app, unit_id, _Event('stop'))
+        self._enqueue(app, unit_id, _Event('remove'))
 
         self._state.queues[app.name].append(_Queued(app, unit_id, _RemoveUnit()))
 
@@ -1688,6 +1672,7 @@ class Juju:
         ``config-changed`` is queued for every unit.
         """
         self._check_open()
+        self._check_deployed(app)
         app._config.update(config)
         for unit in app.units:
             unit._state = dataclasses.replace(unit._state, config=dict(app._config))
@@ -2113,7 +2098,6 @@ class Juju:
         """
         app, unit_id, event, rebind = queued
         if (app.name, unit_id) in self._state.failed:
-            self._state.held.setdefault((app.name, unit_id), []).append(queued)
             return None
         if isinstance(event, _RemoveUnit):
             del app._units[unit_id]

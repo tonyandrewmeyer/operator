@@ -61,14 +61,8 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeAlias, cast
 from uuid import UUID, uuid4, uuid5
 
-from . import _charm_mocking, _environment, _state_serde, _unit_filesystem
+from . import _charm_dispatch, _charm_mocking, _environment, _state_serde, _unit_filesystem
 from . import state as _state_module
-from ._isolated_worker import (
-    _charm_exception,
-    _charm_traceback,
-    _load_charm_type,
-    _secret_ids,
-)
 from ._isolation import IsolatedContext, _HookFailedError, _load_charm_spec
 from .context import _DEFAULT_JUJU_VERSION, Context
 from .errors import IsolationError, JujuError, MetadataNotFoundError, UncaughtCharmError
@@ -258,7 +252,7 @@ class _CharmForContext:
         if self._charm_type is None:
             assert self._charm_source is not None
             try:
-                self._charm_type = _load_charm_type(
+                self._charm_type = _charm_dispatch.load_charm_type(
                     self._charm_source,
                     module_name=f'_ops_testing_charm_{uuid4().hex}',
                 )
@@ -277,7 +271,7 @@ class _CharmForContext:
             juju_version=self._juju_version,
             app_trusted=self._trust,
             charm_root=self._charm_roots.get(unit_id),
-            machine_id=_machine_id(self._machines, self._app_name, unit_id),
+            machine_id=_charm_dispatch.machine_id(self._machines, self._app_name, unit_id),
         )
 
 
@@ -381,7 +375,7 @@ class _InProcessRunner(_Runner):
                 juju_version=self._juju_version,
                 app_trusted=self._app_trusted,
                 charm_root=self._charm_roots.get(unit_id),
-                machine_id=_machine_id(self._machines, self._app_name, unit_id),
+                machine_id=_charm_dispatch.machine_id(self._machines, self._app_name, unit_id),
             )
             self._contexts[unit_id]._wrap_charm_errors = True
             self._contexts[unit_id]._workload_root = self._workload_roots.get(unit_id)
@@ -402,13 +396,13 @@ class _InProcessRunner(_Runner):
                 filesystem_root=self._unit_roots.get(unit_id),
                 allow=_unit_filesystem.framework_paths(ctx, state),
             ),
-            _secret_ids(secret_seed),
+            _charm_dispatch.secret_ids(secret_seed),
         ):
             try:
                 return ctx.run(event, state)
             except UncaughtCharmError as e:
-                cause = _charm_exception(e)
-                raise _HookFailedError(_charm_traceback(e), cause) from cause
+                cause = _charm_dispatch.charm_exception(e)
+                raise _HookFailedError(_charm_dispatch.charm_traceback(e), cause) from cause
 
     def close(self) -> None:
         self._contexts.clear()
@@ -500,7 +494,9 @@ class Unit:
         on Kubernetes has no machine, so this is ``None``, as it is once
         the unit has been removed.
         """
-        return _machine_id(self._app._juju._state.machines, self._app.name, self._id)
+        return _charm_dispatch.machine_id(
+            self._app._juju._state.machines, self._app.name, self._id
+        )
 
     @property
     def name(self) -> str:
@@ -683,7 +679,7 @@ class App:
             assert self._charm_source is not None
             # The charm import itself runs inside the defaults.
             with mocking.importing():
-                charm_type = _load_charm_type(
+                charm_type = _charm_dispatch.load_charm_type(
                     self._charm_source,
                     module_name=f'_ops_testing_charm_{uuid4().hex}',
                 )
@@ -1608,7 +1604,9 @@ class Juju:
             raise JujuError(f'A secret named {name!r} already exists.')
         if not content:
             raise JujuError('A secret needs some content.')
-        with _secret_ids(f'{self.uuid}/user-secrets/{len(self._state.user_secrets)}'):
+        with _charm_dispatch.secret_ids(
+            f'{self.uuid}/user-secrets/{len(self._state.user_secrets)}'
+        ):
             secret_id = _state_module._generate_secret_id()
         self._state.user_secrets[secret_id] = _UserSecret(
             secret_id, name, info, [{k: str(v) for k, v in content.items()}]
@@ -3164,12 +3162,6 @@ def _rebind(state: State, rebind: _Rebind) -> RelationBase | Container | Secret 
         if container.name == rebind.key:
             return container
     return None
-
-
-def _machine_id(machines: Mapping[str, int], app_name: str, unit_id: int) -> str | None:
-    """The unit's machine, as Juju gives it in ``JUJU_MACHINE_ID``; none on Kubernetes."""
-    machine = machines.get(f'{app_name}/{unit_id}')
-    return None if machine is None else str(machine)
 
 
 def _peer_relation(state: State, endpoint: str) -> PeerRelation | None:

@@ -72,111 +72,12 @@ runtime dependencies may differ.
 from __future__ import annotations
 
 import contextlib
-import hashlib
-import importlib
-import importlib.util
 import json
 import os
 import pathlib
 import sys
 import traceback
-import unittest.mock
-from collections.abc import Generator
-from typing import TYPE_CHECKING, Any, cast
-
-if TYPE_CHECKING:  # pragma: no cover
-    from ops import CharmBase
-
-
-#: The alphabet of a Juju secret ID: an xid, 20 characters of base32hex.
-_XID_ALPHABET = '0123456789abcdefghijklmnopqrstuv'
-
-
-@contextlib.contextmanager
-def _secret_ids(seed: str | None) -> Generator[None]:
-    """Make the IDs of secrets created inside the block depend only on ``seed``.
-
-    Scenario gives a new secret a random ID. Under ``Juju`` that would make
-    the final ``State`` differ from run to run, so each dispatch passes a
-    seed, and the n-th secret it creates gets an ID derived from the seed and
-    n. ``None`` leaves the IDs random.
-    """
-    if seed is None:
-        yield
-        return
-    from scenario import state
-
-    count = 0
-
-    def generate() -> str:
-        nonlocal count
-        digest = hashlib.sha256(f'{seed}/{count}'.encode()).digest()
-        count += 1
-        value = int.from_bytes(digest[:13], 'big')
-        chars: list[str] = []
-        for _ in range(20):
-            value, index = divmod(value, len(_XID_ALPHABET))
-            chars.append(_XID_ALPHABET[index])
-        return f'secret:{"".join(chars)}'
-
-    with unittest.mock.patch.object(state, '_generate_secret_id', generate):
-        yield
-
-
-def _load_charm_type(charm_source: pathlib.Path, module_name: str = 'charm') -> type[CharmBase]:
-    """Import the charm module and return its CharmBase subclass.
-
-    Adds ``charm_source/src`` and ``charm_source/lib`` to ``sys.path`` so that
-    the charm's own source files and bundled charm libraries are importable.
-
-    Args:
-        charm_source: Path to the charm repository root.
-        module_name: The name to import ``src/charm.py`` under. The worker
-            runs one charm, so it uses ``charm``. Several charms loaded into
-            one process each need their own name, and are loaded from the
-            file rather than found on ``sys.path``.
-
-    Returns:
-        The charm class (a :class:`ops.CharmBase` subclass).
-
-    Raises:
-        RuntimeError: if zero or more than one charm class is found.
-    """
-    from ops import CharmBase
-
-    sources = [str(charm_source / 'src'), str(charm_source / 'lib')]
-    for entry in sources:
-        if pathlib.Path(entry).exists() and entry not in sys.path:
-            sys.path.insert(0, entry)
-
-    if module_name == 'charm':
-        module = importlib.import_module('charm')
-    elif module_name in sys.modules:
-        module = sys.modules[module_name]
-    else:
-        spec = importlib.util.spec_from_file_location(
-            module_name, charm_source / 'src' / 'charm.py'
-        )
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f'Cannot load {charm_source}/src/charm.py.')
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-
-    charm_types = [
-        t
-        for t in module.__dict__.values()
-        if isinstance(t, type) and issubclass(t, CharmBase) and t is not CharmBase
-    ]
-    if not charm_types:
-        raise RuntimeError(f'No CharmBase subclass found in {charm_source}/src/charm.py.')
-    if len(charm_types) > 1:
-        raise RuntimeError(
-            f'Multiple CharmBase subclasses found in {charm_source}/src/charm.py: '
-            f'{[t.__name__ for t in charm_types]}. '
-            'Exactly one is required.'
-        )
-    return charm_types[0]
+from typing import Any, cast
 
 
 def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -195,14 +96,13 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         This propagates any exception the charm or ops.testing raises; the
         caller wraps it in ``{"error": traceback_str}``.
     """
-    # Make the per-charm dependency set importable BEFORE anything else.
-    # extra_sys_path entries are prepended so they take priority over any
-    # site-packages already on sys.path (that is, the worker venv's packages).
-    for entry in reversed(cast('list[str]', request.get('extra_sys_path', []))):
+    # Ahead of the environment's site-packages, so these win for the charm's
+    # own imports.
+    for entry in reversed(cast('list[str]', request['extra_sys_path'])):
         if entry not in sys.path:
             sys.path.insert(0, entry)
 
-    from scenario import Context, _charm_mocking, _state_serde, _unit_filesystem
+    from scenario import Context, _charm_dispatch, _charm_mocking, _state_serde, _unit_filesystem
     from scenario.errors import UncaughtCharmError
 
     charm_source = request['charm_source']
@@ -228,7 +128,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         charm_type = charm_cache[charm_source]
     else:
         with mocking.importing() if mocking is not None else contextlib.nullcontext():
-            charm_type = _load_charm_type(pathlib.Path(charm_source))
+            charm_type = _charm_dispatch.load_charm_type(pathlib.Path(charm_source))
         if charm_cache is not None:
             charm_cache[charm_source] = charm_type
 
@@ -245,7 +145,9 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         juju_version=request['juju_version'],
         app_trusted=request['app_trusted'],
         charm_root=request['charm_root'],
-        machine_id=_machine_id(request),
+        machine_id=_charm_dispatch.machine_id(
+            request['machines'], request['app_name'], request['unit_id']
+        ),
     )
     ctx._wrap_charm_errors = True
     if request.get('workload_root') is not None:
@@ -254,7 +156,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         with (
             # Juju runs every hook in the unit's charm directory.
             _unit_filesystem.working_directory(request['charm_root']),
-            _secret_ids(request.get('secret_seed')),
+            _charm_dispatch.secret_ids(request['secret_seed']),
         ):
             if mocking is None:
                 state_out = ctx.run(event, state_in)
@@ -265,39 +167,15 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
                     state_in.model.name,
                     model_type=state_in.model.type,
                     model_uuid=state_in.model.uuid,
-                    machines=request.get('machines') or {},
+                    machines=request['machines'],
                     trusted=request['app_trusted'],
                     filesystem_root=request.get('filesystem_root'),
                     allow=_unit_filesystem.framework_paths(ctx, state_in),
                 ):
                     state_out = ctx.run(event, state_in)
     except UncaughtCharmError as e:
-        return {'error': _charm_traceback(e), 'hook_failed': True}
+        return {'error': _charm_dispatch.charm_traceback(e), 'hook_failed': True}
     return {'state_out': _state_serde.encode_state(state_out)}
-
-
-def _machine_id(request: dict[str, Any]) -> str | None:
-    """The unit's machine, as Juju gives it in ``JUJU_MACHINE_ID``; none on Kubernetes."""
-    machines: dict[str, int] = request.get('machines') or {}
-    machine = machines.get(f'{request["app_name"]}/{request["unit_id"]}')
-    return None if machine is None else str(machine)
-
-
-def _charm_exception(error: BaseException) -> BaseException:
-    """The exception to report for a charm that raised.
-
-    That's the charm's own exception if ``SCENARIO_BARE_CHARM_ERRORS`` is set,
-    and otherwise the ``UncaughtCharmError`` that wraps it, as ``Context.run``
-    would raise.
-    """
-    from scenario._runtime import _bare_charm_errors
-
-    return (error.__cause__ or error) if _bare_charm_errors() else error
-
-
-def _charm_traceback(error: BaseException) -> str:
-    """The traceback of :func:`_charm_exception`, as text, to cross a process boundary."""
-    return ''.join(traceback.format_exception(_charm_exception(error)))
 
 
 def serve() -> int:

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -511,9 +512,27 @@ def _succeeding_subprocesses() -> Generator[None]:
         yield
 
 
+def unit_address(model_name: str, unit_name: str) -> str:
+    """The address a unit has, derived from its model and unit names.
+
+    It's a private address, the same on every run, and different for each
+    unit, so that the addresses in relation data, the unit's networks and its
+    host name all agree.
+    """
+    digest = hashlib.sha256(f'{model_name}/{unit_name}'.encode()).digest()
+    return f'10.{digest[0]}.{digest[1]}.{1 + digest[2] % 254}'
+
+
+def _unit_for_host(name: str, model_name: str) -> str | None:
+    """The unit a host name belongs to, for the names ``_unit_hostname`` gives out."""
+    name = name.removesuffix(f'.{model_name}')
+    match = re.fullmatch(r'(.+)-(\d+)', name)
+    return f'{match.group(1)}/{match.group(2)}' if match else None
+
+
 @contextlib.contextmanager
 def _unit_hostname(unit_name: str, model_name: str | None) -> Generator[None]:
-    """The unit's host names derive from its unit and model names."""
+    """The unit's host names and address derive from its unit and model names."""
     hostname = unit_name.replace('/', '-')
     fqdn = f'{hostname}.{model_name}' if model_name else hostname
 
@@ -524,8 +543,10 @@ def _unit_hostname(unit_name: str, model_name: str | None) -> Generator[None]:
         return hostname
 
     def gethostbyname(name: str) -> str:
-        del name
-        return _DEFAULT_ADDRESS
+        unit = _unit_for_host(name, model_name) if model_name else None
+        if unit is None or model_name is None:
+            return _DEFAULT_ADDRESS
+        return unit_address(model_name, unit)
 
     with (
         mock.patch.object(socket, 'getfqdn', getfqdn),

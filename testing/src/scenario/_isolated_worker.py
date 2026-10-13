@@ -42,13 +42,16 @@ A request dict has the keys:
 - ``app_trusted`` (``bool``), ``charm_root`` (``str | None``): as for ``Context``.
 - ``mocking`` (``dict | None``): the keyword arguments for the charm's own
   mocking; ``None`` runs the charm with no mocking at all.
+- ``secret_seed`` (``str | None``, optional): makes the IDs of the secrets the
+  charm creates depend only on this string; ``None`` leaves them random.
 - ``event`` (``str``): the JSON wire form of the input ``_Event``.
 - ``state_in`` (``str``): the JSON wire form of the input ``State``.
 
 A response dict is either ``{"state_out": <str>}`` (the JSON wire form of the
-output ``State``) or ``{"error": <str>}`` (a formatted traceback when the charm
-raises). A worker *crash* (process death) is detected by the parent as a
-missing response, not via this dict.
+output ``State``) or ``{"error": <str>}`` (a formatted traceback). When the
+error is the charm's own exception, rather than a problem running it, the
+response also has ``"hook_failed": true``. A worker *crash* (process death)
+is detected by the parent as a missing response, not via this dict.
 
 Serialisation compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -61,6 +64,7 @@ runtime dependencies may differ.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -68,10 +72,47 @@ import os
 import pathlib
 import sys
 import traceback
+import unittest.mock
+from collections.abc import Generator
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     from ops import CharmBase
+
+
+#: The alphabet of a Juju secret ID: an xid, 20 characters of base32hex.
+_XID_ALPHABET = '0123456789abcdefghijklmnopqrstuv'
+
+
+@contextlib.contextmanager
+def _secret_ids(seed: str | None) -> Generator[None]:
+    """Make the IDs of secrets created inside the block depend only on ``seed``.
+
+    Scenario gives a new secret a random ID. Under ``Juju`` that would make
+    the final ``State`` differ from run to run, so each dispatch passes a
+    seed, and the n-th secret it creates gets an ID derived from the seed and
+    n. ``None`` leaves the IDs random.
+    """
+    if seed is None:
+        yield
+        return
+    from scenario import state
+
+    count = 0
+
+    def generate() -> str:
+        nonlocal count
+        digest = hashlib.sha256(f'{seed}/{count}'.encode()).digest()
+        count += 1
+        value = int.from_bytes(digest[:13], 'big')
+        chars: list[str] = []
+        for _ in range(20):
+            value, index = divmod(value, len(_XID_ALPHABET))
+            chars.append(_XID_ALPHABET[index])
+        return f'secret:{"".join(chars)}'
+
+    with unittest.mock.patch.object(state, '_generate_secret_id', generate):
+        yield
 
 
 def _load_charm_type(charm_source: pathlib.Path, module_name: str = 'charm') -> type[CharmBase]:
@@ -130,7 +171,7 @@ def _load_charm_type(charm_source: pathlib.Path, module_name: str = 'charm') -> 
     return charm_types[0]
 
 
-def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> dict[str, str]:
+def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> dict[str, Any]:
     """Execute a single charm event and return the serialised output state.
 
     Args:
@@ -154,6 +195,7 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
             sys.path.insert(0, entry)
 
     from scenario import Context, State, _charm_mocking, _isolated_serde
+    from scenario.errors import UncaughtCharmError
 
     charm_source = request['charm_source']
     mocking_key = f'mocking:{charm_source}'
@@ -196,13 +238,35 @@ def _run(request: dict[str, Any], charm_cache: dict[str, Any] | None = None) -> 
         app_trusted=request['app_trusted'],
         charm_root=request['charm_root'],
     )
-    if mocking is None:
-        state_out = ctx.run(event, state_in)
-    else:
-        unit_name = f'{request["app_name"]}/{request["unit_id"]}'
-        with mocking.dispatching(unit_name, state_in.model.name):
-            state_out = ctx.run(event, state_in)
+    ctx._wrap_charm_errors = True
+    try:
+        with _secret_ids(request.get('secret_seed')):
+            if mocking is None:
+                state_out = ctx.run(event, state_in)
+            else:
+                unit_name = f'{request["app_name"]}/{request["unit_id"]}'
+                with mocking.dispatching(unit_name, state_in.model.name):
+                    state_out = ctx.run(event, state_in)
+    except UncaughtCharmError as e:
+        return {'error': _charm_traceback(e), 'hook_failed': True}
     return {'state_out': state_out._to_json()}
+
+
+def _charm_exception(error: BaseException) -> BaseException:
+    """The exception to report for a charm that raised.
+
+    That's the charm's own exception if ``SCENARIO_BARE_CHARM_ERRORS`` is set,
+    and otherwise the ``UncaughtCharmError`` that wraps it, as ``Context.run``
+    would raise.
+    """
+    from scenario._runtime import _bare_charm_errors
+
+    return (error.__cause__ or error) if _bare_charm_errors() else error
+
+
+def _charm_traceback(error: BaseException) -> str:
+    """The traceback of :func:`_charm_exception`, as text, to cross a process boundary."""
+    return ''.join(traceback.format_exception(_charm_exception(error)))
 
 
 def serve() -> int:
@@ -270,7 +334,7 @@ def main(argv: list[str]) -> int:
     with open(request_file, encoding='utf8') as fh:
         request = cast('dict[str, Any]', json.load(fh))
 
-    response: dict[str, str]
+    response: dict[str, Any]
     try:
         response = _run(request)
     except JujuError as e:

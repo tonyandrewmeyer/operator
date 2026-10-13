@@ -70,7 +70,7 @@ import enum
 import inspect
 import json
 import pathlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, TypeAlias, Union, cast
 
 import ops.version
@@ -155,6 +155,11 @@ def _build_dc_registry() -> None:
 # Encoder
 
 
+def _sorted_members(members: Iterable[Any], path: str) -> list[_JSON]:
+    encoded = [_encode(x, f'{path}[]') for x in members]
+    return sorted(encoded, key=lambda x: json.dumps(x, sort_keys=True))
+
+
 def _encode(obj: Any, path: str = 'state') -> _JSON:
     """Recursively encode *obj* into a JSON-compatible structure.
 
@@ -220,13 +225,16 @@ def _encode(obj: Any, path: str = 'state') -> _JSON:
     # The isinstance narrowing below leaves the element types unknown, since
     # *obj* is Any; the casts pin them to Any so that the encoded results are
     # fully typed.
+    # Sets are encoded in a canonical order, so that equal sets give the same
+    # bytes whatever order iteration happens to produce: that depends on the
+    # string hash seed and on the order the members were added.
     if isinstance(obj, frozenset):
         frozen = cast('frozenset[Any]', obj)
-        return {_T: 'frozenset', 'v': [_encode(x, f'{path}[]') for x in frozen]}
+        return {_T: 'frozenset', 'v': _sorted_members(frozen, path)}
 
     if isinstance(obj, set):
         members = cast('set[Any]', obj)
-        return {_T: 'set', 'v': [_encode(x, f'{path}[]') for x in members]}
+        return {_T: 'set', 'v': _sorted_members(members, path)}
 
     if isinstance(obj, tuple):
         elements = cast('tuple[Any, ...]', obj)

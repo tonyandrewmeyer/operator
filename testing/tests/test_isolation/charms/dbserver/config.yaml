@@ -1,0 +1,4 @@
+options:
+  password:
+    type: string
+    default: first

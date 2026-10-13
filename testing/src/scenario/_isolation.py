@@ -82,6 +82,27 @@ from .context import _DEFAULT_JUJU_VERSION, CharmEvents
 from .errors import IsolationError, MetadataNotFoundError
 from .state import State, _CharmSpec, _Event
 
+
+class _HookFailedError(IsolationError):
+    """The charm itself raised, as opposed to the worker failing to run it.
+
+    :class:`~ops.testing.Juju` treats this as a failed hook. Anyone else sees
+    an :class:`IsolationError`, as before.
+    """
+
+    def __init__(self, traceback: str, cause: BaseException | None = None):
+        super().__init__(f'Isolated charm run failed:\n{traceback}')
+        self.traceback = traceback
+        # The exception itself, when the charm ran in this process.
+        self.cause = cause
+
+
+def _isolated_error(response: Mapping[str, Any]) -> IsolationError:
+    if response.get('hook_failed'):
+        return _HookFailedError(response['error'])
+    return IsolationError(f'Isolated charm run failed:\n{response["error"]}')
+
+
 #: Seconds a single isolated event may run before the worker is killed.
 _DEFAULT_DISPATCH_TIMEOUT = 60.0
 
@@ -225,7 +246,7 @@ def _dispatch_spawn(
         response = json.loads(resp_file.read_text())
 
     if 'error' in response:
-        raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
+        raise _isolated_error(response)
 
     return State._from_json(response['state_out'])
 
@@ -445,7 +466,7 @@ class _PersistentWorker:
                 # A clean charm error: the worker caught it and is still alive,
                 # so it stays reusable. Re-arm the idle timer and raise.
                 self._arm_timer()
-                raise IsolationError(f'Isolated charm run failed:\n{response["error"]}')
+                raise _isolated_error(response)
 
             self._arm_timer()
             return State._from_json(response['state_out'])
@@ -618,6 +639,7 @@ class IsolatedContext:
         event: _Event,
         state: State,
         unit_id: int | None = None,
+        secret_seed: str | None = None,
     ) -> dict[str, Any]:
         return {
             'charm_source': str(self._env.charm_source),
@@ -631,6 +653,7 @@ class IsolatedContext:
             'app_trusted': self.app_trusted,
             'charm_root': None if self.charm_root is None else str(self.charm_root),
             'mocking': self._mocking,
+            'secret_seed': secret_seed,
             'event': _isolated_serde.encode_event(event),
             'state_in': state._to_json(),
         }
@@ -669,14 +692,17 @@ class IsolatedContext:
         """
         return self._run_as(self.unit_id, event, state)
 
-    def _run_as(self, unit_id: int, event: _Event, state: State) -> State:
+    def _run_as(
+        self, unit_id: int, event: _Event, state: State, *, secret_seed: str | None = None
+    ) -> State:
         """Dispatch ``event`` as unit ``unit_id`` rather than this context's own unit.
 
         The unit ID travels in the request rather than being baked into the
         worker, so a single persistent worker serves every unit of an
         application: one process per application rather than one per unit.
+        ``secret_seed`` fixes the IDs of any secrets the charm creates.
         """
-        request = self._build_request(event, state, unit_id=unit_id)
+        request = self._build_request(event, state, unit_id=unit_id, secret_seed=secret_seed)
         if self._spawn_per_event:
             return _dispatch_spawn(self._env, self._child_env, request, self.dispatch_timeout)
         if self._worker is None:

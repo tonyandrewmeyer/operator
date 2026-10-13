@@ -1,0 +1,8 @@
+name: webapp
+summary: Web application charm for the relation tests.
+description: |
+  Uses a database over a relation: reads the endpoint and the password secret
+  the database shares, and reports what it found in its status.
+requires:
+  database:
+    interface: dbtest

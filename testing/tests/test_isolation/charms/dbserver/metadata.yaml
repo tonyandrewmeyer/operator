@@ -1,0 +1,11 @@
+name: dbserver
+summary: Database charm for the relation tests.
+description: |
+  Provides a database over a relation: an endpoint in the application databag,
+  and a password in an application-owned secret granted to the other side.
+provides:
+  database:
+    interface: dbtest
+peers:
+  cluster:
+    interface: dbserver-peers

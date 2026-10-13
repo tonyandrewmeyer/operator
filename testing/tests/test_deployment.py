@@ -402,6 +402,7 @@ def test_deploy_emits_the_juju_startup_sequence(juju: testing.Juju):
     trace = juju.settle()
     assert [dispatch.event.name for dispatch in trace] == [
         'install',
+        'replicas_relation_created',
         'leader_elected',
         'config_changed',
         'start',
@@ -500,10 +501,44 @@ def test_add_unit_runs_the_startup_sequence_for_the_new_unit(juju: testing.Juju)
     assert unit.id == 1
     assert [d.event.name for d in trace if d.unit_id == 1] == [
         'install',
+        'replicas_relation_created',
         'leader_settings_changed',
         'config_changed',
         'start',
+        'replicas_relation_joined',
+        'replicas_relation_changed',
     ]
+
+
+def test_a_unit_has_its_peer_relation_from_its_relation_created(juju: testing.Juju):
+    deploy_mycharm(juju)
+    install, created = juju.settle()[:2]
+    assert install.state_out.relations == frozenset()
+    assert created.event.name == 'replicas_relation_created'
+    (relation,) = created.state_in.relations
+    assert isinstance(relation, testing.PeerRelation)
+    assert relation.peers_data == {}
+
+
+def test_existing_peers_see_a_new_unit_join_only_after_its_relation_created(
+    juju: testing.Juju,
+):
+    app = deploy_mycharm(juju)
+    juju.settle()
+    juju.add_unit(app)
+    trace = [(d.unit_id, d.event.name) for d in juju.settle()]
+    created = trace.index((1, 'replicas_relation_created'))
+    assert trace.index((0, 'replicas_relation_joined')) > created
+
+
+def test_peers_never_see_a_unit_removed_before_its_relation_created(juju: testing.Juju):
+    app = deploy_mycharm(juju)
+    juju.settle()
+    juju.add_unit(app)
+    juju.remove_unit(app, num_units=1)
+    trace = juju.settle()
+    assert [d.event.name for d in trace if d.unit_id == 0] == []
+    assert not [d for d in trace if d.event.name.startswith('replicas_')]
 
 
 def test_add_unit_makes_existing_peers_see_relation_joined(juju: testing.Juju):
@@ -538,8 +573,11 @@ def test_remove_unit_kubernetes_scales_down_by_count(juju: testing.Juju):
     juju.settle()
     juju.remove_unit(app, num_units=1)
     trace = juju.settle()
+    # The departing unit leaves its peer relation before it stops.
     assert [(d.event.name, d.unit_id) for d in trace] == [
         ('replicas_relation_departed', 0),
+        ('replicas_relation_departed', 1),
+        ('replicas_relation_broken', 1),
         ('stop', 1),
         ('remove', 1),
     ]
@@ -569,8 +607,11 @@ def test_remove_unit_machine_removes_the_named_unit(machine_juju: testing.Juju):
     machine_juju.settle()
     machine_juju.remove_unit(app.units[1])
     trace = machine_juju.settle()
+    # The departing unit leaves its peer relation before it stops.
     assert [(d.event.name, d.unit_id) for d in trace] == [
         ('replicas_relation_departed', 0),
+        ('replicas_relation_departed', 1),
+        ('replicas_relation_broken', 1),
         ('stop', 1),
         ('remove', 1),
     ]
@@ -668,6 +709,9 @@ def test_add_unit_while_a_unit_is_leaving_counts_only_the_staying_units(juju: te
     juju.remove_unit(app, num_units=1)
     juju.add_unit(app)
     assert [unit.state.planned_units for unit in app.units] == [2, 2, 2]
+    juju.settle()
+    assert [unit.name for unit in app.units] == ['myapp/0', 'myapp/2']
+    assert [unit.state.planned_units for unit in app.units] == [2, 2]
 
 
 def test_remove_unit_requires_at_least_one_argument(juju: testing.Juju):
@@ -723,9 +767,9 @@ def test_settle_raises_when_juju_does_not_converge(juju: testing.Juju):
 def test_reading_state_does_not_dispatch_anything(juju: testing.Juju):
     """Reading Unit.state never runs charm code; the queue is untouched."""
     app = deploy_mycharm(juju)
-    queued = len(juju._state.queue)
+    queued = juju._state.pending()
     assert app.leader.state.unit_status == testing.UnknownStatus()
-    assert len(juju._state.queue) == queued
+    assert juju._state.pending() == queued
 
 
 def test_settle_returns_the_dispatch_trace(juju: testing.Juju):
@@ -737,13 +781,18 @@ def test_settle_returns_the_dispatch_trace(juju: testing.Juju):
     assert (first.app, first.unit_id, first.unit_name) == (app.name, 0, app.leader.name)
     assert isinstance(first.state_in, testing.State)
     assert isinstance(first.state_out, testing.State)
+    assert first.error is None
 
 
 def test_a_dispatch_s_state_in_is_the_previous_state_out_for_one_unit(juju: testing.Juju):
     deploy_mycharm(juju)
     trace = juju.settle()
     for before, after in itertools.pairwise(trace):
-        assert after.state_in == before.state_out
+        expected = before.state_out
+        if after.event.name.endswith('_relation_created'):
+            # The unit enters the relation just before its relation-created.
+            expected = dataclasses.replace(expected, relations=after.state_in.relations)
+        assert after.state_in == expected
 
 
 def test_dispatches_compare_by_value_and_hold_no_live_handles(juju: testing.Juju):
@@ -1224,6 +1273,7 @@ def test_state_template_leaves_the_juju_owned_fields_to_juju(juju: testing.Juju)
     assert unit.state.leader
     assert unit.state.model.name == 'test-model'
     assert unit.state.config == {'log_level': 'info'}
+    juju.settle()
     assert [r.endpoint for r in unit.state.relations] == ['replicas']
 
 
@@ -1235,6 +1285,7 @@ def test_state_template_leaves_the_juju_owned_fields_to_juju(juju: testing.Juju)
         ('model', testing.State(model=testing.Model(type='lxd'))),
         ('config', testing.State(config={'log_level': 'debug'})),
         ('relations', testing.State(relations={testing.PeerRelation('replicas')})),
+        ('secrets', testing.State(secrets={testing.Secret({'a': 'b'})})),
     ],
 )
 def test_state_template_may_not_set_juju_owned_fields(

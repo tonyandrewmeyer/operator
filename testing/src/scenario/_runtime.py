@@ -40,6 +40,12 @@ logger = scenario_logger.getChild('runtime')
 RUNTIME_MODULE = Path(__file__).parent
 
 
+def _bare_charm_errors() -> bool:
+    """Whether ``SCENARIO_BARE_CHARM_ERRORS`` asks for the charm's own exceptions, unwrapped."""
+    bare = os.getenv('SCENARIO_BARE_CHARM_ERRORS', 'false')
+    return bare.lower() == 'true' or (bare.isdigit() and int(bare) != 0)
+
+
 class Runtime(Generic[CharmType]):
     """Charm runtime wrapper.
 
@@ -358,8 +364,7 @@ class Runtime(Generic[CharmType]):
             except (NoObserverError, ActionFailed):
                 raise  # propagate along
             except Exception as e:
-                bare = os.getenv('SCENARIO_BARE_CHARM_ERRORS', 'false')
-                if bare.lower() == 'true' or (bare.isdigit() and int(bare)):
+                if _bare_charm_errors() and not context._wrap_charm_errors:
                     raise
                 # The following is intentionally on one long line, so that the last line of pdb
                 # output shows the error message (pdb shows the "raise" line).

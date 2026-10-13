@@ -714,25 +714,7 @@ class App:
         """
         assert self._charm_source is not None, 'only a charm on disk can run in a worker'
         self._worker_args = (python_executable, tuple(extra_sys_path), tuple(python_path))
-        self._runner = _IsolatedRunner(
-            IsolatedContext(
-                charm_source=self._charm_source,
-                python_executable=python_executable,
-                extra_sys_path=tuple(extra_sys_path),
-                python_path=tuple(python_path),
-                meta=self._metadata,
-                config=self._config_schema,
-                actions=self._actions,
-                app_name=self._name,
-                juju_version=self._juju_version,
-                app_trusted=self._trust,
-                mocking=self._mocked,
-            ),
-            self._charm_roots,
-            self._unit_roots,
-            self._workload_roots,
-            self._juju._state.machines,
-        )
+        self._runner = self._isolated_runner(_IsolatedRunner, spawn_per_event=False)
         # The mocking itself loads in the worker; the parent reports the
         # configuration problems it can see without importing anything.
         self._charm_mocking(self._charm_source).check()
@@ -746,28 +728,35 @@ class App:
         if self._charm_source is None:
             return self._runner
         if self._fresh_runner is None:
-            python_executable, extra_sys_path, python_path = self._worker_args
-            self._fresh_runner = _FreshProcessRunner(
-                IsolatedContext(
-                    charm_source=self._charm_source,
-                    python_executable=python_executable,
-                    extra_sys_path=extra_sys_path,
-                    python_path=python_path,
-                    meta=self._metadata,
-                    config=self._config_schema,
-                    actions=self._actions,
-                    app_name=self._name,
-                    juju_version=self._juju_version,
-                    app_trusted=self._trust,
-                    mocking=self._mocked,
-                    spawn_per_event=True,
-                ),
-                self._charm_roots,
-                self._unit_roots,
-                self._workload_roots,
-                self._juju._state.machines,
-            )
+            self._fresh_runner = self._isolated_runner(_FreshProcessRunner, spawn_per_event=True)
         return self._fresh_runner
+
+    def _isolated_runner(
+        self, runner: type[_IsolatedRunner], *, spawn_per_event: bool
+    ) -> _IsolatedRunner:
+        assert self._charm_source is not None
+        python_executable, extra_sys_path, python_path = self._worker_args
+        ctx = IsolatedContext(
+            charm_source=self._charm_source,
+            python_executable=python_executable,
+            extra_sys_path=extra_sys_path,
+            python_path=python_path,
+            meta=self._metadata,
+            config=self._config_schema,
+            actions=self._actions,
+            app_name=self._name,
+            juju_version=self._juju_version,
+            app_trusted=self._trust,
+            mocking=self._mocked,
+            spawn_per_event=spawn_per_event,
+        )
+        return runner(
+            ctx,
+            self._charm_roots,
+            self._unit_roots,
+            self._workload_roots,
+            self._juju._state.machines,
+        )
 
     def _charm_mocking(
         self,

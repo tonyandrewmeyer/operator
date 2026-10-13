@@ -42,6 +42,10 @@ _ASSERTION_FAILURE_RE = re.compile(r"^E\s+(assert\b|AssertionError\b)", re.M)
 # in the FAILURES section: `E   dataclasses.FrozenInstanceError: ...`.
 # Dotted prefixes are kept so the reason names what the reader will see.
 _RAISED_EXCEPTION_RE = re.compile(r"^E\s+(?P<exc>[A-Za-z_][\w.]*(?:Error|Exception|Exit))\b", re.M)
+# A `pytest.raises(...)` whose body raised nothing, as pytest prints it:
+# `E   Failed: DID NOT RAISE <class 'ops.model.RelationNotFoundError'>` on
+# older pytest, `E   Failed: DID NOT RAISE RelationNotFoundError` on newer.
+_DID_NOT_RAISE_RE = re.compile(r"^E\s+Failed: DID NOT RAISE\b(?P<what>.*)$", re.M)
 _IMPORT_ERROR_RE = re.compile(r"ImportError while importing test module|ModuleNotFoundError")
 _API_SHAPE_ERROR_RE = re.compile(r"\b(AttributeError|TypeError|ImportError)\b")
 # juju writes progress to stderr alongside errors, so the *first* line of a
@@ -271,6 +275,36 @@ def classify(
                     f"the model-written test raised {raised.group('exc')} rather than failing an "
                     "assertion -- the generated test is not valid, so its failure is evidence "
                     "about the generator and not about the reported bug",
+                )
+
+    # Rung 1d: the model-written test failed only because its own
+    # `pytest.raises(...)` expectation did not hold. "DID NOT RAISE" is not an
+    # assertion failure and not an exception out of the test body, so rung 1c
+    # let it through and rung 6 read it as `reproduced_weaker`. Live on
+    # `#2709` (`spike-step-5/static-retry/RESULT.md` §25, run 5-7) that was a
+    # false comment: `pytest.raises(ops.RelationNotFoundError)` around a
+    # `get_relation()` that never reads the databag, "DID NOT RAISE" on ops
+    # 3.8.3 and on the fix alike. The expectation is the model's, not the
+    # reporter's symptom, so its not holding is graded no stronger than
+    # silent, whether or not the fix would make it hold (§26: the classifier
+    # only sees one run, and a test whose expectation holds on the fix is
+    # still not evidence the reported symptom is a missing exception). Checked
+    # before rung 2 so a quoted snippet that happens to appear in the printed
+    # test source cannot lift it back to a reproduction. Only when nothing
+    # else in that command's output failed an assertion: a file with a second
+    # test that does fail one keeps that evidence.
+    if written is not None:
+        for c in commands:
+            if c.exit_code == 0:
+                continue
+            text = _command_text(c)
+            not_raised = _DID_NOT_RAISE_RE.search(text)
+            if not_raised and not _ASSERTION_FAILURE_RE.search(text):
+                return (
+                    Outcome.UNRUNNABLE_SYNTHESIS_INVALID,
+                    f"the model-written test failed only because its own `pytest.raises(...)` did not "
+                    f"hold (DID NOT RAISE{not_raised.group('what').rstrip()}) -- that is the generated "
+                    "test's expectation, not the reported symptom, so it is not evidence about the bug",
                 )
 
     # Rung 2: reproduced -- traceback class + observed substring match,

@@ -36,7 +36,9 @@ does.
    tool a relation access runs is faked, `_ModelBackend` keywords, an
    uncaught hook-tool error, and a relation databag that is looked up and
    never read, or read where `RelationNotFoundError` is expected (a read
-   cannot raise it). If it fails, the
+   cannot raise it), and a `get_relation()` / `model.relations[...]`
+   lookup expected to raise (it never runs `relation-get`). A dict for
+   `testing.State(relations=...)` is rejected too. If it fails, the
    extraction is asked again once, with the reasons; the second answer is
    kept whatever it says, and both verdicts go in the extraction record.
 4. **scope second opinion** (`inscope_second_pass.py`) - a second, narrower
@@ -94,7 +96,9 @@ does.
    `un-runnable (test selector stale)` → `reproduced` →
    `reproduced (log-only)` → `un-runnable (API-shape mismatch)` →
    `reproduced (positive-signal absent)` (with the control check) →
-   `reproduced (weaker)` → `partial` → `did not reproduce`.
+   `reproduced (weaker)` → `partial` → `did not reproduce`. A
+   model-written test whose only failure is its own `pytest.raises(...)`
+   ("DID NOT RAISE") is kept silent, ahead of `reproduced`.
 9. **comment composition** (`composer.py`) - only some of those outcomes
    compose anything at all; the rest are silent by design. A composed
    comment always opens with the automation disclaimer and ends with an

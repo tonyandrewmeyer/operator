@@ -44,7 +44,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from typing import Any, cast
 from unittest import mock
 
-from . import _charmlibs_mocking
+from . import _charmlibs_mocking, _fake_libraries, _unit_filesystem
 from .errors import JujuError
 
 #: The default mocks, by the name a charm uses to switch one off.
@@ -54,6 +54,7 @@ _DEFAULT_NAMES = (
     'k8s-patch-libs',
     'subprocess',
     'snap',
+    'apt',
     'hostname',
     'env',
     'network',
@@ -267,6 +268,12 @@ class CharmMocking:
         )
         self._function: Callable[..., contextlib.AbstractContextManager[Any]] | None = None
         self._loaded = False
+        # Each unit's snaps, packages and filesystem outlast its dispatches,
+        # as they would on its machine. A worker serves every unit of its
+        # application, so these are per unit rather than per instance.
+        self._snaps: dict[str, dict[str, dict[str, str]]] = {}
+        self._apt: dict[str, _fake_libraries.AptState] = {}
+        self._filesystems: dict[str, _unit_filesystem.UnitFilesystem] = {}
 
     def check(self) -> None:
         """The checks that need no import: an explicitly configured file exists.
@@ -384,10 +391,47 @@ class CharmMocking:
         return self._defaults(unit_name=None, model_name=None)
 
     @contextlib.contextmanager
-    def dispatching(self, unit_name: str, model_name: str) -> Generator[None]:
-        """The scope to run one dispatch in: the defaults, then the charm's own mocking."""
+    def dispatching(
+        self,
+        unit_name: str,
+        model_name: str,
+        *,
+        model_type: str = 'kubernetes',
+        model_uuid: str = '',
+        machines: Mapping[str, int] | None = None,
+        trusted: bool = True,
+        filesystem_root: str | os.PathLike[str] | None = None,
+        allow: Sequence[str | os.PathLike[str]] = (),
+    ) -> Generator[None]:
+        """The scope to run one dispatch in: the defaults, then the charm's own mocking.
+
+        ``model_type`` is the model's substrate, which decides the shape of
+        the unit's host names. On a machine model, ``machines`` maps each
+        unit in the model to its machine number, which with ``model_uuid``
+        names the machine. ``trusted`` is whether the application has Juju
+        trust, without which Kubernetes refuses its API calls.
+        ``filesystem_root`` is the unit's own filesystem, and ``allow`` the
+        paths outside it that the framework itself writes to, such as the
+        ``Context``'s temporary directory and the sources of mounts. Without a
+        root, file access isn't translated.
+        """
         self.load()
-        with self._defaults(unit_name=unit_name, model_name=model_name):
+        filesystem = None
+        if filesystem_root is not None:
+            key = os.fspath(filesystem_root)
+            filesystem = self._filesystems.get(key)
+            if filesystem is None:
+                filesystem = self._filesystems[key] = _unit_filesystem.UnitFilesystem(key)
+        with self._defaults(
+            unit_name=unit_name,
+            model_name=model_name,
+            kubernetes=model_type == 'kubernetes',
+            model_uuid=model_uuid,
+            machines=machines,
+            trusted=trusted,
+            filesystem=filesystem,
+            allow=[os.fspath(p) for p in allow],
+        ):
             with contextlib.ExitStack() as libraries:
                 # Each library's own mocking, outside the charm's, so that
                 # the charm's patches win where the two overlap.
@@ -400,7 +444,16 @@ class CharmMocking:
                     yield
 
     def _defaults(
-        self, *, unit_name: str | None, model_name: str | None
+        self,
+        *,
+        unit_name: str | None,
+        model_name: str | None,
+        kubernetes: bool = False,
+        model_uuid: str = '',
+        machines: Mapping[str, int] | None = None,
+        trusted: bool = True,
+        filesystem: _unit_filesystem.UnitFilesystem | None = None,
+        allow: Sequence[str] = (),
     ) -> contextlib.ExitStack[bool | None]:
         stack = contextlib.ExitStack()
         disabled = self._config.disable
@@ -410,9 +463,31 @@ class CharmMocking:
             stack.enter_context(_succeeding_subprocesses())
         if 'hostname' not in disabled:
             name = unit_name or f'{self._app_name}/0'
-            stack.enter_context(_unit_hostname(name, model_name))
+            stack.enter_context(
+                _unit_hostname(
+                    name,
+                    model_name,
+                    kubernetes=kubernetes,
+                    model_uuid=model_uuid,
+                    machines=machines or {},
+                )
+            )
         if 'network' not in disabled:
             stack.enter_context(_no_outbound_connections())
+        if 'lightkube' not in disabled:
+            # Without trust, the application's service account may not use
+            # the Kubernetes API, as with an untrusted application in Juju.
+            forbidden = None if trusted else (model_name or 'default', self._app_name)
+            stack.enter_context(_fake_libraries.lightkube(forbidden=forbidden))
+        if 'k8s-patch-libs' not in disabled:
+            stack.enter_context(_fake_libraries.k8s_patch_libs())
+        if 'snap' not in disabled and unit_name is not None:
+            stack.enter_context(_fake_libraries.snap(self._snaps.setdefault(unit_name, {})))
+        if 'apt' not in disabled and unit_name is not None:
+            apt = self._apt.setdefault(unit_name, _fake_libraries.AptState())
+            stack.enter_context(_fake_libraries.apt(apt))
+        if 'filesystem' not in disabled and filesystem is not None:
+            stack.enter_context(_unit_filesystem.translated(filesystem, allow))
         return stack
 
 
@@ -523,18 +598,67 @@ def unit_address(model_name: str, unit_name: str) -> str:
     return f'10.{digest[0]}.{digest[1]}.{1 + digest[2] % 254}'
 
 
-def _unit_for_host(name: str, model_name: str) -> str | None:
-    """The unit a host name belongs to, for the names ``_unit_hostname`` gives out."""
-    name = name.removesuffix(f'.{model_name}')
-    match = re.fullmatch(r'(.+)-(\d+)', name)
-    return f'{match.group(1)}/{match.group(2)}' if match else None
+_CLUSTER_DOMAIN = 'svc.cluster.local'
+# The DNS domain of LXD's default bridge, which resolves its instances' names.
+_LXD_DOMAIN = 'lxd'
+
+
+def machine_hostname(model_uuid: str, machine: int) -> str:
+    """A machine's host name: Juju names it after the end of the model's UUID and its number."""
+    return f'juju-{model_uuid[-6:]}-{machine}'
+
+
+def _unit_for_host(
+    name: str, model_name: str, machines: Mapping[str, str] | None = None
+) -> str | None:
+    """The unit a host name belongs to, for the names ``_unit_hostname`` gives out.
+
+    On a machine model, ``machines`` maps each machine's host name to the
+    unit on it. Otherwise, the names are the pod names Kubernetes gives.
+    """
+    name = name.rstrip('.')
+    if machines is not None:
+        return machines.get(name.removesuffix(f'.{_LXD_DOMAIN}'))
+    name = name.removesuffix(f'.{_CLUSTER_DOMAIN}').removesuffix(f'.{model_name}')
+    host, _, service = name.partition('.')
+    match = re.fullmatch(r'(.+)-(\d+)', host)
+    if match is None or service not in ('', f'{match.group(1)}-endpoints'):
+        return None
+    return f'{match.group(1)}/{match.group(2)}'
 
 
 @contextlib.contextmanager
-def _unit_hostname(unit_name: str, model_name: str | None) -> Generator[None]:
-    """The unit's host names and address derive from its unit and model names."""
-    hostname = unit_name.replace('/', '-')
-    fqdn = f'{hostname}.{model_name}' if model_name else hostname
+def _unit_hostname(
+    unit_name: str,
+    model_name: str | None,
+    *,
+    kubernetes: bool = False,
+    model_uuid: str = '',
+    machines: Mapping[str, int] | None = None,
+) -> Generator[None]:
+    """The unit's host names and address, as Juju gives them.
+
+    On Kubernetes, Juju runs each unit in a pod of a StatefulSet whose
+    headless service is ``<app>-endpoints``, so the pod's host name is
+    ``<app>-<n>`` and its full name is
+    ``<app>-<n>.<app>-endpoints.<model>.svc.cluster.local``. On a machine
+    model, the host name is the machine's, ``juju-<end of model UUID>-<n>``,
+    in LXD's ``lxd`` domain.
+    """
+    machines = machines or {}
+    hosts = {machine_hostname(model_uuid, m): u for u, m in machines.items()} if model_uuid else {}
+    machine = machines.get(unit_name)
+    on_machine = not kubernetes and bool(model_uuid) and machine is not None
+    if on_machine:
+        assert machine is not None
+        hostname = machine_hostname(model_uuid, machine)
+        fqdn = f'{hostname}.{_LXD_DOMAIN}'
+    else:
+        hostname = unit_name.replace('/', '-')
+        fqdn = hostname
+        if kubernetes and model_name:
+            app = unit_name.split('/')[0]
+            fqdn = f'{hostname}.{app}-endpoints.{model_name}.{_CLUSTER_DOMAIN}'
 
     def getfqdn(name: str = '') -> str:
         return fqdn if name in ('', hostname, fqdn) else name
@@ -543,7 +667,9 @@ def _unit_hostname(unit_name: str, model_name: str | None) -> Generator[None]:
         return hostname
 
     def gethostbyname(name: str) -> str:
-        unit = _unit_for_host(name, model_name) if model_name else None
+        unit = (
+            _unit_for_host(name, model_name, hosts if on_machine else None) if model_name else None
+        )
         if unit is None or model_name is None:
             return _DEFAULT_ADDRESS
         return unit_address(model_name, unit)

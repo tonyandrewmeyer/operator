@@ -792,6 +792,9 @@ class Context(Generic[CharmType]):
         # Juju sets this so that it can always tell the charm's own exception
         # from any other, whatever SCENARIO_BARE_CHARM_ERRORS says.
         self._wrap_charm_errors = False
+        # Juju sets this to a directory of the unit's own, so that container
+        # and storage filesystems outlive a run, as they do in a real pod.
+        self._workload_root: pathlib.Path | None = None
 
         # operations (and embedded tasks) from running actions
         self.action_logs: list[str] = []
@@ -819,11 +822,11 @@ class Context(Generic[CharmType]):
 
     def _get_container_root(self, container_name: str):
         """Get the path to a tempdir where this container's simulated root will live."""
-        return self._tmp_path / 'containers' / container_name
+        return (self._workload_root or self._tmp_path) / 'containers' / container_name
 
     def _get_storage_root(self, name: str, index: int) -> pathlib.Path:
         """Get the path to a tempdir where this storage's simulated root will live."""
-        storage_root = self._tmp_path / 'storages' / f'{name}-{index}'
+        storage_root = (self._workload_root or self._tmp_path) / 'storages' / f'{name}-{index}'
         # in the case of _get_container_root, _MockPebbleClient will ensure the dir exists.
         storage_root.mkdir(parents=True, exist_ok=True)
         return storage_root

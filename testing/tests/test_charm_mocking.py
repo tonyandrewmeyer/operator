@@ -14,7 +14,7 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import Generator
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from scenario import _charm_mocking
@@ -423,6 +423,7 @@ PROBE_CHARM = """
             probe['address'] = socket.gethostbyname(socket.gethostname())
             probe['home'] = os.environ.get('HOME')
             probe['unit'] = os.environ.get('JUJU_UNIT_NAME')
+            probe['machine'] = os.environ.get('JUJU_MACHINE_ID')
             try:
                 socket.create_connection(('127.0.0.1', 9))
             except OSError as e:
@@ -435,20 +436,111 @@ def probe(app: testing.App, unit: int = 0) -> dict[str, Any]:
     return json.loads(app.units[unit].state.unit_status.message)
 
 
-def test_the_defaults_keep_the_charm_off_the_host(tmp_path: pathlib.Path, isolated: bool):
+MODEL_UUID = '95229123-8dfd-426e-88cb-6b23fcd2a88a'
+
+
+@pytest.mark.parametrize(
+    ('model_type', 'hostname', 'fqdn', 'machine'),
+    [
+        # Juju's StatefulSet for the application has a headless service,
+        # <app>-endpoints, and each pod is named under it.
+        (
+            'kubernetes',
+            'probe-1',
+            'probe-1.probe-endpoints.mymodel.svc.cluster.local',
+            None,
+        ),
+        # Juju names a machine after the end of the model's UUID and its
+        # number, and LXD's bridge resolves it in the lxd domain. The other
+        # application took machine 0.
+        ('lxd', 'juju-d2a88a-2', 'juju-d2a88a-2.lxd', '2'),
+    ],
+)
+def test_the_defaults_keep_the_charm_off_the_host(
+    tmp_path: pathlib.Path,
+    isolated: bool,
+    model_type: Literal['kubernetes', 'lxd'],
+    hostname: str,
+    fqdn: str,
+    machine: str | None,
+):
     root = write_charm(tmp_path / 'probe', name='probe', charm=PROBE_CHARM)
-    with testing.Juju(model_name='mymodel') as juju:
+    other = write_charm(tmp_path / 'other', name='other', charm=PROBE_CHARM)
+    with testing.Juju(model_name='mymodel', uuid=MODEL_UUID, type=model_type) as juju:
+        juju._deploy(other, **deploy_kwargs(isolated))
         app = juju._deploy(root, num_units=2, **deploy_kwargs(isolated))
         juju.settle()
         result = probe(app, 1)
     assert result['subprocess'] == [0, '']
     assert result['system'] == 0
-    assert result['hostname'] == 'probe-1'
-    assert result['fqdn'] == 'probe-1.mymodel'
+    assert result['hostname'] == hostname
+    assert result['fqdn'] == fqdn
+    assert result['machine'] == machine
     assert result['address'] == _charm_mocking.unit_address('mymodel', 'probe/1')
     assert result['home'] is None
     assert result['unit'] == 'probe/1'
     assert '127.0.0.1:9' in result['network']
+
+
+@pytest.mark.parametrize(
+    ('name', 'unit'),
+    [
+        ('probe-1', 'probe/1'),
+        ('probe-1.probe-endpoints.mymodel.svc.cluster.local', 'probe/1'),
+        ('probe-1.probe-endpoints.mymodel.svc.cluster.local.', 'probe/1'),
+        ('probe-1.other-endpoints.mymodel.svc.cluster.local', None),
+        ('example.com', None),
+    ],
+)
+def test_a_pod_s_host_names_resolve_to_its_unit(name: str, unit: str | None):
+    assert _charm_mocking._unit_for_host(name, 'mymodel') == unit
+
+
+@pytest.mark.parametrize(
+    ('name', 'unit'),
+    [
+        ('juju-d2a88a-3', 'probe/1'),
+        ('juju-d2a88a-3.lxd', 'probe/1'),
+        ('juju-d2a88a-3.lxd.', 'probe/1'),
+        ('juju-d2a88a-4', None),
+        ('probe-1', None),
+        ('example.com', None),
+    ],
+)
+def test_a_machine_s_host_names_resolve_to_its_unit(name: str, unit: str | None):
+    machines = {'juju-d2a88a-3': 'probe/1'}
+    assert _charm_mocking._unit_for_host(name, 'mymodel', machines) == unit
+
+
+def test_juju_never_reuses_a_machine_number(tmp_path: pathlib.Path):
+    root = write_charm(tmp_path / 'probe', name='probe', charm=PROBE_CHARM)
+    with testing.Juju(model_name='mymodel', uuid=MODEL_UUID, type='lxd') as juju:
+        app = juju.deploy(root, num_units=2)
+        juju.settle()
+        juju.remove_unit(app.units[1])
+        juju.settle()
+        juju.add_unit(app)
+        juju.settle()
+        assert [unit.machine for unit in app.units] == ['0', '2']
+        assert probe(app, 1)['machine'] == '2'
+        assert probe(app, 1)['hostname'] == 'juju-d2a88a-2'
+
+
+def test_a_kubernetes_unit_has_no_machine():
+    with testing.Juju() as juju:
+        app = juju.deploy(testing.CharmSpec(ops.CharmBase, meta={'name': 'probe'}))
+        assert app.units[0].machine is None
+
+
+def test_a_machine_unit_resolves_the_other_machines_in_the_model():
+    machines = {'probe/0': 0, 'other/0': 1}
+    with _charm_mocking._unit_hostname(
+        'probe/0', 'mymodel', model_uuid=MODEL_UUID, machines=machines
+    ):
+        assert socket.gethostname() == 'juju-d2a88a-0'
+        assert socket.gethostbyname('juju-d2a88a-1.lxd') == _charm_mocking.unit_address(
+            'mymodel', 'other/0'
+        )
 
 
 def test_the_defaults_are_only_open_around_dispatches(tmp_path: pathlib.Path):

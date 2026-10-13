@@ -1968,29 +1968,11 @@ class Juju:
         example, writes the current time to a databag ends up in a different
         :class:`State` each run, though the order of dispatch is the same.
 
-        Settling doesn't catch a charm that writes a value whose order
-        depends on string hashing, such as a ``set`` of strings serialised
-        without sorting. In Juju, each hook is a new process with its own hash
-        seed, so the value changes order from hook to hook, and two charms
-        reacting to each other's writes never settle (they "flap"). Here, the
-        test process, and each charm's worker process, keeps one seed for
-        every dispatch, so the order doesn't change. Pass
-        ``check_flapping=True`` to run each dispatch of a charm on disk in a
-        new process, with its own seed, as Juju does. A charm that flaps is
-        then reported as a loop, naming the databag value that changed only
-        in order. That's much slower (a new process for every dispatch), so
-        it's for a test that checks for flapping, not for every test. A charm
-        defined in the test (a :class:`CharmSpec` or a bare class) can't run
-        in another process, so it runs as usual.
-
-        Args:
-            check_flapping: Run each dispatch of a charm on disk in a new
-                process with its own hash seed, and report a value that only
-                changes order as flapping.
-
-        Returns:
-            The events dispatched, in order, each with the unit it went to and
-            that unit's :class:`State` afterwards.
+        In Juju, each hook is a new process with its own string-hash seed, so
+        a charm that writes an unsorted ``set`` of strings writes it in a
+        different order each time, and two charms reacting to each other's
+        writes never settle. Here, each process keeps one seed, so that isn't
+        seen unless ``check_flapping=True``.
 
         If a charm raises, the unit goes into error status, as it would in
         Juju after a failed hook: the charm's changes from that dispatch are
@@ -1999,6 +1981,17 @@ class Juju:
         this raises :class:`JujuError`. The model is left as it is, so a test
         that expects the failure can catch the error and assert on the unit's
         status.
+
+        Args:
+            check_flapping: Run each dispatch of a charm on disk in a new
+                process with its own hash seed, and report a value that only
+                changes order as flapping. This is much slower. A charm defined
+                in the test runs as usual, and an in-process charm on disk
+                doesn't see the test's own patches.
+
+        Returns:
+            The events dispatched, in order, each with the unit it went to and
+            that unit's :class:`State` afterwards.
 
         Raises:
             JujuError: if the model does not converge. The same event reaching
@@ -2031,18 +2024,15 @@ class Juju:
             if key is not None:
                 earlier = seen.get(key)
                 if earlier is not None:
-                    reordered = _reordered_values(unit, earlier, unit._state)
-                    if reordered:
+                    if check_flapping and (
+                        reordered := _reordered_values(unit, earlier, unit._state)
+                    ):
                         raise JujuError(
-                            f'{unit.name} was about to handle {event.name} with the same '
-                            'State it had the last time it handled it, apart from the order '
-                            'of some databag values, so settling would never end. This looks '
-                            'like flapping: '
+                            f'{unit.name} is about to handle {event.name} again with a State '
+                            'that differs only in the order of '
                             + ', and '.join(reordered)
-                            + ', changed only in order. Each hook in Juju is a new process '
-                            'with its own string-hash seed, so a value built by iterating a '
-                            'set of strings comes out in a different order in each hook. '
-                            f'Sort the value before writing it.{self._trace_tail()}'
+                            + '. This looks like flapping: sort the value before writing it.'
+                            f'{self._trace_tail()}'
                         )
                     raise JujuError(
                         f'{unit.name} was about to handle {event.name} with the same '

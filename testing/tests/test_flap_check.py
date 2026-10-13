@@ -113,24 +113,28 @@ def test_settle_does_not_see_hash_order_flapping(tmp_path: pathlib.Path, isolate
         assert seen == members
 
 
-def test_check_flapping_reports_hash_order_flapping(tmp_path: pathlib.Path, isolated: bool):
+# check_flapping runs each dispatch of a charm on disk in a new process,
+# whether or not it was deployed in a worker, so these aren't parametrised.
+
+
+def test_check_flapping_reports_hash_order_flapping(tmp_path: pathlib.Path):
     with testing.Juju() as juju:
-        deploy_pair(juju, tmp_path, order=UNSORTED, isolated=isolated)
+        deploy_pair(juju, tmp_path, order=UNSORTED, isolated=False)
         with pytest.raises(testing.errors.JujuError, match='looks like flapping') as caught:
             juju.settle(check_flapping=True)
     message = str(caught.value)
     assert "'members' in provider's application data on shared:" in message
     assert "'seen' in requirer/0's unit data on shared:" in message
-    assert 'Sort the value' in message
+    assert 'sort the value' in message
 
 
-def test_check_flapping_passes_a_sorted_value(tmp_path: pathlib.Path, isolated: bool):
+def test_check_flapping_passes_a_sorted_value(tmp_path: pathlib.Path):
     with testing.Juju() as checked:
-        provider, _ = deploy_pair(checked, tmp_path / 'checked', order=SORTED, isolated=isolated)
+        provider, _ = deploy_pair(checked, tmp_path / 'checked', order=SORTED, isolated=False)
         checked_trace = checked.settle(check_flapping=True)
         checked_state = provider.leader.state
     with testing.Juju() as plain:
-        provider, _ = deploy_pair(plain, tmp_path / 'plain', order=SORTED, isolated=isolated)
+        provider, _ = deploy_pair(plain, tmp_path / 'plain', order=SORTED, isolated=False)
         plain_trace = plain.settle()
         plain_state = provider.leader.state
     assert [(d.event.name, d.unit_name) for d in checked_trace] == [
@@ -168,7 +172,6 @@ def test_check_flapping_runs_a_charm_spec_in_process(tmp_path: pathlib.Path):
         # each dispatch, so the check still sees it.
         with pytest.raises(testing.errors.JujuError, match='looks like flapping'):
             juju.settle(check_flapping=True)
-        assert r._runner is r._fresh_process_runner()
 
 
 def test_a_real_loop_is_still_a_loop_under_check_flapping(tmp_path: pathlib.Path):

@@ -79,6 +79,8 @@ _subprocess_run = subprocess.run
 
 _REQUIREMENT_NAME = re.compile(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)')
 _HASH_OPTION = re.compile(r'\s--hash[=\s]\S+')
+#: A requirement that only applies with one of the distribution's extras.
+_EXTRA_MARKER = re.compile(r'\bextra\s*==')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -317,11 +319,6 @@ def _uv_export(
     uv: str,
 ) -> list[str]:
     """The requirements ``uv export`` gives from the charm's lockfile."""
-    if not (charm_root / 'uv.lock').exists():
-        raise _suggest_requirements(
-            f'{app_name}: the charm is built with the uv plugin but has no uv.lock. Run '
-            '`uv lock` in the charm.'
-        )
     cmd = [
         uv,
         'export',
@@ -442,8 +439,11 @@ def harvest_pydeps(charm_root: pathlib.Path) -> list[str]:
     for path in sorted(lib.rglob('*.py')):
         if '__pycache__' in path.parts:
             continue
+        source = path.read_bytes()
+        if b'PYDEPS' not in source:
+            continue
         try:
-            tree = ast.parse(path.read_bytes(), filename=str(path))
+            tree = ast.parse(source, filename=str(path))
         except (SyntaxError, ValueError):
             continue
         for node in tree.body:
@@ -477,7 +477,7 @@ def _ops_requirements() -> list[str]:
                 'what the charm environment needs for it.'
             ) from None
         for requirement in requires:
-            if 'extra ==' in requirement.replace('extra==', 'extra =='):
+            if _EXTRA_MARKER.search(requirement):
                 continue
             if _canonical_name(requirement) in _OPS_DISTRIBUTIONS:
                 continue
@@ -518,13 +518,6 @@ def _cache_root() -> pathlib.Path:
     return pathlib.Path(base) / 'ops-testing' / 'environments'
 
 
-def _scenario_version() -> str:
-    try:
-        return importlib.metadata.version('ops-scenario')
-    except importlib.metadata.PackageNotFoundError:
-        return ''
-
-
 def _cache_key(plan: _Plan) -> str:
     inputs = {
         'plugin': plan.plugin,
@@ -536,7 +529,7 @@ def _cache_key(plan: _Plan) -> str:
         },
         'python': [sys.implementation.name, sys.version, sys.base_prefix],
         'ops': ops.version.version,
-        'ops-scenario': _scenario_version(),
+        'ops-scenario': importlib.metadata.version('ops-scenario'),
     }
     encoded = json.dumps(inputs, sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()

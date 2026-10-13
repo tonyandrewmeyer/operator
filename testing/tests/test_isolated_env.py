@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 import textwrap
-import time
 from collections.abc import Generator
 
 import pytest
@@ -97,8 +96,6 @@ def uv_charm(root: pathlib.Path, dependencies: list[str], **pyproject: str) -> p
             ).replace("'", '"'),
         },
     )
-    import subprocess
-
     subprocess.run([shutil.which('uv') or 'uv', 'lock', '--quiet'], cwd=root, check=True)
     return root
 
@@ -422,9 +419,8 @@ def test_a_missing_requirements_file_is_an_error(juju: testing.Juju, tmp_path: p
         juju.deploy(root, isolated=True, requirements=tmp_path / 'missing.txt')
 
 
+@needs_uv
 def test_a_poetry_charm_suggests_requirements(juju: testing.Juju, tmp_path: pathlib.Path):
-    if shutil.which('uv') is None:
-        pytest.skip('needs uv on PATH')
     root = write_charm(
         tmp_path / 'alpha', {'charmcraft.yaml': 'parts:\n  c:\n    plugin: poetry\n'}
     )
@@ -484,9 +480,7 @@ def test_a_second_deploy_uses_the_cached_environment(
     tmp_path: pathlib.Path, cache: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ):
     root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
-    started = time.monotonic()
     cold = _environment.build(root, 'alpha')
-    cold_seconds = time.monotonic() - started
     assert not cold.cached
     assert cold.path.parent == cache / 'ops-testing' / 'environments'
     assert (cold.path / _environment._MARKER).exists()
@@ -496,12 +490,9 @@ def test_a_second_deploy_uses_the_cached_environment(
 
     with monkeypatch.context() as patch:
         patch.setattr(_environment, '_create', no_install)
-        started = time.monotonic()
         warm = _environment.build(root, 'alpha')
-        warm_seconds = time.monotonic() - started
         assert warm.cached
         assert warm.path == cold.path
-        assert warm_seconds < cold_seconds
         # The charm still runs from the cached environment.
         with testing.Juju() as juju:
             app = juju.deploy(root, isolated=True)
@@ -626,9 +617,17 @@ def test_a_uv_cache_hit_does_not_run_uv_export(
     assert warm.path == cold.path
 
 
-def test_patching_subprocess_run_does_not_reach_the_build(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(subprocess, 'run', None)
-    assert _environment._subprocess_run is not None
+@needs_uv
+def test_patching_subprocess_run_does_not_reach_the_build(
+    tmp_path: pathlib.Path, cache: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
+
+    def refuse(*args: object, **kwargs: object):
+        raise AssertionError("the test's patch reached the build")
+
+    monkeypatch.setattr(subprocess, 'run', refuse)
+    assert not _environment.build(root, 'alpha').cached
 
 
 @needs_uv

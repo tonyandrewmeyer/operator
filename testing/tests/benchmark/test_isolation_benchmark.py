@@ -1,42 +1,14 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Benchmark: isolation transports on a 4-charm / 20-event workload.
+"""Benchmark the isolation transports on four charms with 20 events each.
 
-Measures the same workload three ways and compares them:
+The same workload runs in the test process, with a new worker process per
+event, and with a persistent worker per charm. Worker start-up and the
+per-event cost are checked against separate budgets, because start-up is paid
+once per worker and the per-event cost on every dispatch.
 
-(a) **in-process Scenario baseline** — ``testing.Context(...).run(...)`` in the
-    test process (no isolation);
-(b) **spawn-per-event isolated** — a fresh worker subprocess per event
-    (``IsolatedContext(spawn_per_event=True)``);
-(c) **persistent-worker isolated** — one long-lived worker per charm
-    (``IsolatedContext`` default).
-
-The yardstick workload is a 4-charm bundle with 20 events per ``settle()``.
-There is no ``Model`` / ``settle`` yet, so the workload is
-realised as 4 isolated charm environments, each dispatched 20 sequential events.
-
-Acceptance bar: two decomposed **absolute** budgets, not a single ratio
-against the baseline. Isolation costs two structurally different things, and
-they amortise differently, so they are gated separately:
-
-* **worker spawn** — a fresh interpreter plus ``import ops`` per isolated
-  environment, paid once and amortised over however many events that
-  environment sees (:data:`_SPAWN_BUDGET`);
-* **steady state** — the JSON + IPC cost of moving one event and one ``State``
-  across the process boundary, paid on every dispatch
-  (:data:`_STEADY_STATE_BUDGET`).
-
-A single ratio conflates the two: its value depends on the events-per-worker
-count and on how fast the *baseline* runs on the current hardware, neither of
-which the isolation code controls. The blended ratio is still reported, as
-context, but it does not gate.
-
-This module records the measured numbers; it is run via ``tox -e benchmark``
-(it is excluded from the unit suite) and is re-run by later steps to catch
-regressions.
-
-Run with ``-s`` to see the comparison table on stdout.
+Run with ``tox -e benchmark``, and ``-s`` to see the table.
 """
 
 from __future__ import annotations
@@ -268,11 +240,7 @@ def results() -> dict[str, float]:
 
 
 def test_persistent_beats_spawn_per_event(results: dict[str, float]):
-    """The whole point of the persistent worker: it must beat spawn-per-event.
-
-    This is the regression guard — later steps re-run it to catch a
-    persistent-worker performance regression.
-    """
+    """A persistent worker is faster than a new process per event."""
     assert results['persistent'] < results['spawn'], (
         f'persistent ({results["persistent"]:.3f}s) should be faster than '
         f'spawn-per-event ({results["spawn"]:.3f}s)'

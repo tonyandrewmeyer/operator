@@ -289,9 +289,8 @@ def test_a_misspelt_keyword_is_reported_from_the_worker(tmp_path: pathlib.Path):
 
 @pytest.mark.parametrize('mocked', [{'sealed': True}, {}])
 def test_mocked_is_rejected_for_an_isolated_charm(tmp_path: pathlib.Path, mocked: dict[str, Any]):
-    # In this version mocked= is only for charms in the test process. The
-    # worker still handles mocking keywords (see the tests above, which reach
-    # it through _deploy), but deploy() never sends any.
+    # The worker can take mocking keywords (the tests above reach it through
+    # _deploy), but deploy() doesn't send any.
     root = write_charm(tmp_path / 'vault', files={'tests/unit/mocking.py': VAULT_MOCKING})
     with testing.Juju() as juju:
         with pytest.raises(testing.errors.JujuError, match=r'mocked=.*test process'):

@@ -1,64 +1,12 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Per-charm dependency isolation for ops.testing.
+"""Run one charm's events in a worker process with its own interpreter.
 
-:class:`IsolatedContext` lets a test drive *one* charm's event handler in an
-isolated subprocess with its own ``sys.path`` / venv. No convergence loop, no
-multi-charm model: just the ability to run a single on-disk charm when its
-dependency set conflicts with the test process's packages.
-
-The isolation mechanism is a subprocess + per-charm interpreter:
-
-* **Each charm runs in a separate process** whose Python interpreter is selected
-  per charm (for example, a per-charm venv's ``bin/python``).
-* **The parent test process never imports the charm.**  It reads only the
-  charm's metadata (``metadata.yaml`` / ``charmcraft.yaml``) and serialises the
-  :class:`~ops.testing.State` and event across the process boundary.
-* **Conflicting binary dependencies coexist** because each worker
-  process has a genuinely independent ``sys.path`` / site-packages.
-
-Subinterpreters are explicitly *not* used — they do not solve C-extension binary
-conflicts and cost the same serialisation overhead.
-
-Persistent vs spawn-per-event
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-By default the worker is **persistent**: one long-lived process per
-:class:`IsolatedContext`, spawned lazily on the first dispatch and reused for every
-subsequent event. The charm module is imported once, so only the first event
-pays interpreter startup and ``import ops`` cost. The worker is torn down at
-:meth:`IsolatedContext.close` (or when the context is used as a context manager)
-and, optionally, after an idle timeout.
-
-Spawn-per-event remains available as an explicit **debug mode**
-(``spawn_per_event=True``): a fresh process per event, so there is no shared
-interpreter state between events, and a debugger can attach to the single
-process. It is much slower and is intended only for debugging.
-
-A worker *crash* (the process dies without producing a response) surfaces as an
-:class:`IsolationError`; the harness never silently re-spawns a crashed worker
-mid-test — create a new :class:`IsolatedContext` to continue.
-
-Serialisation
-~~~~~~~~~~~~~
-The event and state cross the process boundary as **JSON**. The wire format is
-the typed codec in :mod:`scenario._state_serde`; it round-trips frozen dataclasses,
-``set``/``frozenset``/``tuple``, ``datetime``, ``pathlib.Path``, the
-``_EntityStatus`` family, pebble enums, ``bytes``, and ``pebble.Layer``.
-
-The per-charm worker's ``ops.testing`` must exactly match the parent's: there
-is no cross-version negotiation. Each payload embeds the producing
-``ops.testing`` version, and the receiving side asserts it matches its own,
-rejecting a mismatch with an :class:`~ops.testing.errors.IsolationError`
-naming both versions. Charms under test are deployed from local source paths,
-so their venvs are built by test infrastructure that already owns installing
-a matching ``ops.testing``. Only the charm's own runtime dependencies
-(``cryptography``, ``pydantic``, charm libs, ...) are expected to differ
-between the worker venv and the parent.
-
-Not public API: nothing in ``ops.testing`` exports :class:`IsolatedContext`.
-It is the building block for running several charms under one test when each
-needs its own dependencies.
+The parent never imports the charm: it reads the metadata from disk, and the
+event and ``State`` cross the process boundary as JSON (see ``_state_serde``).
+A worker is spawned on the first dispatch and kept for later ones. A worker
+that dies raises :class:`IsolationError` and isn't started again.
 """
 
 from __future__ import annotations
@@ -85,8 +33,7 @@ from .state import State, _CharmSpec, _Event
 class _HookFailedError(IsolationError):
     """The charm itself raised, as opposed to the worker failing to run it.
 
-    :class:`~ops.testing.Juju` treats this as a failed hook. Anyone else sees
-    an :class:`IsolationError`, as before.
+    :class:`~ops.testing.Juju` treats this as a failed hook.
     """
 
     def __init__(self, traceback: str, cause: BaseException | None = None):
@@ -502,89 +449,41 @@ class _PersistentWorker:
             self._close_pipes(proc)
 
 
-# IsolatedContext — the public Context-like entry point
+# IsolatedContext
 
 
 class IsolatedContext:
-    """Run a single on-disk charm's events in an isolated subprocess.
+    """Run a charm on disk in a worker process, much as :class:`~ops.testing.Context` runs one.
 
-    :class:`IsolatedContext` is the isolated counterpart of
-    :class:`~ops.testing.Context`. Instead of importing the charm into the
-    test process, it:
-
-    1. Reads the charm's metadata from disk (without importing the charm).
-    2. Serialises the event and input :class:`~ops.testing.State`.
-    3. Sends them to a worker subprocess running the charm's own
-       interpreter / venv.
-    4. Returns the output :class:`~ops.testing.State`.
-
-    The charm class is **never imported into the test process**, making it
-    safe to test charms whose dependencies would otherwise conflict with the
-    test runner's installed packages.
-
-    By default a single persistent worker is reused across events; call
-    :meth:`close` (or use the context as a context manager) to tear it down.
+    The worker is kept between events; call :meth:`close`, or use the context
+    as a context manager, to stop it.
 
     Args:
-        charm_source: Path to the charm repository root (must contain
-            ``src/charm.py`` and metadata files).
-        python_executable: Interpreter to run the charm with. Point this at a
-            per-charm venv's ``bin/python`` to isolate the charm's
-            dependencies. Defaults to the current interpreter.
-        extra_sys_path: Directories prepended to the worker's ``sys.path``
-            before the charm is imported. A lightweight alternative to a full
-            venv for offline tests.
+        charm_source: The charm's source directory, with ``src/charm.py``.
+        python_executable: The interpreter to run the charm with.
+        extra_sys_path: Directories put at the front of the worker's
+            ``sys.path`` before the charm is imported.
         python_path: Directories put at the front of the worker's
-            ``PYTHONPATH``, so they are importable before the worker itself
-            starts.
-        meta: Charm metadata dict (``metadata.yaml`` format). If omitted,
-            read from the charm's ``charmcraft.yaml`` (or, for older charms,
-            ``metadata.yaml``).
-        config: Charm config dict (``config.yaml`` format). If omitted, read
-            from the charm source in the same way as ``meta``.
-        actions: Charm actions dict (``actions.yaml`` format). If omitted,
-            read from the charm source in the same way as ``meta``.
-        app_name: Application name as seen by the charm. Defaults to the
-            charm name from the metadata.
-        unit_id: Unit ID. Defaults to ``0``.
-        juju_version: Juju agent version to simulate.
-        app_trusted: Whether the application has Juju trust, as for
-            :class:`~ops.testing.Context`.
-        charm_root: The charm directory the charm runs with, as for
-            :class:`~ops.testing.Context`.
-        mocking: Keyword arguments for the charm's own mocking, configured in
-            its ``pyproject.toml``. The worker opens that mocking, inside the
-            default mocks, around each event. ``None`` runs the charm with no
-            mocking at all.
-        dispatch_timeout: Seconds to let a single event run in the worker
-            before the worker is killed and :class:`IsolationError` raised.
-            Pass ``None`` to wait indefinitely, which is what a charm being
-            stepped through in a debugger needs.
-        spawn_per_event: If ``True``, use the spawn-per-event **debug** transport
-            — a fresh process per event, with no shared interpreter state and an
-            easy place to attach a debugger. Much slower; defaults to ``False``
-            (the persistent worker).
-        idle_timeout: If set, tear the persistent worker down after this many
-            seconds of inactivity. A later event lazily re-spawns a fresh
-            worker. Ignored in ``spawn_per_event`` mode.
-
-    Invariant:
-        The worker's ``ops.testing`` version must exactly match the parent
-        process's; there is no cross-version negotiation. A mismatch raises
-        :class:`IsolationError`, naming both versions.
-
-    For example, to run a charm in an existing virtual environment built for
-    it::
-
-        with IsolatedContext(
-            charm_source=pathlib.Path('./charms/myapp'),
-            python_executable='/path/to/myapp-venv/bin/python',
-        ) as ctx:
-            state_out = ctx.run(ctx.on.install(), State())
-        assert state_out.unit_status == ActiveStatus('ready')
+            ``PYTHONPATH``.
+        meta: The charm's metadata. Read from the charm source if omitted.
+        config: The charm's config options. Read from the charm source if
+            omitted.
+        actions: The charm's actions. Read from the charm source if omitted.
+        app_name: The application name. Defaults to the charm's name.
+        unit_id: The unit ID.
+        juju_version: The Juju agent version to simulate.
+        app_trusted: Whether the application has Juju trust.
+        charm_root: The charm directory the charm runs in.
+        mocking: Keyword arguments for the charm's own mocking. ``None`` runs
+            the charm with no mocking at all.
+        dispatch_timeout: Seconds to let one event run before the worker is
+            killed and :class:`IsolationError` raised. ``None`` waits
+            indefinitely.
+        spawn_per_event: Start a new process for every event.
+        idle_timeout: Stop the persistent worker after this many idle seconds.
+            The next event starts a new one.
     """
 
-    #: Use ``ctx.on.<event>(...)`` to construct events for :meth:`run`.
     #: Use ``ctx.on.<event>(...)`` to construct events for :meth:`run`.
     on: CharmEvents
 
@@ -620,7 +519,7 @@ class IsolatedContext:
             extra_sys_path=tuple(extra_sys_path),
         )
 
-        # Read metadata in the parent — the charm itself is never imported here.
+        # The parent reads the metadata; it never imports the charm.
         if meta is None or config is None or actions is None:
             disk_meta, disk_config, disk_actions = _load_charm_spec(source)
             meta = disk_meta if meta is None else meta

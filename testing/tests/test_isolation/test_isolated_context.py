@@ -41,7 +41,7 @@ def test_in_process_collision_is_real():
     finally:
         sys.path.remove(str(DEPS / 'confdep_v1'))
 
-    # Try to bring in v2 alongside it — Python returns the cached v1 module.
+    # Try to bring in v2 alongside it: Python returns the cached v1 module.
     sys.path.insert(0, str(DEPS / 'confdep_v2'))
     try:
         again = importlib.import_module('confdep')
@@ -155,8 +155,7 @@ _VENV_TEST_MARKER = pytest.mark.skipif(
 def _make_venv(tmp_path: pathlib.Path, name: str, confdep_src: pathlib.Path) -> str:
     """Create a venv with ops installed (inheriting from the parent) and pip-install confdep."""
     venv_dir = tmp_path / name
-    # Use --system-site-packages so the venv inherits the parent's ops/scenario
-    # install (required for pickle compatibility).
+    # The worker needs the same ops and ops.testing as the parent.
     venv.create(venv_dir, with_pip=True, system_site_packages=True)
     py = venv_dir / 'bin' / 'python'
     subprocess.check_call(
@@ -214,7 +213,7 @@ def test_missing_dep_raises_isolation_error():
     """
     ctx = IsolatedContext(
         charm_source=CHARMS / 'alpha',
-        # Deliberately NOT injecting confdep — the charm will fail to import.
+        # Without confdep, the charm fails to import.
     )
     with pytest.raises(IsolationError, match='confdep'):
         ctx.run(ctx.on.install(), State())

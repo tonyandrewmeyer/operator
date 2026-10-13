@@ -1,43 +1,14 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Model-level testing: drive several charms with Juju-shaped operations.
+"""Drive several charms together with Juju-shaped operations.
 
-:class:`~ops.testing.Context` runs *one* event against *one* charm. This
-module adds a layer above it: a :class:`Juju` owns a set of applications
-(:class:`App`), each with its own units and its own :class:`State` per unit,
-and exposes Juju-shaped operations (``deploy``, ``add_unit``, ``remove_unit``,
-``config``) that describe **intents rather than events**. The ``Juju`` works
-out the Juju-faithful event sequence each intent produces, and
-:meth:`Juju.settle` drains it in a convergence loop.
-
-A test therefore reads as a sequence of operations, a ``settle()``, and then
-assertions on the resulting state, rather than as a hand-written event
-sequence::
-
-    from ops import testing
-
-    juju = testing.Juju()
-    web = juju.deploy('./charms/myapp', num_units=2)
-    juju.config(web, {'log_level': 'debug'})
-    juju.settle()
-    assert web.leader.state.unit_status == testing.ActiveStatus('ready')
-
-A charm comes from a path to its source, or, for a charm that runs in the test
-process, from a :class:`CharmSpec` holding its class and metadata.
-
-:class:`Juju` is its own class, not a subclass of :class:`~ops.testing.Model`:
-``Model`` is a frozen dataclass held as ``State.model`` in every unit's
-:class:`State`, so ``Juju`` produces the ``Model`` values that go into each
-unit's state rather than being one. The identity it carries (``name``,
-``uuid``, ``type``, ``cloud_spec``) is stamped into every unit's
-:class:`State`, which stops two applications under the same ``Juju`` from
-disagreeing about which model they are in.
-
-Applications are related with ``integrate`` and unrelated with
-``remove_relation``. Whatever a unit writes to a relation databag, and the
-secrets it grants over a relation, reach the units on the other side, along
-with the events Juju would fire for them there.
+A :class:`Juju` holds applications, each with units that have their own
+:class:`State`. Operations such as :meth:`Juju.deploy` and
+:meth:`Juju.integrate` change the model straight away, and
+:meth:`Juju.settle` runs the events that Juju would run for them, along with
+whatever the charms' own changes cause on their peers and related
+applications.
 """
 
 from __future__ import annotations
@@ -976,7 +947,7 @@ class _JujuState:
     here instead.
     """
 
-    def __init__(self) -> None:
+    def __init__(self):
         self.apps: dict[str, App] = {}
         # One queue per application, in the order the applications were
         # deployed; settle() takes from them in turn (see Juju._next_queued).
@@ -1060,7 +1031,7 @@ class Juju:
         uuid: str | None = None,
         type: Literal['kubernetes', 'lxd'] = 'kubernetes',
         cloud_spec: CloudSpec | None = None,
-    ) -> None:
+    ):
         """Create a simulated Juju model, as ``juju add-model`` would.
 
         By default, the model name and UUID come from the test that creates
@@ -1193,12 +1164,10 @@ class Juju:
             state_template: The starting :class:`State` for every unit of the
                 application, including units added later with
                 :meth:`add_unit`. Use it for what ``Juju`` can't know, such as
-                ``Exec`` mocks and layers on containers, storage, resources,
-                secrets and stored state. ``Juju`` sets each unit's
-                ``leader``, ``planned_units``, ``model``, ``config`` and
-                ``relations`` itself, so the template may not set those:
-                relations come from peer endpoints, and config from
-                ``config=``.
+                ``Exec`` mocks and layers on containers, storage, resources
+                and stored state. ``Juju`` sets each unit's ``leader``,
+                ``planned_units``, ``model``, ``config``, ``relations`` and
+                ``secrets`` itself, so the template may not set those.
             trust: Whether the application has Juju trust, as with
                 ``juju deploy --trust``.
             num_units: How many units to deploy. Unit ``0`` is the leader.
@@ -1230,10 +1199,8 @@ class Juju:
                 function the charm configures in its ``pyproject.toml`` under
                 ``[tool.ops.testing.mocking]``, or a ``CharmSpec``'s
                 ``mocking``. Use it to vary how the charm's mocks behave in
-                this test. In this version, only for a charm that runs in the
-                test process, so not with ``isolated=True``. Only JSON values
-                are accepted, so that allowing it for an isolated charm later
-                is purely an addition.
+                this test. Only for a charm that runs in the test process, so
+                not with ``isolated=True``. The values must be JSON values.
             juju_version: The Juju agent version to simulate.
 
         Returns:
@@ -1260,8 +1227,8 @@ class Juju:
             )
         if isolated and mocked is not None:
             raise JujuError(
-                'mocked= is only for charms that run in the test process in this '
-                'version; deploy the charm without isolated=True to pass mocked=.'
+                'mocked= is only for charms that run in the test process, so it '
+                "can't be used with isolated=True."
             )
         return self._deploy(
             charm,

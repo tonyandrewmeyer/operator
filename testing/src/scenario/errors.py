@@ -62,14 +62,10 @@ class BadOwnerPath(RuntimeError):  # ruff: ignore[error-suffix-on-exception-name
 
 
 class IsolationError(RuntimeError):
-    """Raised when a charm event fails inside the isolated worker subprocess.
+    """Raised when a charm can't be run in its worker process, or imported into the test process.
 
-    This wraps any exception raised by the worker - either an uncaught charm
-    exception or a worker-infrastructure error (for example, the charm module
-    could not be imported, or the worker process crashed without producing a
-    response).
-
-    The original traceback from the worker is included in the message.
+    For example, the worker process crashed or timed out, or the charm's
+    module couldn't be imported. The message includes the worker's traceback.
     """
 
 

@@ -231,7 +231,7 @@ def test_fresh_context_recovers_after_crash():
 def test_charm_exception_keeps_worker_reusable():
     """A *caught* charm error (not a crash) leaves the worker alive and reusable."""
     # alpha without confdep raises ImportError inside the worker, which the
-    # worker catches and reports — the process survives.
+    # worker catches and reports, and the process survives.
     ctx = IsolatedContext(charm_source=ALPHA)  # no confdep injected
     with pytest.raises(IsolationError, match='confdep'):
         ctx.run(ctx.on.install(), State())

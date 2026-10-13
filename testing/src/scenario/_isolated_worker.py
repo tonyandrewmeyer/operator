@@ -1,72 +1,15 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Subprocess worker that runs charm events in an isolated environment.
+"""The worker process that :mod:`scenario._isolation` starts.
 
-The worker runs under the (potentially per-charm) Python interpreter selected in
-:class:`scenario._isolation.IsolatedContext`. The whole point is that *this* process may
-have a completely different ``sys.path`` / set of installed packages than the
-parent test process, so two charms with conflicting dependencies can each run in
-their own world.
+``python -m scenario._isolated_worker --serve`` reads framed JSON requests
+from stdin and writes responses to stdout, importing the charm once.
+``python -m scenario._isolated_worker <request> <response>`` handles one
+request, from a file, and exits.
 
-Two transports
-~~~~~~~~~~~~~~
-**Persistent (default).** Invoked as::
-
-    python -m scenario._isolated_worker --serve
-
-The worker enters a serve loop, reading framed JSON requests from ``stdin`` and
-writing framed JSON responses to ``stdout`` (see :mod:`scenario._worker_protocol`
-for the framing). The charm module is imported once and cached, so subsequent
-events on the same charm avoid both interpreter startup and ``import`` cost.
-This is the mode that makes a convergence run affordable.
-
-**Spawn-per-event (debug).** Invoked as::
-
-    python -m scenario._isolated_worker <request_file> <response_file>
-
-The worker reads one request from ``request_file``, writes one response to
-``response_file``, and exits. A fresh process per event means no shared
-interpreter state between events, and a debugger can attach to the single
-process; it is much slower and is offered only as an explicit debug mode.
-
-Request / response shape
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-A request dict has the keys:
-
-- ``cmd`` (``str``, persistent only): ``"run"`` or ``"shutdown"``.
-- ``charm_source`` (``str``): path to the charm repo root (``src/``, ``lib/``).
-- ``extra_sys_path`` (``list[str]``): prepended to ``sys.path`` before import.
-- ``meta`` / ``config`` / ``actions`` (``dict | None``): charm spec.
-- ``app_name`` (``str``), ``unit_id`` (``int``), ``juju_version`` (``str``).
-- ``app_trusted`` (``bool``), ``charm_root`` (``str | None``): as for ``Context``.
-- ``mocking`` (``dict | None``): the keyword arguments for the charm's own
-  mocking; ``None`` runs the charm with no mocking at all.
-- ``workload_root`` (``str | None``, optional): the directory that keeps the
-  unit's container and storage filesystems between dispatches; ``None``
-  leaves them in the ``Context``'s own temporary directory, wiped on each run.
-- ``filesystem_root`` (``str | None``, optional): the unit's own filesystem
-  root, for the filesystem default; ``None`` leaves file access alone.
-- ``machines`` (``dict[str, int]``, optional): on a machine model, the
-  machine each unit in the model is on, by unit name. It gives the unit its
-  ``JUJU_MACHINE_ID`` and the host names of the hostname default.
-- ``secret_seed`` (``str | None``, optional): makes the IDs of the secrets the
-  charm creates depend only on this string; ``None`` leaves them random.
-- ``event`` (``str``): the JSON wire form of the input ``_Event``.
-- ``state_in`` (``str``): the JSON wire form of the input ``State``.
-
-A response dict is either ``{"state_out": <str>}`` (the JSON wire form of the
-output ``State``) or ``{"error": <str>}`` (a formatted traceback). When the
-error is the charm's own exception, rather than a problem running it, the
-response also has ``"hook_failed": true``. A worker *crash* (process death)
-is detected by the parent as a missing response, not via this dict.
-
-Serialisation compatibility
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``State`` and ``_Event`` are round-tripped through
-:mod:`scenario._state_serde`. The parent and
-worker must therefore have the **same** ``ops`` version; only the charm's *own*
-runtime dependencies may differ.
+A response is ``{"state_out": ...}`` or ``{"error": <traceback>}``, with
+``"hook_failed": true`` when the error is the charm's own.
 """
 
 from __future__ import annotations

@@ -10,6 +10,13 @@ themselves.
 
 from __future__ import annotations
 
+import typing as _typing
+
+if _typing.TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ._deployment import Dispatch
+
 
 class ContextSetupError(RuntimeError):
     """Raised by Context when setup fails."""
@@ -74,6 +81,18 @@ class JujuError(RuntimeError):
 
     For example: removing the last unit of an application, referring to an
     application that was never deployed, removing units in a form that does
-    not match the application's substrate, or a convergence loop that does not
-    terminate.
+    not match the application's substrate, a convergence loop that does not
+    terminate, or a unit going into error while settling.
     """
+
+    trace: Sequence[Dispatch] | None
+    """The events :meth:`~ops.testing.Juju.settle` dispatched, if a unit went into error.
+
+    That's what ``settle()`` would have returned. The dispatches that failed
+    have the charm's traceback in :attr:`~ops.testing.Dispatch.error`. For any
+    other error, this is ``None``.
+    """
+
+    def __init__(self, *args: object, trace: Sequence[Dispatch] | None = None):
+        super().__init__(*args)
+        self.trace = trace

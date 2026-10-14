@@ -372,8 +372,7 @@ class _InProcessRunner(_Runner):
             try:
                 return ctx.run(event, state)
             except UncaughtCharmError as e:
-                cause = _charm_dispatch.charm_exception(e)
-                raise _HookFailedError(_charm_dispatch.charm_traceback(e), cause) from cause
+                raise _HookFailedError(_charm_dispatch.charm_traceback(e)) from None
 
     def close(self) -> None:
         self._contexts.clear()
@@ -985,10 +984,9 @@ class _JujuState:
         self.removable_revisions: dict[str, int] = {}
         # Secrets the test added, as a user would with juju add-secret, by ID.
         self.user_secrets: dict[str, _UserSecret] = {}
-        # Units whose charm raised, keyed by application name and unit ID,
-        # with what it raised. Like a unit in a failed hook in Juju, each
-        # gets no more events.
-        self.failed: dict[tuple[str, int], _HookFailedError] = {}
+        # Units whose charm raised, as application name and unit ID. Like a
+        # unit in a failed hook in Juju, each gets no more events.
+        self.failed: set[tuple[str, int]] = set()
 
     def pending(self) -> int:
         """How many entries are queued, across every application."""
@@ -1953,13 +1951,14 @@ class Juju:
                 and is reported as soon as it happens; otherwise, the limit
                 grows with the number of units in the model. The message ends
                 with the last events dispatched. Also raised, after settling,
-                if a charm raised: the message names each unit put in error,
-                with the charm's traceback, and the error is chained to the
-                first exception.
+                if a charm raised: the message names each unit put in error
+                and the event it failed in, with the first traceback, and the
+                error's ``trace`` is what this would have returned. The
+                dispatches that failed have the charm's traceback in
+                ``error``.
         """
         self._check_open()
         self._state.trace = []
-        already_failed = set(self._state.failed)
         seen: dict[tuple[str, int, str, str], State] = {}
         dispatched = 0
         while (queued := self._next_queued()) is not None:
@@ -1996,13 +1995,16 @@ class Juju:
                 seen[key] = unit._state
             self._dispatch(app, unit, event, fresh_process=check_flapping)
             dispatched += 1
-        failed = [(k, e) for k, e in self._state.failed.items() if k not in already_failed]
+        trace = list(self._state.trace)
+        failed = [d for d in trace if d.error is not None]
         if failed:
-            details = '\n'.join(f'{app}/{unit_id}:\n{e.traceback}' for (app, unit_id), e in failed)
+            units = ', '.join(f'{d.unit_name} in {d.event.name}' for d in failed)
             raise JujuError(
-                f'{len(failed)} unit(s) went into error status while settling.\n{details}'
-            ) from (failed[0][1].cause or failed[0][1])
-        return list(self._state.trace)
+                f'{len(failed)} unit(s) went into error status while settling: {units}.\n'
+                f'{failed[0].unit_name} failed in {failed[0].event.name} with:\n{failed[0].error}',
+                trace=trace,
+            )
+        return trace
 
     def _unit_count(self) -> int:
         count = 0
@@ -2304,7 +2306,7 @@ class Juju:
         unit._state = dataclasses.replace(
             unit._state, unit_status=ErrorStatus(f'hook failed: "{hook}"')
         )
-        self._state.failed[app.name, unit.id] = error
+        self._state.failed.add((app.name, unit.id))
         self._state.trace.append(
             Dispatch(
                 event,

@@ -659,9 +659,9 @@ def test_only_the_leader_can_write_application_data(
     # ops refuses the write on the follower, as Juju would, so the hook fails.
     with pytest.raises(testing.errors.JujuError, match='provider/1') as exc_info:
         juju.settle()
-    uncaught = exc_info.value.__cause__
-    assert isinstance(uncaught, testing.errors.UncaughtCharmError)
-    assert isinstance(uncaught.__cause__, ops.RelationDataAccessError)
+    assert exc_info.value.trace is not None
+    (failed,) = [d for d in exc_info.value.trace if d.error is not None]
+    assert 'RelationDataAccessError' in cast('str', failed.error)
     assert prov.units[1].state.unit_status == testing.ErrorStatus(
         'hook failed: "db-relation-joined"'
     )
@@ -694,24 +694,25 @@ def test_a_charm_that_raises_puts_its_unit_in_error(
 ):
     monkeypatch.delenv('SCENARIO_BARE_CHARM_ERRORS', raising=False)
     failing = juju.deploy(testing.CharmSpec(FailingInstall, meta=FAILING_META))
-    with pytest.raises(testing.errors.JujuError, match='failing/0') as exc_info:
+    with pytest.raises(testing.errors.JujuError, match='failing/0 in install') as exc_info:
         juju.settle()
-    uncaught = exc_info.value.__cause__
-    assert isinstance(uncaught, testing.errors.UncaughtCharmError)
-    assert isinstance(uncaught.__cause__, RuntimeError)
+    # Not chained, so that in-process and isolated charms fail the same way.
+    assert exc_info.value.__cause__ is None
+    assert 'UncaughtCharmError' in str(exc_info.value)
     assert 'install went wrong' in str(exc_info.value)
     # The status the charm set before raising is discarded with everything else.
     assert failing.leader.state.unit_status == testing.ErrorStatus('hook failed: "install"')
 
 
-def test_bare_charm_errors_change_the_cause_but_not_the_outcome(
+def test_bare_charm_errors_change_the_traceback_but_not_the_outcome(
     juju: testing.Juju, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv('SCENARIO_BARE_CHARM_ERRORS', '1')
     failing = juju.deploy(testing.CharmSpec(FailingInstall, meta=FAILING_META))
     with pytest.raises(testing.errors.JujuError, match='failing/0') as exc_info:
         juju.settle()
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert exc_info.value.__cause__ is None
+    assert 'RuntimeError: install went wrong' in str(exc_info.value)
     assert 'UncaughtCharmError' not in str(exc_info.value)
     assert failing.leader.state.unit_status == testing.ErrorStatus('hook failed: "install"')
 
@@ -731,16 +732,61 @@ def test_a_unit_in_error_gets_no_more_events_and_the_rest_settle(juju: testing.J
     assert failing.leader.state.unit_status == testing.ErrorStatus('hook failed: "install"')
 
 
-def test_the_trace_records_the_charm_s_traceback(juju: testing.Juju):
+def test_the_error_s_trace_records_the_charm_s_traceback(juju: testing.Juju):
     failing = juju.deploy(testing.CharmSpec(FailingInstall, meta=FAILING_META))
-    with pytest.raises(testing.errors.JujuError):
+    other = juju.deploy(provider())
+    with pytest.raises(testing.errors.JujuError) as exc_info:
         juju.settle()
-    (dispatch,) = [d for d in juju._state.trace if d.error is not None]
+    trace = exc_info.value.trace
+    assert trace is not None
+    (dispatch,) = [d for d in trace if d.error is not None]
     assert dispatch.unit_name == failing.leader.name
     assert dispatch.event.name == 'install'
     assert dispatch.error is not None
     assert 'RuntimeError: install went wrong' in dispatch.error
-    assert all(d.error is None for d in juju._state.trace if d is not dispatch)
+    assert dispatch.state_out.unit_status == testing.ErrorStatus('hook failed: "install"')
+    # The rest of the model settled, and that's in the trace too.
+    assert [d.event.name for d in trace if d.unit_name == other.leader.name][-1] == 'start'
+
+
+class FailingStart(ops.CharmBase):
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.start, self._on_start)
+
+    def _on_start(self, _: ops.StartEvent):
+        raise RuntimeError(f'{self.unit.name} could not start')
+
+
+def test_the_error_names_every_unit_in_error_and_its_event(juju: testing.Juju):
+    juju.deploy(testing.CharmSpec(FailingInstall, meta=FAILING_META))
+    juju.deploy(testing.CharmSpec(FailingStart, meta={'name': 'late'}), num_units=2)
+    with pytest.raises(testing.errors.JujuError) as exc_info:
+        juju.settle()
+    message = str(exc_info.value)
+    assert '3 unit(s) went into error status' in message
+    assert 'failing/0 in install' in message
+    assert 'late/0 in start' in message
+    assert 'late/1 in start' in message
+    # Only the first traceback is in the message; the rest are in the trace.
+    assert 'install went wrong' in message
+    assert 'could not start' not in message
+    assert exc_info.value.trace is not None
+    errors = {d.unit_name: d.error for d in exc_info.value.trace if d.error is not None}
+    assert sorted(errors) == ['failing/0', 'late/0', 'late/1']
+    assert 'late/1 could not start' in errors['late/1']
+
+
+def test_other_juju_errors_have_no_trace(juju: testing.Juju):
+    prov = juju.deploy(testing.CharmSpec(ChattyProvider, meta=PROVIDER_META))
+    req = juju.deploy(testing.CharmSpec(ChattyProvider, meta=REQUIRER_META))
+    juju.integrate(prov, req)
+    with pytest.raises(testing.errors.JujuError, match='Did not converge') as exc_info:
+        juju.settle()
+    assert exc_info.value.trace is None
+    with pytest.raises(testing.errors.JujuError, match='already deployed') as exc_info:
+        juju.deploy(provider())
+    assert exc_info.value.trace is None
 
 
 @pytest.mark.parametrize('bare', [False, True])
@@ -772,6 +818,12 @@ def test_an_isolated_charm_that_raises_puts_its_unit_in_error(
             juju.settle()
         assert failing.leader.state.unit_status == testing.ErrorStatus('hook failed: "install"')
     assert ('UncaughtCharmError' in str(exc_info.value)) is not bare
+    assert 'failing/0 in install' in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.trace is not None
+    (dispatch,) = [d for d in exc_info.value.trace if d.error is not None]
+    assert dispatch.unit_name == 'failing/0'
+    assert 'RuntimeError: install went wrong' in cast('str', dispatch.error)
 
 
 def test_a_follower_application_data_write_that_bypasses_ops_is_refused(juju: testing.Juju):

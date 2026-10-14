@@ -36,11 +36,9 @@ class _HookFailedError(IsolationError):
     :class:`~ops.testing.Juju` treats this as a failed hook.
     """
 
-    def __init__(self, traceback: str, cause: BaseException | None = None):
+    def __init__(self, traceback: str):
         super().__init__(f'Isolated charm run failed:\n{traceback}')
         self.traceback = traceback
-        # The exception itself, when the charm ran in this process.
-        self.cause = cause
 
 
 def _isolated_error(response: Mapping[str, Any]) -> IsolationError:

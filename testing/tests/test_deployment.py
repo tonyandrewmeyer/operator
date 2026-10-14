@@ -980,6 +980,20 @@ def test_isolated_units_share_one_worker():
         assert pids != {f'pid={os.getpid()}'}  # and it is not the test process
 
 
+def test_an_isolated_app_keeps_its_worker_until_the_juju_is_closed():
+    with testing.Juju(model_name='iso') as j:
+        app = j._deploy(_ISOLATION / 'charms' / 'pid', python_executable=sys.executable)
+        j.settle()
+        first = app.leader.state.unit_status.message
+        j.add_unit(app)
+        j.settle()
+        assert {unit.state.unit_status.message for unit in app.units} == {first}
+        pid = int(first.removeprefix('pid='))
+        os.kill(pid, 0)  # Still running.
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def test_isolated_app_runs_config(tmp_path: pathlib.Path):
     # config dispatches through the same runner as the startup sequence, but
     # config-changed outside startup is worth its own isolated check.

@@ -8,7 +8,6 @@ These cover the behaviours required of the persistent worker:
 - lazy spawn on first dispatch;
 - worker reuse across dispatches (one long-lived process);
 - explicit teardown via ``close()`` / context-manager, and re-spawn afterwards;
-- idle-timeout teardown;
 - the spawn-per-event debug mode;
 - worker crash surfacing as ``IsolationError`` with no silent re-spawn.
 """
@@ -17,7 +16,6 @@ from __future__ import annotations
 
 import pathlib
 import re
-import time
 
 import pytest
 from scenario import ActiveStatus, State
@@ -100,75 +98,6 @@ def test_context_manager_closes_worker():
     assert ctx._worker is None
     proc.wait(timeout=5)
     assert proc.poll() is not None
-
-
-# Idle timeout
-
-
-def _wait_until_torn_down(ctx, timeout: float = 10.0) -> None:
-    """Block until the idle timer has closed the worker, or fail."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if ctx._worker._proc is None:
-            return
-        time.sleep(0.02)
-    pytest.fail(f'worker was still running {timeout}s after an idle teardown was due')
-
-
-def test_idle_timeout_tears_worker_down():
-    ctx = IsolatedContext(charm_source=ALPHA, extra_sys_path=V1, idle_timeout=0.2)
-    ctx.run(ctx.on.install(), State())
-    proc = ctx._worker._proc
-    assert proc.poll() is None
-    _wait_until_torn_down(ctx)
-    proc.wait(timeout=5)
-    assert proc.poll() is not None
-    ctx.close()
-
-
-def test_dispatch_after_idle_timeout_respawns():
-    ctx = IsolatedContext(charm_source=ALPHA, extra_sys_path=V1, idle_timeout=0.2)
-    ctx.run(ctx.on.install(), State())
-    first_pid = ctx._worker._proc.pid
-    _wait_until_torn_down(ctx)
-    out = ctx.run(ctx.on.start(), State())  # re-spawn a fresh worker
-    assert out.unit_status.name == 'active'
-    assert ctx._worker._proc.pid != first_pid
-    ctx.close()
-
-
-def test_idle_timer_does_not_kill_a_busy_worker():
-    """A timer superseded by a later dispatch is ignored when it fires.
-
-    Asserted against the generation counter rather than the clock: a
-    wall-clock version of this test fails on a loaded runner for reasons that
-    have nothing to do with the code.
-    """
-    ctx = IsolatedContext(charm_source=ALPHA, extra_sys_path=V1, idle_timeout=30.0)
-    ctx.run(ctx.on.install(), State())
-    worker = ctx._worker
-    pid = worker._proc.pid
-    stale = worker._timer_generation - 1
-
-    worker._on_idle(stale)
-    assert worker._proc is not None
-    assert worker._proc.pid == pid
-
-    # The current generation is the one that does tear it down.
-    worker._on_idle(worker._timer_generation)
-    assert worker._proc is None
-    ctx.close()
-
-
-def test_each_dispatch_supersedes_the_previous_idle_timer():
-    """Every dispatch bumps the generation, so the previous timer is stale."""
-    ctx = IsolatedContext(charm_source=ALPHA, extra_sys_path=V1, idle_timeout=30.0)
-    ctx.run(ctx.on.install(), State())
-    first = ctx._worker._timer_generation
-    ctx.run(ctx.on.start(), State())
-    assert ctx._worker._timer_generation > first
-    assert ctx._worker._proc is not None
-    ctx.close()
 
 
 # Spawn-per-event debug mode

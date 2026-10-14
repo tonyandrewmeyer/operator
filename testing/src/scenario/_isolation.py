@@ -211,26 +211,21 @@ class _PersistentWorker:
     protocol over the worker's stdin/stdout (see
     :mod:`scenario._worker_protocol`).
 
-    Thread-safety: a reentrant lock serialises dispatches and the idle-timeout
-    teardown, so the idle timer (which fires on a background thread) can never
-    race a dispatch.
+    The worker lives until :meth:`close`, and one that crashes isn't
+    started again. A reentrant lock serialises dispatches and teardown.
     """
 
     def __init__(
         self,
         env: _IsolatedEnv,
         child_env: dict[str, str],
-        idle_timeout: float | None = None,
         dispatch_timeout: float | None = None,
     ):
         self._env = env
         self._child_env = child_env
-        self._idle_timeout = idle_timeout
         self._dispatch_timeout = dispatch_timeout
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.RLock()
-        self._timer: threading.Timer | None = None
-        self._timer_generation = 0
         self._crashed = False
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=200)
         self._stderr_thread: threading.Thread | None = None
@@ -263,31 +258,6 @@ class _PersistentWorker:
         except (ValueError, OSError):
             pass  # Stream closed underneath us; nothing more to drain.
 
-    # Idle timer
-
-    def _arm_timer(self) -> None:
-        if self._idle_timeout is None:
-            return
-        self._timer_generation += 1
-        generation = self._timer_generation
-        self._timer = threading.Timer(self._idle_timeout, self._on_idle, args=(generation,))
-        self._timer.daemon = True
-        self._timer.start()
-
-    def _cancel_timer(self) -> None:
-        # Bump the generation so any already-fired-but-waiting timer is ignored.
-        self._timer_generation += 1
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-
-    def _on_idle(self, generation: int) -> None:
-        with self._lock:
-            if generation != self._timer_generation:
-                return  # A newer dispatch superseded this timer; do nothing.
-            # Idle teardown is a *clean* shutdown: the next dispatch may re-spawn.
-            self.close()
-
     # Crash handling
 
     @staticmethod
@@ -301,7 +271,6 @@ class _PersistentWorker:
 
     def _mark_crashed(self) -> None:
         self._crashed = True
-        self._cancel_timer()
         proc = self._proc
         if proc is not None:
             try:
@@ -379,15 +348,13 @@ class _PersistentWorker:
                     'IsolatedContext to run further events.'
                 )
 
-            self._cancel_timer()
-
             if self._proc is not None and self._proc.poll() is not None:
                 # Started earlier but has since exited unexpectedly: a crash.
                 self._mark_crashed()
                 raise IsolationError(self._crash_message())
 
             if self._proc is None:
-                self._spawn()  # Lazy spawn on first dispatch (or after idle teardown).
+                self._spawn()  # Lazy spawn on first dispatch.
 
             assert self._proc is not None
             assert self._proc.stdin is not None and self._proc.stdout is not None
@@ -413,17 +380,14 @@ class _PersistentWorker:
 
             if 'error' in response:
                 # A clean charm error: the worker caught it and is still alive,
-                # so it stays reusable. Re-arm the idle timer and raise.
-                self._arm_timer()
+                # so it stays reusable.
                 raise _isolated_error(response)
 
-            self._arm_timer()
             return _state_serde.decode_state(response['state_out'])
 
     def close(self) -> None:
         """Shut the worker down cleanly (idempotent)."""
         with self._lock:
-            self._cancel_timer()
             proc = self._proc
             self._proc = None
             if proc is None:
@@ -478,8 +442,6 @@ class IsolatedContext:
             killed and :class:`IsolationError` raised. ``None`` waits
             indefinitely.
         spawn_per_event: Start a new process for every event.
-        idle_timeout: Stop the persistent worker after this many idle seconds.
-            The next event starts a new one.
     """
 
     #: Use ``ctx.on.<event>(...)`` to construct events for :meth:`run`.
@@ -502,7 +464,6 @@ class IsolatedContext:
         charm_root: str | pathlib.Path | None = None,
         mocking: Mapping[str, Any] | None = None,
         spawn_per_event: bool = False,
-        idle_timeout: float | None = None,
         dispatch_timeout: float | None = _DEFAULT_DISPATCH_TIMEOUT,
     ):
         self.on = CharmEvents()
@@ -544,7 +505,6 @@ class IsolatedContext:
 
         self.dispatch_timeout = dispatch_timeout
         self._spawn_per_event = spawn_per_event
-        self._idle_timeout = idle_timeout
         self._child_env = _child_environ(python_path)
         self._worker: _PersistentWorker | None = None
 
@@ -623,9 +583,7 @@ class IsolatedContext:
         if self._spawn_per_event:
             return _dispatch_spawn(self._env, self._child_env, request, self.dispatch_timeout)
         if self._worker is None:
-            self._worker = _PersistentWorker(
-                self._env, self._child_env, self._idle_timeout, self.dispatch_timeout
-            )
+            self._worker = _PersistentWorker(self._env, self._child_env, self.dispatch_timeout)
         return self._worker.dispatch(request)
 
     def close(self) -> None:

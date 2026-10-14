@@ -100,6 +100,22 @@ def uv_charm(root: pathlib.Path, dependencies: list[str], **pyproject: str) -> p
     return root
 
 
+#: A ``python`` plugin part that installs ``requirements.txt``.
+PYTHON_PLUGIN = """
+    type: charm
+    parts:
+      charm:
+        plugin: python
+        source: .
+        python-requirements: [requirements.txt]
+"""
+
+
+def python_charm(root: pathlib.Path, requirements: str) -> pathlib.Path:
+    """Write alpha's charm with a ``python`` plugin part and ``requirements``."""
+    return write_charm(root, {'charmcraft.yaml': PYTHON_PLUGIN, 'requirements.txt': requirements})
+
+
 STATUS_CHARM = """
     import importlib
 
@@ -133,7 +149,7 @@ def _charmcraft(root: pathlib.Path, text: str) -> pathlib.Path:
     return root
 
 
-@pytest.mark.parametrize('plugin', ['charm', 'python', 'uv'])
+@pytest.mark.parametrize('plugin', ['python', 'uv'])
 def test_detects_the_plugin_from_charmcraft_yaml(tmp_path: pathlib.Path, plugin: str):
     root = _charmcraft(
         tmp_path,
@@ -153,22 +169,36 @@ def test_detects_the_plugin_from_charmcraft_yaml(tmp_path: pathlib.Path, plugin:
     assert part[f'{plugin}-extra'] == 'x'
 
 
+CHARM_PLUGIN_ERROR = (
+    r'does not support the charm plugin, which is deprecated\. Move the charm to the uv or '
+    r'python plugin, or pass requirements='
+)
+
+
+def test_the_charm_plugin_is_an_error(tmp_path: pathlib.Path):
+    root = _charmcraft(tmp_path, 'parts:\n  deps:\n    plugin: nil\n  build:\n    plugin: charm\n')
+    with pytest.raises(testing.errors.JujuError, match=rf"part 'build'.*{CHARM_PLUGIN_ERROR}"):
+        _environment.detect_plugin(root, 'app')
+
+
 def test_a_part_named_charm_with_no_plugin_is_the_charm_plugin(tmp_path: pathlib.Path):
     root = _charmcraft(tmp_path, 'parts:\n  charm:\n    charm-requirements: [reqs.txt]\n')
-    assert _environment.detect_plugin(root, 'app') == (
-        'charm',
-        {'charm-requirements': ['reqs.txt']},
-    )
+    with pytest.raises(testing.errors.JujuError, match=rf"part 'charm'.*{CHARM_PLUGIN_ERROR}"):
+        _environment.detect_plugin(root, 'app')
 
 
 def test_charmcraft_yaml_with_no_parts_is_the_charm_plugin(tmp_path: pathlib.Path):
     root = _charmcraft(tmp_path, 'type: charm\nname: x\n')
     (root / 'uv.lock').write_text('')
-    assert _environment.detect_plugin(root, 'app') == ('charm', {})
+    with pytest.raises(testing.errors.JujuError, match=rf'has no parts.*{CHARM_PLUGIN_ERROR}'):
+        _environment.detect_plugin(root, 'app')
 
 
 def test_with_no_charmcraft_yaml_a_uv_lock_means_uv(tmp_path: pathlib.Path):
-    assert _environment.detect_plugin(tmp_path, 'app') == ('charm', {})
+    with pytest.raises(
+        testing.errors.JujuError, match=rf'no charmcraft.yaml or uv.lock.*{CHARM_PLUGIN_ERROR}'
+    ):
+        _environment.detect_plugin(tmp_path, 'app')
     (tmp_path / 'uv.lock').write_text('')
     assert _environment.detect_plugin(tmp_path, 'app') == ('uv', {})
 
@@ -259,43 +289,10 @@ def _without_ops(plan: _environment._Plan) -> list[str]:
     return [r for r in plan.requirements if r not in _environment._ops_requirements()]
 
 
-def test_charm_plugin_requirements(tmp_path: pathlib.Path):
-    root = _charmcraft(
-        tmp_path,
-        """
-        parts:
-          charm:
-            charm-python-packages: [setuptools]
-            charm-binary-python-packages: [cryptography==42.0]
-        """,
-    )
-    (root / 'requirements.txt').write_text('ops==2.17.0\nops-scenario==7.0\nrequests==2.32\n')
-    (root / 'lib').mkdir()
-    (root / 'lib' / 'lib.py').write_text('PYDEPS = ["pydantic>=2"]\n')
-    plan = _plan(root)
-    assert plan.plugin == 'charm'
-    # The charm's own ops and ops.testing are left out: the test's are used.
-    assert _without_ops(plan) == [
-        'requests==2.32',
-        'setuptools',
-        'cryptography==42.0',
-        'pydantic>=2',
-    ]
-    assert plan.requirements[-len(_environment._ops_requirements()) :] == tuple(
-        _environment._ops_requirements()
-    )
-
-
-def test_charm_plugin_requirements_files_from_charmcraft_yaml(tmp_path: pathlib.Path):
-    root = _charmcraft(tmp_path, 'parts:\n  charm:\n    charm-requirements: [a.txt, b.txt]\n')
-    (root / 'requirements.txt').write_text('ignored\n')
-    (root / 'a.txt').write_text('a\n')
-    (root / 'b.txt').write_text('b\n')
-    assert _without_ops(_plan(root)) == ['a', 'b']
-
-
 def test_a_missing_requirements_file_suggests_requirements(tmp_path: pathlib.Path):
-    root = _charmcraft(tmp_path, 'parts:\n  charm:\n    charm-requirements: [missing.txt]\n')
+    root = _charmcraft(
+        tmp_path, 'parts:\n  charm:\n    plugin: python\n    python-requirements: [missing.txt]\n'
+    )
     with pytest.raises(testing.errors.JujuError, match=r'missing.txt.*requirements='):
         _plan(root)
 
@@ -328,7 +325,7 @@ def test_python_plugin_requirements(tmp_path: pathlib.Path):
 
 
 def test_mocking_dependency_groups_are_added(tmp_path: pathlib.Path):
-    root = _charmcraft(tmp_path, 'type: charm\n')
+    root = _charmcraft(tmp_path, 'type: charm\nparts:\n  charm:\n    plugin: python\n')
     (root / 'pyproject.toml').write_text(
         textwrap.dedent("""
             [dependency-groups]
@@ -346,7 +343,7 @@ def test_mocking_dependency_groups_are_added(tmp_path: pathlib.Path):
 
 
 def test_an_undeclared_mocking_dependency_group_is_an_error(tmp_path: pathlib.Path):
-    root = _charmcraft(tmp_path, 'type: charm\n')
+    root = _charmcraft(tmp_path, 'type: charm\nparts:\n  charm:\n    plugin: python\n')
     (root / 'pyproject.toml').write_text(
         '[tool.ops.testing.mocking]\ndependency-groups = ["unit"]\n'
     )
@@ -369,16 +366,16 @@ def test_ops_requirements_are_what_ops_needs():
 def test_the_cache_key_changes_with_each_input(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ):
-    plan = _environment._Plan('charm', ('a==1', 'b==2'), {'pyproject.toml': b'x'})
+    plan = _environment._Plan('uv', ('a==1', 'b==2'), {'pyproject.toml': b'x'})
     key = _environment._cache_key(plan)
     assert key == _environment._cache_key(
-        _environment._Plan('charm', ('b==2', 'a==1'), {'pyproject.toml': b'x'})
+        _environment._Plan('uv', ('b==2', 'a==1'), {'pyproject.toml': b'x'})
     )
     others = [
         _environment._Plan('python', ('a==1', 'b==2'), {'pyproject.toml': b'x'}),
-        _environment._Plan('charm', ('a==1', 'b==3'), {'pyproject.toml': b'x'}),
-        _environment._Plan('charm', ('a==1', 'b==2'), {'pyproject.toml': b'y'}),
-        _environment._Plan('charm', ('a==1', 'b==2'), {'pyproject.toml': b'x', 'uv.lock': b''}),
+        _environment._Plan('uv', ('a==1', 'b==3'), {'pyproject.toml': b'x'}),
+        _environment._Plan('uv', ('a==1', 'b==2'), {'pyproject.toml': b'y'}),
+        _environment._Plan('uv', ('a==1', 'b==2'), {'pyproject.toml': b'x', 'uv.lock': b''}),
     ]
     assert len({key, *(_environment._cache_key(p) for p in others)}) == 5
     monkeypatch.setattr(ops.version, 'version', '0.0.1')
@@ -442,8 +439,8 @@ def test_conflicting_dependencies_settle_together(
     # The test process has confdep 2.0, which beta needs.
     monkeypatch.delitem(sys.modules, 'confdep', raising=False)
     monkeypatch.setattr(sys, 'path', [str(_ISOLATION / 'deps' / 'confdep_v2'), *sys.path])
-    # alpha needs confdep 1.0, and says so in its requirements.txt.
-    alpha_root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
+    # alpha needs confdep 1.0, and says so in its uv.lock.
+    alpha_root = uv_charm(tmp_path / 'alpha', ['confdep==1.0'])
     alpha = juju.deploy(alpha_root, isolated=True, num_units=2)
     beta = juju.deploy(_ISOLATION / 'charms' / 'beta')
     juju.settle()
@@ -463,7 +460,8 @@ def test_conflicting_dependencies_settle_together(
 def test_two_isolated_charms_with_conflicting_dependencies(
     juju: testing.Juju, tmp_path: pathlib.Path, cache: pathlib.Path
 ):
-    alpha_root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
+    # One of each supported plugin.
+    alpha_root = python_charm(tmp_path / 'alpha', 'confdep==1.0\n')
     beta_root = uv_charm(tmp_path / 'beta', ['confdep==2.0'])
     shutil.copy(
         _ISOLATION / 'charms' / 'beta' / 'src' / 'charm.py', beta_root / 'src' / 'charm.py'
@@ -479,7 +477,7 @@ def test_two_isolated_charms_with_conflicting_dependencies(
 def test_a_second_deploy_uses_the_cached_environment(
     tmp_path: pathlib.Path, cache: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ):
-    root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
+    root = python_charm(tmp_path / 'alpha', 'confdep==1.0\n')
     cold = _environment.build(root, 'alpha')
     assert not cold.cached
     assert cold.path.parent == cache / 'ops-testing' / 'environments'
@@ -513,7 +511,10 @@ def test_the_worker_uses_the_tests_own_ops(
     # The local index has no ops, so this only builds because the charm's own
     # ops requirement is left out.
     root = status_charm(
-        tmp_path / 'opscheck', 'ops', '__file__', {'requirements.txt': 'ops==2.17.0\n'}
+        tmp_path / 'opscheck',
+        'ops',
+        '__file__',
+        {'charmcraft.yaml': PYTHON_PLUGIN, 'requirements.txt': 'ops==2.17.0\n'},
     )
     app = juju.deploy(root, isolated=True)
     juju.settle()
@@ -530,7 +531,10 @@ def test_pydeps_are_installed(juju: testing.Juju, tmp_path: pathlib.Path, cache:
         tmp_path / 'pydeps',
         'confdep',
         'VERSION',
-        {'lib/charms/thing/v0/thing.py': 'PYDEPS = ["confdep==1.0"]\n'},
+        {
+            'charmcraft.yaml': 'parts:\n  charm:\n    plugin: python\n    source: .\n',
+            'lib/charms/thing/v0/thing.py': 'PYDEPS = ["confdep==1.0"]\n',
+        },
     )
     app = juju.deploy(root, isolated=True)
     juju.settle()
@@ -621,7 +625,7 @@ def test_a_uv_cache_hit_does_not_run_uv_export(
 def test_patching_subprocess_run_does_not_reach_the_build(
     tmp_path: pathlib.Path, cache: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ):
-    root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
+    root = python_charm(tmp_path / 'alpha', 'confdep==1.0\n')
 
     def refuse(*args: object, **kwargs: object):
         raise AssertionError("the test's patch reached the build")
@@ -640,6 +644,7 @@ def test_mocking_dependency_groups_are_installed(
         'mockhelper',
         'VALUE',
         {
+            'charmcraft.yaml': 'parts:\n  charm:\n    plugin: python\n    source: .\n',
             'pyproject.toml': """
                 [dependency-groups]
                 unit = ["mockhelper==1.0"]
@@ -691,10 +696,34 @@ def test_uv_plugin_without_a_lockfile(
 def test_an_unresolvable_requirement(
     juju: testing.Juju, tmp_path: pathlib.Path, cache: pathlib.Path
 ):
-    root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==9.9\n'})
+    root = python_charm(tmp_path / 'alpha', 'confdep==9.9\n')
     with pytest.raises(testing.errors.JujuError, match="requirements can't be resolved"):
         juju.deploy(root, isolated=True)
     assert not list((cache / 'ops-testing' / 'environments').iterdir())
+
+
+@needs_uv
+def test_a_charm_plugin_charm_is_an_error_from_deploy(
+    juju: testing.Juju, tmp_path: pathlib.Path, cache: pathlib.Path
+):
+    root = write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
+    with pytest.raises(testing.errors.JujuError, match=CHARM_PLUGIN_ERROR):
+        juju.deploy(root, isolated=True)
+    assert not juju._state.apps
+
+
+@needs_uv
+def test_requirements_works_for_a_charm_plugin_charm(
+    juju: testing.Juju,
+    tmp_path: pathlib.Path,
+    cache: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    write_charm(tmp_path / 'alpha', {'requirements.txt': 'confdep==1.0\n'})
+    monkeypatch.chdir(tmp_path)
+    app = juju.deploy('alpha', isolated=True, requirements='alpha/requirements.txt')
+    juju.settle()
+    assert app.leader.state.unit_status.message.startswith('confdep=1.0')
 
 
 @needs_uv

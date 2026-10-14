@@ -1174,13 +1174,14 @@ class Juju:
                 that it can need different versions of packages from the test
                 and from other charms. Only for a charm deployed from a path.
                 The dependencies are found from the build plugin in the
-                charm's ``charmcraft.yaml`` (``charm``, ``python`` or
-                ``uv``), along with the dependency groups its mocking
-                configuration names, and installed with ``uv``, which has to
-                be on ``PATH``. The environment is cached under
-                ``$XDG_CACHE_HOME/ops-testing`` (``~/.cache/ops-testing`` by
-                default), so only the first deploy of a charm builds it. The
-                charm uses the test's own ``ops`` and ``ops.testing``.
+                charm's ``charmcraft.yaml`` (``python`` or ``uv``; the
+                deprecated ``charm`` plugin is an error), along with the
+                dependency groups its mocking configuration names, and
+                installed with ``uv``, which has to be on ``PATH``. The
+                environment is cached under ``$XDG_CACHE_HOME/ops-testing``
+                (``~/.cache/ops-testing`` by default), so only the first
+                deploy of a charm builds it. The charm uses the test's own
+                ``ops`` and ``ops.testing``.
 
                 * inline: error
                 * isolated: ok

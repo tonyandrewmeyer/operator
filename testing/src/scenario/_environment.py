@@ -11,14 +11,14 @@ plugin, the same way ``charmcraft pack`` would, and installs them with
 
 Extraction, by plugin:
 
-* ``charm``: the ``charm-requirements`` files (``requirements.txt`` if the
-  part doesn't list any and that file exists), ``charm-python-packages``,
-  ``charm-binary-python-packages``, and the ``PYDEPS`` of every charm library
-  in ``lib/``.
 * ``python``: the ``python-requirements`` files, ``python-packages``,
-  ``python-constraints``, and ``PYDEPS``.
+  ``python-constraints``, and the ``PYDEPS`` of every charm library in
+  ``lib/``.
 * ``uv``: ``uv export`` from the charm's ``uv.lock``, with the part's
   ``uv-extras`` and ``uv-groups``.
+
+The ``charm`` plugin, which is deprecated, isn't supported: a charm that uses
+it moves to one of these, or passes ``requirements=``.
 
 Everything is normalised to one flat requirements file. Added to it are the
 dependency groups the charm's mocking configuration names, and the
@@ -60,7 +60,7 @@ from . import _charm_mocking
 from .errors import JujuError
 
 #: The build plugins that environments can be built for.
-_SUPPORTED_PLUGINS = ('charm', 'python', 'uv')
+_SUPPORTED_PLUGINS = ('python', 'uv')
 #: Plugins that are charmcraft's, but that this module can't extract from.
 _UNSUPPORTED_PLUGINS = ('poetry', 'reactive')
 #: Plugins that don't install Python dependencies, so are skipped when looking
@@ -179,17 +179,26 @@ def _suggest_requirements(message: str) -> JujuError:
     )
 
 
+def _charm_plugin(message: str) -> JujuError:
+    return JujuError(
+        f'{message} isolated=True does not support the charm plugin, which is deprecated. '
+        'Move the charm to the uv or python plugin, or pass requirements= with a '
+        'requirements file for the charm.'
+    )
+
+
 def detect_plugin(charm_root: pathlib.Path, app_name: str) -> tuple[str, Mapping[str, Any]]:
     """Find the charm's build plugin, and the ``charmcraft.yaml`` part that uses it.
 
     The first part whose plugin installs Python dependencies is the one
-    used. With no ``charmcraft.yaml``, or one with no ``parts``, the plugin
-    is ``charm`` (charmcraft's default), or ``uv`` if there is a ``uv.lock``
-    and no ``charmcraft.yaml``.
+    used. With no ``charmcraft.yaml``, a ``uv.lock`` means the ``uv`` plugin.
 
     Raises:
         JujuError: if ``charmcraft.yaml`` can't be read, or the plugin isn't
-            one that environments can be built for.
+            one that environments can be built for. That includes the
+            ``charm`` plugin, which is charmcraft's default for a
+            ``charmcraft.yaml`` with no ``parts``, and so for a charm with
+            neither a ``charmcraft.yaml`` nor a ``uv.lock``.
     """
     path = charm_root / 'charmcraft.yaml'
     if not path.exists():
@@ -200,7 +209,10 @@ def detect_plugin(charm_root: pathlib.Path, app_name: str) -> tuple[str, Mapping
                 f'{app_name}: the charm has a poetry.lock, and building environments for '
                 'the poetry plugin is not supported yet.'
             )
-        return 'charm', {}
+        raise _charm_plugin(
+            f'{app_name}: the charm has no charmcraft.yaml or uv.lock, so it would be built '
+            'with the charm plugin.'
+        )
     try:
         charmcraft: Any = yaml.safe_load(path.read_text()) or {}
     except (OSError, yaml.YAMLError) as e:
@@ -209,7 +221,9 @@ def detect_plugin(charm_root: pathlib.Path, app_name: str) -> tuple[str, Mapping
         cast('dict[str, Any]', charmcraft).get('parts') if isinstance(charmcraft, dict) else None
     )
     if not parts:
-        return 'charm', {}
+        raise _charm_plugin(
+            f'{app_name}: {path} has no parts, so the charm is built with the charm plugin.'
+        )
     if not isinstance(parts, dict):
         raise _suggest_requirements(f'{app_name}: parts in {path} is not a mapping.')
     unknown: list[str] = []
@@ -218,6 +232,10 @@ def detect_plugin(charm_root: pathlib.Path, app_name: str) -> tuple[str, Mapping
         plugin = part.get('plugin', name)
         if plugin in _SUPPORTED_PLUGINS:
             return plugin, part
+        if plugin == 'charm':
+            raise _charm_plugin(
+                f'{app_name}: the charm is built with the charm plugin (part {name!r} in {path}).'
+            )
         if plugin in _UNSUPPORTED_PLUGINS:
             raise _suggest_requirements(
                 f'{app_name}: the charm is built with the {plugin} plugin (part {name!r} '
@@ -227,7 +245,7 @@ def detect_plugin(charm_root: pathlib.Path, app_name: str) -> tuple[str, Mapping
             unknown.append(f'{name} ({plugin})')
     found = f' Its parts use: {", ".join(unknown)}.' if unknown else ''
     raise _suggest_requirements(
-        f'{app_name}: no part in {path} uses the charm, python or uv plugin, so the '
+        f'{app_name}: no part in {path} uses the python or uv plugin, so the '
         f"charm's dependencies can't be found.{found}"
     )
 
@@ -255,7 +273,7 @@ def _plan_from_charm(charm_root: pathlib.Path, app_name: str, uv: str) -> _Plan:
             },
             export=functools.partial(_uv_export, charm_root, part, groups, app_name, uv),
         )
-    requirements = _plugin_requirements(charm_root, plugin, part, app_name)
+    requirements = _python_requirements(charm_root, part, app_name)
     requirements += _group_requirements(charm_root, groups, app_name)
     requirements += _ops_requirements()
     return _Plan(plugin, tuple(_deduplicated(requirements)), files)
@@ -272,29 +290,19 @@ def _plan_from_file(path: pathlib.Path, app_name: str) -> _Plan:
     )
 
 
-def _plugin_requirements(
-    charm_root: pathlib.Path, plugin: str, part: Mapping[str, Any], app_name: str
+def _python_requirements(
+    charm_root: pathlib.Path, part: Mapping[str, Any], app_name: str
 ) -> list[str]:
-    """The requirements the ``charm`` or ``python`` plugin would install."""
+    """The requirements the ``python`` plugin would install."""
     requirements: list[str] = []
-    if plugin == 'charm':
-        files = part.get('charm-requirements')
-        if files is None:
-            files = ['requirements.txt'] if (charm_root / 'requirements.txt').exists() else []
-        packages = [
-            *part.get('charm-python-packages', ()),
-            *part.get('charm-binary-python-packages', ()),
-        ]
-        constraints: list[str] = []
-    else:
-        files = part.get('python-requirements', [])
-        packages = list(part.get('python-packages', ()))
-        constraints = list(part.get('python-constraints', ()))
+    files = part.get('python-requirements', [])
+    packages = list(part.get('python-packages', ()))
+    constraints = list(part.get('python-constraints', ()))
     for name in files:
         path = charm_root / name
         if not path.is_file():
             raise _suggest_requirements(
-                f'{app_name}: the {plugin} plugin lists {name} as a requirements file, but '
+                f'{app_name}: the python plugin lists {name} as a requirements file, but '
                 f'there is no {path}.'
             )
         requirements.extend(read_requirements(path))

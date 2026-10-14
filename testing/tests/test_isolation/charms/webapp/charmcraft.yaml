@@ -1,0 +1,5 @@
+type: charm
+parts:
+  charm:
+    plugin: python
+    source: .

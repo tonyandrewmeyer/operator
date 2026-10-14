@@ -238,6 +238,85 @@ def test_a_charm_spec_gets_the_default_for_its_class_s_module(
         assert app.leader.state.unit_status == testing.ActiveStatus('mocked')
 
 
+def test_two_testing_packages_for_one_library_are_an_error(
+    tmp_path: pathlib.Path, site: pathlib.Path
+):
+    install_library(site)
+    install_testing(site)
+    distribution(
+        site,
+        'other-fakelib-fakes',
+        '0.1',
+        {'other_fakelib_fakes/__init__.py': TESTING},
+        entry_points=ENTRY_POINTS.replace('charmlibs.fakelib_testing', 'other_fakelib_fakes'),
+    )
+    with testing.Juju() as juju:
+        with pytest.raises(
+            testing.errors.JujuError,
+            match=r'charmlibs\.fakelib.*charmlibs-fakelib-testing, other-fakelib-fakes',
+        ):
+            juju.deploy(charm(tmp_path))
+
+
+def test_two_testing_packages_for_one_library_are_reported_from_the_worker(
+    tmp_path: pathlib.Path, site: pathlib.Path
+):
+    install_library(site)
+    install_testing(site)
+    distribution(
+        site,
+        'other-fakelib-fakes',
+        '0.1',
+        {'other_fakelib_fakes/__init__.py': TESTING},
+        entry_points=ENTRY_POINTS.replace('charmlibs.fakelib_testing', 'other_fakelib_fakes'),
+    )
+    with testing.Juju() as juju:
+        juju._deploy(charm(tmp_path), python_executable=sys.executable)
+        with pytest.raises(
+            testing.errors.IsolationError,
+            match=r'charmlibs-fakelib-testing, other-fakelib-fakes',
+        ):
+            juju.settle()
+
+
+def test_two_testing_packages_for_a_library_the_charm_doesn_t_import_are_ignored(
+    tmp_path: pathlib.Path, site: pathlib.Path, isolated: bool
+):
+    install_library(site)
+    install_testing(site)
+    for name in ('vendorlib-fakes', 'vendorlib-other-fakes'):
+        distribution(
+            site,
+            name,
+            '0.1',
+            {f'{name.replace("-", "_")}/__init__.py': "raise RuntimeError('not imported')\n"},
+            entry_points=f'[ops.testing.mocking]\nvendorlib = {name.replace("-", "_")}:mocked\n',
+        )
+    with testing.Juju() as juju:
+        app = deploy(juju, charm(tmp_path), isolated)
+        juju.settle()
+        assert app.leader.state.unit_status == testing.ActiveStatus('mocked')
+
+
+def test_a_testing_package_for_a_library_the_charm_doesn_t_import_isn_t_applied(
+    tmp_path: pathlib.Path, site: pathlib.Path, isolated: bool
+):
+    distribution(site, 'vendorlib', '3.0', {'vendorlib/__init__.py': OTHER_LIBRARY})
+    distribution(
+        site,
+        'vendorlib-fakes',
+        '0.1',
+        {'vendorlib_fakes/__init__.py': "raise RuntimeError('not imported')\n"},
+        entry_points='[ops.testing.mocking]\nvendorlib = vendorlib_fakes:mocked\n',
+    )
+    install_library(site)
+    with testing.Juju() as juju:
+        # The charm imports charmlibs.fakelib, which has no testing package, and not vendorlib.
+        app = deploy(juju, charm(tmp_path), isolated)
+        juju.settle()
+        assert app.leader.state.unit_status == testing.ActiveStatus('real')
+
+
 def test_imports_in_every_form(tmp_path: pathlib.Path):
     source = write(
         tmp_path,

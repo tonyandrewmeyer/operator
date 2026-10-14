@@ -11,8 +11,10 @@ package, for example::
     "charmlibs.interfaces.tracing" = "charmlibs.interfaces.tracing_testing:mocked"
 
 The libraries a charm uses are found from its source: each import in it is
-matched to the registered package it's in. Any library can register, not
-only those in ``charmlibs``.
+matched to the registered package it's in, and a testing package is only
+applied for a library the charm imports. Any library can register, not only
+those in ``charmlibs``. Two installed distributions registering the same
+library is an error, rather than picking one by install order.
 
 A ``charmlibs`` testing package installed at a different version from its
 library is an error, since the two are released in lockstep; other
@@ -62,9 +64,13 @@ def find(app_name: str, sources: Iterable[pathlib.Path]) -> list[LibraryMocking]
     Raises:
         JujuError: naming the library and the testing package, if a
             ``charmlibs`` testing package is at a different version from its
-            library, or a registered ``mocked`` can't be loaded.
+            library, or a registered ``mocked`` can't be loaded. Also raised,
+            naming both distributions, if more than one registers a library
+            the charm imports.
     """
-    registered = {ep.name: ep for ep in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)}
+    registered: dict[str, list[importlib.metadata.EntryPoint]] = {}
+    for ep in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP):
+        registered.setdefault(ep.name, []).append(ep)
     if not registered:
         return []
     used: set[str] = set()
@@ -77,7 +83,7 @@ def find(app_name: str, sources: Iterable[pathlib.Path]) -> list[LibraryMocking]
     libraries = _installed_libraries() if any(map(_is_charmlibs, used)) else {}
     found: list[LibraryMocking] = []
     for package in sorted(used):
-        entry_point = registered[package]
+        entry_point = _only_registration(app_name, package, registered[package])
         library = libraries.get(_normalise(package))
         testing = entry_point.dist
         if library is not None and testing is not None and testing.version != library.version:
@@ -104,6 +110,25 @@ def find(app_name: str, sources: Iterable[pathlib.Path]) -> list[LibraryMocking]
             )
         )
     return found
+
+
+def _only_registration(
+    app_name: str, package: str, entry_points: list[importlib.metadata.EntryPoint]
+) -> importlib.metadata.EntryPoint:
+    names = sorted({_distribution_name(ep) for ep in entry_points})
+    if len(names) > 1:
+        raise JujuError(
+            f'{app_name}: the charm uses {package}, and more than one installed package '
+            f'registers a testing package for it: {", ".join(names)}. Uninstall all but '
+            'one, or disable the charmlibs default and open the one you want in the '
+            "charm's own mocked()."
+        )
+    return entry_points[0]
+
+
+def _distribution_name(entry_point: importlib.metadata.EntryPoint) -> str:
+    dist = entry_point.dist
+    return (dist.metadata['Name'] if dist is not None else None) or entry_point.value
 
 
 def imported_modules(sources: Iterable[pathlib.Path]) -> set[str]:

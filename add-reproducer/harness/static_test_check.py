@@ -41,7 +41,7 @@ import re
 import shlex
 import typing
 
-from models import StaticCheckResult, embedded_test_file
+from models import StaticCheckResult, embedded_test_file, runs_under_pytest_after
 
 # Attribute calls that run a charm or emit an event. At module level they run
 # while pytest is importing the file, so a failure is a broken file rather
@@ -322,15 +322,7 @@ def runs_under_pytest(commands: list[str]) -> bool:
     test_file = embedded_test_file(commands)
     if test_file is None:
         return False
-    name = test_file.path.rsplit("/", 1)[-1]
-    after = False
-    for command in commands:
-        if not after:
-            after = f"{test_file.path}" in command and "<<" in command
-            continue
-        if "pytest" in command and (name in command or not command.split("pytest", 1)[1].strip()):
-            return True
-    return False
+    return runs_under_pytest_after(test_file.path, commands)
 
 
 def check(source: str, *, path: str | None = None) -> StaticCheckResult:

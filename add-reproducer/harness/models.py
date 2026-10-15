@@ -247,25 +247,54 @@ _HEREDOC_RE = re.compile(
 )
 
 
+def runs_under_pytest_after(path: str, commands: list[str]) -> bool:
+    """Whether a command after the one that writes `path` as a heredoc runs
+    pytest on it: names its file, or is a bare `pytest`."""
+    name = path.rsplit("/", 1)[-1]
+    after = False
+    for command in commands:
+        if not after:
+            after = path in command and "<<" in command
+            continue
+        if "pytest" in command and (name in command or not command.split("pytest", 1)[1].strip()):
+            return True
+    return False
+
+
+def _test_heredoc(commands: list[str]) -> "tuple[int, re.Match[str]] | None":
+    """The heredoc `embedded_test_file()` reads, with its command's index.
+
+    The first one whose path is a `.py` file that a later command passes to
+    pytest, else the first one. `static-retry/RESULT.md` §27, 6-4: an answer
+    wrote its fake hook tools as `cat > bin/relation-ids << 'EOF'` heredocs
+    before the test, and taking the first heredoc checked a shell script."""
+    found = [(i, m) for i, command in enumerate(commands) for m in _HEREDOC_RE.finditer(command)]
+    for i, match in found:
+        path = match.group("path")
+        if path.endswith(".py") and runs_under_pytest_after(path, commands):
+            return i, match
+    return found[0] if found else None
+
+
 def embedded_test_file(commands: list[str]) -> "TestFile | None":
     """A test file written by a heredoc already present in `commands[]`, or
-    `None` if no command matches. See `_HEREDOC_RE`'s comment above."""
-    for command in commands:
-        match = _HEREDOC_RE.search(command)
-        if match:
-            return TestFile(path=match.group("path"), body=match.group("body"))
-    return None
+    `None` if no command matches. See `_HEREDOC_RE`'s comment above, and
+    `_test_heredoc()` for which heredoc it is when there are several."""
+    found = _test_heredoc(commands)
+    if found is None:
+        return None
+    _, match = found
+    return TestFile(path=match.group("path"), body=match.group("body"))
 
 
 def replace_embedded_test_body(commands: list[str], body: str) -> list[str]:
     """`commands` with the body of the heredoc `embedded_test_file()` reads
     replaced by `body`; unchanged if there is no such heredoc."""
     out = list(commands)
-    for i, command in enumerate(out):
-        match = _HEREDOC_RE.search(command)
-        if match:
-            out[i] = command[: match.start("body")] + body + command[match.end("body") :]
-            break
+    found = _test_heredoc(out)
+    if found is not None:
+        i, match = found
+        out[i] = out[i][: match.start("body")] + body + out[i][match.end("body") :]
     return out
 
 

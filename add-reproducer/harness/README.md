@@ -25,8 +25,10 @@ does.
    using, plus what they said they saw. The issue's comments are included
    in the prompt, not just its body, because a report's real scope is
    often set by a reply rather than the opening text.
-   When the extraction is in scope and writes a test file with a heredoc,
-   `static_test_check.py` reads that file's AST (never runs it) for shapes
+   When the extraction is in scope and writes a test file with a heredoc
+   (the `.py` one a later command runs under pytest, when there are several,
+   such as fake hook tools written first), `static_test_check.py` reads that
+   file's AST (never runs it) for shapes
    that cannot reproduce anything: no `test_` function, a run at module
    level, a `testing.Context` attribute the installed `ops` does not have
    (followed down a chain such as `ctx.charm_spec.charm_dir` while each

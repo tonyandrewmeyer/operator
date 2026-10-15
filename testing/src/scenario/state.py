@@ -9,6 +9,7 @@ import copy
 import dataclasses
 import datetime
 import inspect
+import json
 import pathlib
 import random
 import re
@@ -626,6 +627,14 @@ def _next_relation_id(*, update: bool = True):
     return cur
 
 
+def _json_encode_databag(databag: Mapping[str, Any]) -> dict[str, str]:
+    # The keys that Juju adds to every databag hold plain strings, not JSON.
+    return {
+        key: value if key in _JUJU_DATABAG_KEYS else json.dumps(value)
+        for key, value in databag.items()
+    }
+
+
 # Unlike the other state classes in this module, ``RelationBase`` (and its
 # subclasses) still uses the dataclass-generated ``__init__``. This means the
 # init signature and the attribute type are the same annotation, so we can't
@@ -667,6 +676,15 @@ class RelationBase:
     )
     """This unit's databag for this relation."""
 
+    json: dataclasses.InitVar[bool] = False
+    """If true, JSON-encode every value in the databags (as `ops.Relation.save` does).
+
+    This avoids having to call ``json.dumps`` on each value when setting up a
+    relation. The encoding happens once, when the relation is created: the
+    attributes hold the encoded strings, and a relation created from this one
+    (for example, with `dataclasses.replace`) is not encoded again.
+    """
+
     @property
     def relation_id(self) -> NoReturn:
         """Use `.id` instead of `.relation_id`.
@@ -693,7 +711,7 @@ class RelationBase:
         """Return the databag for some remote unit ID."""
         raise NotImplementedError()
 
-    def __post_init__(self):
+    def __post_init__(self, json: bool):
         if type(self) is RelationBase:
             raise RuntimeError(
                 'RelationBase cannot be instantiated directly; '
@@ -701,6 +719,9 @@ class RelationBase:
             )
 
         _check_name(self.endpoint, 'relation endpoint')
+
+        if json:
+            self._encode_databags()
 
         for databag in self._databags:
             self._validate_databag(databag)
@@ -712,6 +733,24 @@ class RelationBase:
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+    def _encode_databags(self):
+        """JSON-encode all of the values in all of the databags."""
+        for attr in ('local_app_data', 'local_unit_data', 'remote_app_data', 'remote_unit_data'):
+            databag = getattr(self, attr, None)
+            if isinstance(databag, dict):
+                object.__setattr__(self, attr, _json_encode_databag(databag))  # pyright: ignore[reportUnknownArgumentType]
+        for attr in ('remote_units_data', 'peers_data'):
+            databags = getattr(self, attr, None)
+            if isinstance(databags, dict):
+                object.__setattr__(
+                    self,
+                    attr,
+                    {
+                        unit_id: _json_encode_databag(databag)  # pyright: ignore[reportUnknownArgumentType]
+                        for unit_id, databag in databags.items()  # pyright: ignore[reportUnknownVariableType]
+                    },
+                )
 
     def _validate_databag(self, databag: Mapping[str, str]):
         if not isinstance(databag, dict):
@@ -726,6 +765,7 @@ class RelationBase:
 
 
 _DEFAULT_IP = '192.0.2.0'
+_JUJU_DATABAG_KEYS = frozenset({'egress-subnets', 'ingress-address', 'private-address'})
 _DEFAULT_JUJU_DATABAG: dict[str, str] = {
     'egress-subnets': _DEFAULT_IP,
     'ingress-address': _DEFAULT_IP,

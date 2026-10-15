@@ -787,3 +787,35 @@ def test_peer_relation_units_does_not_contain_this_unit():
     state = ctx.run(ctx.on.update_status(), State(relations={rel_in}))
     rel_out = state.get_relation(rel_in.id)
     assert rel_out.local_unit_data.get('this-unit') == '<ops.model.Unit charm-name/0>'
+
+
+def test_relation_json_encodes_databags():
+    relation = Relation(
+        endpoint='foo',
+        interface='foo',
+        json=True,
+        local_app_data={'name': 'x', 'ports': [80, 443]},
+        remote_app_data={'ok': True},
+        remote_units_data={0: {'n': 1}},
+    )
+    assert relation.local_app_data == {'name': '"x"', 'ports': '[80, 443]'}
+    assert relation.remote_app_data == {'ok': 'true'}
+    assert relation.remote_units_data == {0: {'n': '1'}}
+    assert relation.local_unit_data == {  # Juju's defaults are untouched.
+        'egress-subnets': '192.0.2.0',
+        'ingress-address': '192.0.2.0',
+        'private-address': '192.0.2.0',
+    }
+
+
+def test_relation_json_not_re_encoded_on_replace():
+    import dataclasses
+
+    relation = Relation(endpoint='foo', interface='foo', json=True, local_app_data={'a': 'b'})
+    copy = dataclasses.replace(relation, id=relation.id + 100)
+    assert copy.local_app_data == {'a': '"b"'}
+
+
+def test_peer_relation_json_encodes_databags():
+    relation = PeerRelation(endpoint='peers', json=True, peers_data={1: {'k': [1]}})
+    assert relation.peers_data == {1: {'k': '[1]'}}

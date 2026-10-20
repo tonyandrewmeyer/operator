@@ -65,7 +65,7 @@ jobs:
           INFO     jubilant.wait:_juju.py:1880 [minio/0] status changed: maintenance (Reconciling charm: executing component container:minio) -> active ()
           INFO     jubilant:_juju.py:551 cli: juju destroy-model jubilant-712a6a95 --no-prompt --destroy-storage --force
           =========================== short test summary info ============================
-          ERROR test/integration/test_tracing.py::test_direct_connection - TimeoutError: wait timed out after 900s
+          ERROR test/integration/test_tracing.py::test_tracing_wait - TimeoutError: wait timed out after 900s
           Status(
             model=ModelStatus(
               name='jubilant-712a6a95',

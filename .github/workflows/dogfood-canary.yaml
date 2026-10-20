@@ -1,0 +1,372 @@
+name: Dogfood canary
+
+# FORK-ONLY. Never merge this upstream, and never branch a PR from a fork
+# main that has it. It exists to drive the ai-failure-notifications pair
+# (notify-scheduled-failure.yaml -> ai-failure-enrich.yaml) end to end in
+# seconds, instead of waiting ~50 minutes on a real scheduled workflow that
+# also needs secrets a fork does not have.
+#
+# It stands in for one of the seven real callers, so it reproduces the real
+# nesting depth: this workflow -> the notifier -> the enricher.
+#
+# Real callers gate on `failure() && github.event_name == 'schedule'`; this
+# one drops the event half so it can be dispatched. Nothing downstream
+# inspects the event, so there is no `schedule`-only gate left to widen.
+#
+# It also runs on push to its own branch. Every workflow in the chain is
+# `workflow_call`, so nothing here needs to sit on the default branch: a
+# push to this branch is the whole run. Note that the enricher skips a run
+# id it has already stamped, so each iteration needs a fresh commit.
+
+on:
+  push:
+    branches:
+      - dogfood-canary-wait-status
+  workflow_dispatch:
+    inputs:
+      shape:
+        description: Which failure shape to emit.
+        type: choice
+        options:
+          - pytest
+          - traceback-only
+          - infra-only
+          - import-error
+          - jubilant-wait-timeout
+        default: jubilant-wait-timeout
+
+permissions: {}
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Emit a realistic failure
+        env:
+          # `inputs.shape` is empty on a push, so default it here: an
+          # unmatched `case` emits nothing at all, and an empty log is not
+          # a signature worth testing against.
+          #
+          # The default is whichever shape nothing in the fork's issues
+          # already matches. A shape this repo has seen before makes the
+          # enricher comment on the old issue, which never exercises the
+          # create path -- so change this when the current default has an
+          # issue of its own.
+          SHAPE: ${{ inputs.shape || 'jubilant-wait-timeout' }}
+        run: |
+          case "$SHAPE" in
+            jubilant-wait-timeout)
+              cat <<'OUT'
+          INFO     jubilant.wait:_juju.py:1880 [minio/0] status changed: maintenance (Reconciling charm: executing component kubernetes-service-patch) -> active ()
+          INFO     jubilant.wait:_juju.py:1880 [minio] status changed: active () -> maintenance (Reconciling charm: executing component container:minio)
+          INFO     jubilant.wait:_juju.py:1880 [minio/0] status changed: active () -> maintenance (Reconciling charm: executing component container:minio)
+          INFO     jubilant.wait:_juju.py:1880 [minio] status changed: maintenance (Reconciling charm: executing component container:minio) -> active ()
+          INFO     jubilant.wait:_juju.py:1880 [minio/0] status changed: maintenance (Reconciling charm: executing component container:minio) -> active ()
+          INFO     jubilant:_juju.py:551 cli: juju destroy-model jubilant-712a6a95 --no-prompt --destroy-storage --force
+          =========================== short test summary info ============================
+          ERROR test/integration/test_tracing.py::test_direct_connection - TimeoutError: wait timed out after 900s
+          Status(
+            model=ModelStatus(
+              name='jubilant-712a6a95',
+              type='caas',
+              controller='concierge-k8s',
+              cloud='k8s',
+              version='4.0.16',
+              model_status=StatusInfo(current='available', since='19 Oct 2026 08:17:13Z'),
+            ),
+            machines={},
+            apps={
+              'minio': AppStatus(
+                charm='minio',
+                charm_origin='charmhub',
+                charm_name='minio',
+                charm_rev=708,
+                exposed=False,
+                base=FormattedBase(name='ubuntu', channel='24.04'),
+                charm_channel='latest/edge',
+                scale=1,
+                provider_id='caee064d-af6d-4235-9c37-be0b042831da',
+                address='10.152.183.248',
+                life='alive',
+                app_status=StatusInfo(current='active', since='19 Oct 2026 08:16:17Z'),
+                units={
+                  'minio/0': UnitStatus(
+                    workload_status=StatusInfo(current='active', since='19 Oct 2026 08:16:17Z'),
+                    juju_status=StatusInfo(current='idle', since='19 Oct 2026 08:02:15Z', version='4.0.16'),
+                    leader=True,
+                    open_ports=['9000/tcp', '9001/tcp'],
+                    address='10.1.0.112',
+                    provider_id='minio-0',
+                  ),
+                },
+                endpoint_bindings={
+                  '': 'alpha',
+                  'grafana-dashboard': 'alpha',
+                  'juju-info': 'alpha',
+                  'metrics-endpoint': 'alpha',
+                  'object-storage': 'alpha',
+                  'provide-cmr-mesh': 'alpha',
+                  'require-cmr-mesh': 'alpha',
+                  's3-credentials': 'alpha',
+                  'service-mesh': 'alpha',
+                  'velero-backup-config': 'alpha',
+                },
+              ),
+              's3-integrator': AppStatus(
+                charm='s3-integrator',
+                charm_origin='charmhub',
+                charm_name='s3-integrator',
+                charm_rev=562,
+                exposed=False,
+                base=FormattedBase(name='ubuntu', channel='22.04'),
+                charm_channel='1/stable',
+                scale=1,
+                provider_id='6f7f04da-de33-4f26-9d4e-6cec0b64e40b',
+                address='10.152.183.202',
+                life='alive',
+                app_status=StatusInfo(current='active', since='19 Oct 2026 08:02:15Z'),
+                relations={
+                  's3-credentials': [
+                    AppStatusRelation(related_app='tempo', interface='s3', scope='global'),
+                  ],
+                  's3-integrator-peers': [
+                    AppStatusRelation(related_app='s3-integrator', interface='s3-integrator-peers', scope='global'),
+                  ],
+                },
+                units={
+                  's3-integrator/0': UnitStatus(
+                    workload_status=StatusInfo(current='active', since='19 Oct 2026 08:02:15Z'),
+                    juju_status=StatusInfo(current='idle', since='19 Oct 2026 08:02:15Z', version='4.0.16'),
+                    leader=True,
+                    address='10.1.0.27',
+                    provider_id='s3-integrator-0',
+                  ),
+                },
+                endpoint_bindings={'': 'alpha', 'juju-info': 'alpha', 's3-credentials': 'alpha', 's3-integrator-peers': 'alpha'},
+              ),
+              'tempo': AppStatus(
+                charm='tempo-coordinator-k8s',
+                charm_origin='charmhub',
+                charm_name='tempo-coordinator-k8s',
+                charm_rev=143,
+                exposed=False,
+                base=FormattedBase(name='ubuntu', channel='24.04'),
+                charm_channel='2/stable',
+                scale=1,
+                provider_id='5aa4942e-d887-4231-91a2-204967b2c0e0',
+                address='10.152.183.103',
+                life='alive',
+                app_status=StatusInfo(current='error', message='hook failed: "start"', since='19 Oct 2026 08:01:36Z'),
+                relations={
+                  'peers': [
+                    AppStatusRelation(related_app='tempo', interface='tempo_peers', scope='global'),
+                  ],
+                  's3': [
+                    AppStatusRelation(related_app='s3-integrator', interface='s3', scope='global'),
+                  ],
+                  'tempo-cluster': [
+                    AppStatusRelation(related_app='tempo-worker', interface='tempo_cluster', scope='global'),
+                  ],
+                },
+                units={
+                  'tempo/0': UnitStatus(
+                    workload_status=StatusInfo(current='error', message='hook failed: "start"', since='19 Oct 2026 08:01:36Z'),
+                    juju_status=StatusInfo(current='idle', since='19 Oct 2026 08:01:49Z', version='4.0.16'),
+                    leader=True,
+                    address='10.1.0.8',
+                    provider_id='tempo-0',
+                  ),
+                },
+                endpoint_bindings={
+                  '': 'alpha',
+                  'catalogue': 'alpha',
+                  'certificates': 'alpha',
+                  'grafana-dashboard': 'alpha',
+                  'grafana-source': 'alpha',
+                  'ingress': 'alpha',
+                  'juju-info': 'alpha',
+                  'logging': 'alpha',
+                  'metrics-endpoint': 'alpha',
+                  'peers': 'alpha',
+                  'probes': 'alpha',
+                  'receive-datasource': 'alpha',
+                  's3': 'alpha',
+                  'self-charm-tracing': 'alpha',
+                  'self-workload-tracing': 'alpha',
+                  'send-remote-write': 'alpha',
+                  'tempo-api': 'alpha',
+                  'tempo-cluster': 'alpha',
+                  'tracing': 'alpha',
+                },
+              ),
+              'tempo-worker': AppStatus(
+                charm='tempo-worker-k8s',
+                charm_origin='charmhub',
+                charm_name='tempo-worker-k8s',
+                charm_rev=93,
+                exposed=False,
+                base=FormattedBase(name='ubuntu', channel='24.04'),
+                charm_channel='2/stable',
+                scale=1,
+                provider_id='094b7752-fda3-4dad-b05e-3b67ad1cbd6a',
+                address='10.152.183.115',
+                life='alive',
+                app_status=StatusInfo(current='waiting', message='Waiting for coordinator to publish a config', since='19 Oct 2026 08:16:15Z'),
+                relations={
+                  'tempo-cluster': [
+                    AppStatusRelation(related_app='tempo', interface='tempo_cluster', scope='global'),
+                  ],
+                },
+                units={
+                  'tempo-worker/0': UnitStatus(
+                    workload_status=StatusInfo(current='waiting', message='Waiting for coordinator to publish a config', since='19 Oct 2026 08:16:15Z'),
+                    juju_status=StatusInfo(current='idle', since='19 Oct 2026 08:01:52Z', version='4.0.16'),
+                    leader=True,
+                    open_ports=['3200/tcp', '4317/tcp', '4318/tcp', '7946/tcp', '9096/tcp', '9411/tcp', '14250/tcp', '14268/tcp'],
+                    address='10.1.0.19',
+                    provider_id='tempo-worker-0',
+                  ),
+                },
+                version='2.8.2',
+                endpoint_bindings={'': 'alpha', 'juju-info': 'alpha', 'tempo-cluster': 'alpha'},
+              ),
+            },
+            storage=CombinedStorage(
+              storage={
+                'minio-data/1': StorageInfo(
+                  kind='filesystem',
+                  status=EntityStatus(current='attached', since='19 Oct 2026 08:00:59Z'),
+                  persistent=False,
+                  life='alive',
+                  attachments=StorageAttachments(
+                    units={
+                      'minio/0': UnitStorageAttachment(location='/var/lib/juju/storage/minio-data-0', life='alive'),
+                    },
+                  ),
+                ),
+                'wal/0': StorageInfo(
+                  kind='filesystem',
+                  status=EntityStatus(current='attached', since='19 Oct 2026 08:00:46Z'),
+                  persistent=False,
+                  life='alive',
+                  attachments=StorageAttachments(
+                    units={
+                      'tempo-worker/0': UnitStorageAttachment(location='/var/lib/juju/storage/wal-0', life='alive'),
+                    },
+                  ),
+                ),
+              },
+              filesystems={
+                '0': FilesystemInfo(
+                  size=1024,
+                  provider_id='pvc-947fd460-f9c5-4942-83af-0cb6f6e37cf6',
+                  storage='wal/0',
+                  attachments=FilesystemAttachments(
+                    containers={
+                      'tempo-worker/0': FilesystemAttachment(mount_point='/var/lib/juju/storage/wal-0', read_only=False, life='alive'),
+                    },
+                    units={
+                      'tempo-worker/0': UnitStorageAttachment(location='/var/lib/juju/storage/wal-0', life='alive'),
+                    },
+                  ),
+                  pool='kubernetes',
+                  life='alive',
+                  status=EntityStatus(current='attached', since='19 Oct 2026 08:00:46Z'),
+                ),
+                '1': FilesystemInfo(
+                  size=10240,
+                  provider_id='pvc-56c61da6-eb89-43e1-bb1d-d4c783d03bd5',
+                  storage='minio-data/1',
+                  attachments=FilesystemAttachments(
+                    containers={
+                      'minio/0': FilesystemAttachment(mount_point='/var/lib/juju/storage/minio-data-0', read_only=False, life='alive'),
+                    },
+                    units={
+                      'minio/0': UnitStorageAttachment(location='/var/lib/juju/storage/minio-data-0', life='alive'),
+                    },
+                  ),
+                  pool='kubernetes',
+                  life='alive',
+                  status=EntityStatus(current='attached', since='19 Oct 2026 08:00:59Z'),
+                ),
+              },
+            ),
+            controller=ControllerStatus(timestamp='08:17:13Z'),
+          )
+          =================== 1 xfailed, 1 error in 1247.17s (0:20:47) ===================
+          integration: exit 1 (1248.60 seconds) /home/runner/work/operator/operator> pytest -vvv --tb native --log-cli-level=INFO -s test/integration/test_tracing.py pid=14973
+            integration: FAIL code 1 (1249.54=setup[0.94]+cmd[1248.60] seconds)
+            evaluation failed :( (1249.60 seconds)
+          OUT
+              ;;
+            pytest)
+              cat <<'OUT'
+          ============================= test session starts ==============================
+          collected 412 items
+
+          test/test_charm.py ...................................              [ 34%]
+          test/test_model.py .........F.......F....                           [ 71%]
+          test/test_pebble.py ..................F..                           [100%]
+
+          =================================== FAILURES ===================================
+          _______________________ TestModel.test_relation_data_get _______________________
+          test/test_model.py:481: in test_relation_data_get
+              assert rel.data[self.app]['host'] == 'example.com'
+          E   KeyError: 'host'
+          ______________________ TestModel.test_status_set_message _______________________
+          test/test_model.py:702: in test_status_set_message
+              self.assertEqual(self.model.unit.status, ActiveStatus('ready'))
+          E   AssertionError: ActiveStatus('') != ActiveStatus('ready')
+          ________________________ TestPebble.test_pull_missing __________________________
+          test/test_pebble.py:1204: in test_pull_missing
+              client.pull('/nonexistent')
+          E   ops.pebble.PathError: stat /nonexistent: no such file or directory
+          =========================== short test summary info ============================
+          FAILED test/test_model.py::TestModel::test_relation_data_get - KeyError: 'host'
+          FAILED test/test_model.py::TestModel::test_status_set_message - AssertionError
+          FAILED test/test_pebble.py::TestPebble::test_pull_missing - ops.pebble.PathError
+          ======================== 3 failed, 409 passed in 41.28s ========================
+          OUT
+              ;;
+            traceback-only)
+              cat <<'OUT'
+          Traceback (most recent call last):
+            File "/home/runner/work/operator/operator/.github/patch-charm-deps.py", line 88, in <module>
+              main()
+            File "/home/runner/work/operator/operator/.github/patch-charm-deps.py", line 71, in main
+              pyproject['project']['dependencies'] = patched
+                                                     ~~~~~~^
+          KeyError: 'loki/0'
+          OUT
+              ;;
+            infra-only)
+              cat <<'OUT'
+          Error: The operation was canceled.
+          The runner has received a shutdown signal.
+          OUT
+              ;;
+            import-error)
+              cat <<'OUT'
+          ImportError while loading conftest '/home/runner/work/operator/operator/testing/conftest.py'.
+          testing/conftest.py:22: in <module>
+              from ops.testing import ActionFailed
+          E   ImportError: cannot import name 'ActionFailed' from 'ops.testing'
+          OUT
+              ;;
+          esac
+          exit 1
+
+  # Stands in for the real callers' `open-issue-on-failure-if-scheduled`.
+  # Mirrors what a real caller passes: the two permissions and the secret,
+  # named explicitly rather than inherited (the enricher's own comment
+  # explains why naming it at every level matters).
+  open-issue-on-failure-if-scheduled:
+    if: ${{ failure() }}
+    needs: [canary]
+    permissions:
+      issues: write
+      actions: read
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    uses: $/.github/workflows/notify-scheduled-failure.yaml

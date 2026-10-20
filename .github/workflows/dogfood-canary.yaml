@@ -1,4 +1,4 @@
-name: Dogfood canary
+name: Dogfood canary wait-status
 
 # FORK-ONLY. Never merge this upstream, and never branch a PR from a fork
 # main that has it. It exists to drive the ai-failure-notifications pair

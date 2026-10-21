@@ -161,13 +161,15 @@ ops[testing] does not start with the application name:
       ctx.run(ctx.on.start(), testing.State())
       assert captured["unit"].startswith(captured["app"] + "/")
 
-Some bugs are in how ops handles what a Juju hook tool returns
-(`relation-get`, `config-get`, `secret-get`, and so on): an error message,
-an exit status, or output ops does not expect. ops[testing] cannot show
-those. It replaces the backend that runs hook tools, so no hook tool runs
-and nothing Juju returns can happen, and a test that expects Juju's error
-under `testing.Context` fails whether or not the bug is real. For these
-bugs, on `substrate: none`:
+Some bugs are in what a Juju hook tool returns or how ops handles it
+(`relation-get`, `relation-list`, `relation-ids`, `config-get`, `is-leader`,
+`secret-get`, and so on): an error such as `ERROR permission denied`, a
+`ModelError` from a hook tool, an exit status, or output ops does not
+expect. For these bugs, never write a `testing.Context` / `ops.testing`
+test. `ops.testing` never runs hook tools: it replaces the backend that
+calls them, so nothing Juju returns can happen, and such a test fails (or
+passes) the same way whether or not the bug exists. It cannot show the bug.
+Do one of these instead, on `substrate: none`:
 
 - If the issue (or a comment) says what the hook tool printed or returned,
   test `ops.model.Model` over the real `ops.model._ModelBackend`, with fake

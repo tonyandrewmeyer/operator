@@ -202,6 +202,19 @@ def test_the_prompt_says_how_to_decline():
     assert "Install `ops` and `pytest`, not\n  `ops[testing]`." in text
 
 
+def test_the_prompt_rules_out_ops_testing_for_hook_tool_bugs():
+    """Before this line, 2 of 31 `#2709` answers still wrote a
+    `testing.Context` test of the hook-tool bug, and repaired, such a test is
+    a false comment (`spike-step-5/static-retry/RESULT.md` §28)."""
+    text = " ".join(extraction._SCHEMA_INSTRUCTIONS.split())
+    assert "For these bugs, never write a `testing.Context` / `ops.testing` test." in text
+    assert "`ops.testing` never runs hook tools" in text
+    assert "the same way whether or not the bug exists. It cannot show the bug." in text
+    for tool in ("`relation-get`", "`relation-list`", "`relation-ids`", "`config-get`", "`is-leader`"):
+        assert tool in text
+    assert "`ERROR permission denied`" in text
+
+
 def test_the_prompt_example_has_no_doubled_escapes():
     """The instructions are a plain string, so `\\n` in the source is `\n`
     in what the model reads, as it would be in the test file."""

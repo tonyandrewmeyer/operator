@@ -358,6 +358,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _lookup_expected_to_raise(tree)
     reasons += _unbound_after_try(tree)
     reasons += _testing_relation_dicts(tree)
+    reasons += _model_framework(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -4376,6 +4377,48 @@ def _hand_built_relations(tree: ast.Module) -> list[str]:
             f"`ops.Relation({shown})` ({error}), so it raises `TypeError` before anything is "
             f"read, with or without the bug; `ops.Relation` is not built by hand: {fix}"
         )
+    return list(dict.fromkeys(reasons))
+
+
+def _model_framework(tree: ast.Module) -> list[str]:
+    """`.framework` read off an `ops.Model`, which has no such attribute.
+
+    Live on `#2709`, three fake-hook-tool answers drove a charm by hand over
+    `_ModelBackend`, as `MyCharm(model.framework)` and
+    `model.framework.on.start.emit()`, and died on the `AttributeError` on
+    ops 3.8.3 and `main` alike (`spike-step-5/static-retry/RESULT.md` §29).
+
+    Only on an `ops.Model(...)` call itself, or a name assigned once to one
+    (in the file, or in the test function that reads it, directly or through
+    other names assigned once), and only while the
+    installed `ops.Model` certainly has no `framework`. `self.model` inside a
+    charm class is not followed.
+    """
+    ops = _ops()
+    counts = _file_binding_counts(tree)
+    if ops is None or counts is None:
+        return []
+    attributes = instance_attributes(ops.Model)
+    if attributes is None or "framework" in attributes:
+        return []
+    reasons = []
+    for function in [None, *_test_functions(tree)]:
+        names = _Names(tree, counts, function)
+        for node in ast.walk(tree if function is None else function):
+            if not (isinstance(node, ast.Attribute) and node.attr == "framework"):
+                continue
+            value = node.value
+            for _ in range(5):  # through `m = model`, and so on
+                value = names.value_of(value)
+            if not (isinstance(value, ast.Call) and names.resolve(value.func) is ops.Model):
+                continue
+            reasons.append(
+                f"line {node.lineno}: `{ast.unparse(node)}`, but `ops.Model` has no `framework`, so this "
+                "raises `AttributeError` with or without the bug; do not build or drive a charm by hand: "
+                "read through the model itself, in the test, over `_ModelBackend` with fake hook tools, "
+                "as in the example (`relation = model.get_relation('db', 1)`, then "
+                "`relation.data[relation.app]`, with the error caught and the result asserted on)"
+            )
     return list(dict.fromkeys(reasons))
 
 

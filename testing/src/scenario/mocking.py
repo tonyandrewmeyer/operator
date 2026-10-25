@@ -860,23 +860,39 @@ class _MockPebbleClient(_TestingPebbleClient):
             now = datetime.datetime.now()
             for check in container.check_infos:
                 self._check_infos[check.name] = check._to_ops()
-                kind = (
-                    pebble.ChangeKind.PERFORM_CHECK.value
-                    if check.status == pebble.CheckStatus.UP
-                    else pebble.ChangeKind.RECOVER_CHECK.value
-                )
+                if check.status == pebble.CheckStatus.INACTIVE:
+                    # A stopped check has no change in Pebble, and no change ID.
+                    continue
+                if check.status == pebble.CheckStatus.UP:
+                    kind = pebble.ChangeKind.PERFORM_CHECK.value
+                    action = 'Perform'
+                else:
+                    kind = pebble.ChangeKind.RECOVER_CHECK.value
+                    action = 'Recover'
+                summary = self._check_summary(check.name, action)
+                assert check.change_id is not None
                 change = pebble.Change(
-                    pebble.ChangeID(str(uuid.uuid4())),
+                    check.change_id,
                     kind,
-                    summary=check.name,
+                    summary=summary,
                     status=pebble.ChangeStatus.DOING.value,
-                    tasks=[],
+                    tasks=[
+                        pebble.Task(
+                            id=pebble.TaskID(str(uuid.uuid4())),
+                            kind=kind,
+                            summary=summary,
+                            status=pebble.ChangeStatus.DOING.value,
+                            log=[],
+                            progress=pebble.TaskProgress(label='', done=1, total=1),
+                            spawn_time=now,
+                            ready_time=None,
+                        )
+                    ],
                     ready=False,
                     err=None,
                     spawn_time=now,
-                    ready_time=now,
+                    ready_time=None,
                 )
-                assert check.change_id is not None
                 self._changes[check.change_id] = change
 
     def get_plan(self) -> pebble.Plan:

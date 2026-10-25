@@ -743,6 +743,127 @@ def test_pebble_stop_check(reset_security_logging: None):
     state_out = ctx.run(ctx.on.config_changed(), state=State(containers={container}))
     info_out = state_out.get_container('foo').get_check_info('chk1')
     assert info_out.status == ops.pebble.CheckStatus.INACTIVE
+    # A stopped check has no change ID.
+    assert info_out.change_id is None
+
+
+class ReadCheckChangeCharm(ops.CharmBase):
+    """Records the change a seeded check's change ID points at."""
+
+    changes: list[ops.pebble.Change]
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.config_changed, self._on_config_changed)
+
+    def _on_config_changed(self, _: ops.EventBase):
+        container = self.unit.get_container('foo')
+        info = container.get_checks('chk1')['chk1']
+        assert info.change_id is not None
+        type(self).changes.append(container.pebble.get_change(info.change_id))
+
+
+@pytest.mark.parametrize(
+    'status,kind,summary',
+    [
+        (
+            ops.pebble.CheckStatus.UP,
+            ops.pebble.ChangeKind.PERFORM_CHECK.value,
+            'Perform http check "chk1"',
+        ),
+        (
+            ops.pebble.CheckStatus.DOWN,
+            ops.pebble.ChangeKind.RECOVER_CHECK.value,
+            'Recover http check "chk1"',
+        ),
+    ],
+)
+def test_seeded_check_change_shape(
+    status: ops.pebble.CheckStatus,
+    kind: str,
+    summary: str,
+):
+    """A seeded check's change matches the shape Pebble gives a check change."""
+    ReadCheckChangeCharm.changes = []
+    ctx = Context(ReadCheckChangeCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    layer = ops.pebble.Layer({
+        'checks': {
+            'chk1': {
+                'override': 'replace',
+                'startup': 'enabled',
+                'http': {'url': 'http://localhost:8080/'},
+            }
+        }
+    })
+    info_in = CheckInfo('chk1', status=status)
+    container = Container(
+        'foo',
+        can_connect=True,
+        check_infos=frozenset({info_in}),
+        layers={'layer1': layer},
+    )
+    ctx.run(ctx.on.config_changed(), state=State(containers={container}))
+    (change,) = ReadCheckChangeCharm.changes
+    assert change.id == info_in.change_id
+    assert change.kind == kind
+    assert change.summary == summary
+    assert len(change.tasks) == 1
+    assert change.tasks[0].kind == kind
+    assert change.tasks[0].summary == summary
+
+
+def test_start_check_resets_the_counters():
+    """Starting a check clears the failure and success counts, as Pebble does."""
+    ctx = Context(StartCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    layer = ops.pebble.Layer({
+        'checks': {'chk1': {'override': 'replace', 'startup': 'disabled', 'threshold': 3}}
+    })
+    info_in = CheckInfo(
+        'chk1',
+        status=ops.pebble.CheckStatus.INACTIVE,
+        startup=ops.pebble.CheckStartup.DISABLED,
+        successes=12,
+        failures=7,
+        threshold=3,
+    )
+    container = Container(
+        'foo',
+        can_connect=True,
+        check_infos=frozenset({info_in}),
+        layers={'layer1': layer},
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=State(containers={container}))
+    info_out = state_out.get_container('foo').get_check_info('chk1')
+    assert info_out.status == ops.pebble.CheckStatus.UP
+    assert info_out.successes == 0
+    assert info_out.failures == 0
+    assert info_out.change_id is not None
+
+
+def test_stop_check_keeps_the_counters(reset_security_logging: None):
+    """Stopping a check leaves the failure and success counts alone, as Pebble does."""
+    ctx = Context(StopCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    layer = ops.pebble.Layer({
+        'checks': {'chk1': {'override': 'replace', 'startup': 'enabled', 'threshold': 3}}
+    })
+    info_in = CheckInfo(
+        'chk1',
+        status=ops.pebble.CheckStatus.DOWN,
+        successes=4,
+        failures=9,
+        threshold=3,
+    )
+    container = Container(
+        'foo',
+        can_connect=True,
+        check_infos=frozenset({info_in}),
+        layers={'layer1': layer},
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=State(containers={container}))
+    info_out = state_out.get_container('foo').get_check_info('chk1')
+    assert info_out.status == ops.pebble.CheckStatus.INACTIVE
+    assert info_out.successes == 4
+    assert info_out.failures == 9
 
 
 class ReplanCharm(ops.CharmBase):

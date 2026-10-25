@@ -3219,14 +3219,47 @@ class _TestingPebbleClient:
             if startup == pebble.ServiceStartup.ENABLED:
                 self._service_status[name] = pebble.ServiceStatus.ACTIVE
 
+    def _check_summary(self, name: str, action: str) -> str:
+        """Build the change and task summary for a check, as Pebble words it.
+
+        Pebble writes the action, the check's type, and the quoted name -- for
+        example, 'Perform exec check "up-check"'. The type comes from the plan;
+        when the check is not in the plan (which real Pebble cannot be in, but
+        a test seeding check state directly can), it is left out.
+        """
+        check = self._render_checks().get(name)
+        check_type = None
+        if check is not None:
+            for candidate in ('http', 'tcp', 'exec'):
+                if getattr(check, candidate, None) is not None:
+                    check_type = candidate
+                    break
+        if check_type is None:
+            return f'{action} check "{name}"'
+        return f'{action} {check_type} check "{name}"'
+
     def _new_perform_check(self, info: pebble.CheckInfo) -> pebble.Change:
         now = datetime.datetime.now()
+        summary = self._check_summary(info.name, 'Perform')
         change = pebble.Change(
             pebble.ChangeID(str(uuid.uuid4())),
             pebble.ChangeKind.PERFORM_CHECK.value,
-            summary=info.name,
+            summary=summary,
             status=pebble.ChangeStatus.DOING.value,
-            tasks=[],
+            # Pebble's check changes carry exactly one task, with the change's
+            # own kind and summary.
+            tasks=[
+                pebble.Task(
+                    id=pebble.TaskID(str(uuid.uuid4())),
+                    kind=pebble.ChangeKind.PERFORM_CHECK.value,
+                    summary=summary,
+                    status=pebble.ChangeStatus.DOING.value,
+                    log=[],
+                    progress=pebble.TaskProgress(label='', done=1, total=1),
+                    spawn_time=now,
+                    ready_time=None,
+                )
+            ],
             ready=False,
             err=None,
             spawn_time=now,
@@ -3234,7 +3267,10 @@ class _TestingPebbleClient:
         )
         info.change_id = change.id
         info.status = pebble.CheckStatus.UP
+        # Starting a check resets both counters: Pebble reports a freshly
+        # started check with no failures and no successes yet.
         info.failures = 0
+        info.successes = 0
         self._changes[change.id] = change
         return change
 
@@ -3932,10 +3968,20 @@ class _TestingPebbleClient:
                 raise self._api_error(404, f'cannot find check with name "{name}"')
             info = self._check_infos[name]
             if info.change_id:
+                # Pebble settles the abandoned change at Done, whether the
+                # check was up (a perform-check) or down (a recover-check),
+                # and reports no change ID for a stopped check. The failure
+                # and success counts are left as they were.
+                now = datetime.datetime.now()
                 change = self._changes[info.change_id]
-                change.status = pebble.ChangeStatus.ABORT.value
+                change.status = pebble.ChangeStatus.DONE.value
+                change.ready = True
+                change.ready_time = now
+                for task in change.tasks:
+                    task.status = pebble.ChangeStatus.DONE.value
+                    task.ready_time = now
                 info.status = pebble.CheckStatus.INACTIVE
-                info.change_id = pebble.ChangeID('')
+                info.change_id = None
                 stopped.append(name)
         return stopped
 

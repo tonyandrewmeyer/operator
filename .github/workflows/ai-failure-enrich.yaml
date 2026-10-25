@@ -46,5 +46,5 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
         run: >-
-          uvx --from "git+https://github.com/tonyandrewmeyer/charm-tech-code@91c3d45942f4269a6c9ca9c4c8b82e816084e964#subdirectory=ai-failure-notifier"
+          uvx --from "git+https://github.com/tonyandrewmeyer/charm-tech-code@9a3aa93fb809603a7f17352a75cae681d4c963b2#subdirectory=ai-failure-notifier"
           ai-failure-notifier

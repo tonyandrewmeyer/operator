@@ -212,7 +212,11 @@ jobs:
                 provider_id='094b7752-fda3-4dad-b05e-3b67ad1cbd6a',
                 address='10.152.183.115',
                 life='alive',
-                app_status=StatusInfo(current='waiting', message='Waiting for coordinator to publish a config', since='19 Oct 2026 08:16:15Z'),
+                app_status=StatusInfo(
+                  current='blocked',
+                  message='Coordinator has no s3 configuration; integrate tempo with an s3 provider and check juju debug-log',
+                  since='19 Oct 2026 08:16:15Z',
+                ),
                 relations={
                   'tempo-cluster': [
                     AppStatusRelation(related_app='tempo', interface='tempo_cluster', scope='global'),
@@ -220,7 +224,11 @@ jobs:
                 },
                 units={
                   'tempo-worker/0': UnitStatus(
-                    workload_status=StatusInfo(current='waiting', message='Waiting for coordinator to publish a config', since='19 Oct 2026 08:16:15Z'),
+                    workload_status=StatusInfo(
+                      current='blocked',
+                      message='Coordinator has no s3 configuration; integrate tempo with an s3 provider and check juju debug-log',
+                      since='19 Oct 2026 08:16:15Z',
+                    ),
                     juju_status=StatusInfo(current='idle', since='19 Oct 2026 08:01:52Z', version='4.0.16'),
                     leader=True,
                     open_ports=['3200/tcp', '4317/tcp', '4318/tcp', '7946/tcp', '9096/tcp', '9411/tcp', '14250/tcp', '14268/tcp'],

@@ -63,6 +63,13 @@ absent value is expensive:
              Juju surface).
 - "lxd"   -- needs a real machine substrate and a deployed charm.
 
+A bug in what a Juju hook tool returns or how ops handles it
+(`relation-get`, `relation-list`, `relation-ids`, `config-get`,
+`is-leader`, `secret-get`, and so on) is "none" when the issue (or a
+comment) says what the tool printed or how it exited, for example
+`ERROR permission denied`. Test it with fake hook tools, as described
+below, not by deploying a charm.
+
 If in_scope is true and you genuinely cannot tell which of the three
 applies, pick the most likely one and additionally set
 moving_parts.other["substrate_uncertain"] = "yes". Do not omit the field

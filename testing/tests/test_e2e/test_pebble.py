@@ -11,7 +11,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 from scenario import Context
-from scenario.state import CheckInfo, Container, Exec, Mount, Notice, State
+from scenario.errors import InconsistentScenarioError
+from scenario.state import (
+    CheckBehaviour,
+    CheckInfo,
+    Container,
+    Exec,
+    Mount,
+    Notice,
+    State,
+)
 
 import ops
 from ops import CharmBase, Framework, pebble
@@ -1228,3 +1237,305 @@ def test_no_warning_on_empty_container():
     assert not any(
         'mycontainer' in line.message and 'non-empty' in line.message for line in ctx.juju_log
     )
+
+
+class PollCheckCharm(ops.CharmBase):
+    """Reads a check a fixed number of times, recording what it saw each time."""
+
+    check_name = 'chk1'
+    reads = 1
+    seen: list[ops.pebble.CheckInfo]
+    notices: list[ops.pebble.Notice]
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on.config_changed, self._on_config_changed)
+
+    def _on_config_changed(self, _: ops.EventBase):
+        container = self.unit.get_container('foo')
+        for _read in range(self.reads):
+            # Scenario runs a subclass of the charm, so mutate the lists on
+            # this class rather than assigning to ``type(self)``.
+            PollCheckCharm.seen.append(container.get_check(self.check_name))
+        PollCheckCharm.notices.extend(container.pebble.get_notices())
+
+
+CHECK_LAYER = ops.pebble.Layer({
+    'checks': {
+        'chk1': {
+            'override': 'replace',
+            'startup': 'enabled',
+            'threshold': 3,
+            'exec': {'command': 'true'},
+        },
+        'chk2': {
+            'override': 'replace',
+            'startup': 'enabled',
+            'threshold': 3,
+            'exec': {'command': 'true'},
+        },
+    }
+})
+
+
+def _poll_state(
+    behaviours: set[CheckBehaviour],
+    infos: set[CheckInfo],
+    reads: int,
+    check_name: str = 'chk1',
+) -> tuple[Context[PollCheckCharm], State]:
+    PollCheckCharm.seen = []
+    PollCheckCharm.notices = []
+    PollCheckCharm.reads = reads
+    PollCheckCharm.check_name = check_name
+    ctx = Context(PollCheckCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'layer1': CHECK_LAYER},
+        check_infos=frozenset(infos),
+        check_behaviours=frozenset(behaviours),
+    )
+    return ctx, State(containers={container})
+
+
+def test_check_behaviour_advances_on_each_read():
+    """Each read of the check moves one entry along the declared sequence."""
+    ctx, state = _poll_state(
+        behaviours={
+            CheckBehaviour(
+                'chk1',
+                statuses=[
+                    ops.pebble.CheckStatus.DOWN,
+                    ops.pebble.CheckStatus.DOWN,
+                    ops.pebble.CheckStatus.UP,
+                ],
+            )
+        },
+        infos={CheckInfo('chk1')},
+        reads=3,
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    assert [info.status for info in PollCheckCharm.seen] == [
+        ops.pebble.CheckStatus.DOWN,
+        ops.pebble.CheckStatus.DOWN,
+        ops.pebble.CheckStatus.UP,
+    ]
+    assert state_out.get_container('foo').get_check_info('chk1').status == (
+        ops.pebble.CheckStatus.UP
+    )
+
+
+def test_check_behaviour_repeats_its_last_status():
+    """A charm that polls more often than the test declared sees the last status."""
+    ctx, state = _poll_state(
+        behaviours={
+            CheckBehaviour(
+                'chk1',
+                statuses=[ops.pebble.CheckStatus.DOWN, ops.pebble.CheckStatus.UP],
+            )
+        },
+        infos={CheckInfo('chk1')},
+        reads=4,
+    )
+    ctx.run(ctx.on.config_changed(), state=state)
+    assert [info.status for info in PollCheckCharm.seen] == [
+        ops.pebble.CheckStatus.DOWN,
+        ops.pebble.CheckStatus.UP,
+        ops.pebble.CheckStatus.UP,
+        ops.pebble.CheckStatus.UP,
+    ]
+
+
+def test_check_behaviour_derives_the_counters():
+    """The failure and success counts follow the statuses, as Pebble derives them."""
+    ctx, state = _poll_state(
+        behaviours={
+            CheckBehaviour(
+                'chk1',
+                statuses=[
+                    ops.pebble.CheckStatus.UP,
+                    ops.pebble.CheckStatus.DOWN,
+                    ops.pebble.CheckStatus.DOWN,
+                    ops.pebble.CheckStatus.UP,
+                ],
+            )
+        },
+        infos={CheckInfo('chk1', successes=5, failures=0, threshold=3)},
+        reads=4,
+    )
+    ctx.run(ctx.on.config_changed(), state=state)
+    counters = [(info.failures, info.successes) for info in PollCheckCharm.seen]
+    assert counters == [
+        # Still up: another success.
+        (0, 6),
+        # Down: the failure count reaches the threshold, the success count freezes.
+        (3, 6),
+        # Still down: Pebble keeps counting failures past the threshold.
+        (4, 6),
+        # Recovered: no failures, and the success count restarts from one.
+        (0, 1),
+    ]
+
+
+def test_check_behaviour_moves_the_change():
+    """Going down and recovering moves the check between Pebble's two change kinds."""
+    ctx, state = _poll_state(
+        behaviours={
+            CheckBehaviour(
+                'chk1',
+                statuses=[
+                    ops.pebble.CheckStatus.DOWN,
+                    ops.pebble.CheckStatus.UP,
+                ],
+                failure_message='exit status 1',
+            )
+        },
+        infos={CheckInfo('chk1')},
+        reads=2,
+    )
+    seeded_change_id = next(iter(state.get_container('foo').check_infos)).change_id
+    with ctx(ctx.on.config_changed(), state=state) as manager:
+        manager.run()
+        client = manager.charm.unit.get_container('foo').pebble
+        down_info, up_info = PollCheckCharm.seen
+
+        # The perform-check the check started on has failed.
+        assert seeded_change_id is not None
+        failed = client.get_change(seeded_change_id)
+        assert failed.kind == ops.pebble.ChangeKind.PERFORM_CHECK.value
+        assert failed.status == ops.pebble.ChangeStatus.ERROR.value
+        assert failed.err == (
+            'cannot perform the following tasks:\n- Perform exec check "chk1" (exit status 1)'
+        )
+        assert failed.tasks[0].log == ['ERROR exit status 1']
+
+        # While down, the check reported a recover-check of its own.
+        assert down_info.change_id not in (None, seeded_change_id)
+        assert down_info.change_id is not None
+        recover = client.get_change(down_info.change_id)
+        assert recover.kind == ops.pebble.ChangeKind.RECOVER_CHECK.value
+        assert recover.summary == 'Recover exec check "chk1"'
+        # By the end of the run that recover-check is done, because the check
+        # recovered.
+        assert recover.status == ops.pebble.ChangeStatus.DONE.value
+
+        # Recovery put the check on a new perform-check, still running.
+        assert up_info.change_id not in (None, down_info.change_id)
+        assert up_info.change_id is not None
+        performing = client.get_change(up_info.change_id)
+        assert performing.kind == ops.pebble.ChangeKind.PERFORM_CHECK.value
+        assert performing.status == ops.pebble.ChangeStatus.DOING.value
+
+
+def test_check_behaviour_emits_change_update_notices():
+    """Pebble emits a change-update notice for each check change it updates."""
+    ctx, state = _poll_state(
+        behaviours={
+            CheckBehaviour(
+                'chk1',
+                statuses=[ops.pebble.CheckStatus.DOWN, ops.pebble.CheckStatus.UP],
+            )
+        },
+        infos={CheckInfo('chk1')},
+        reads=2,
+    )
+    ctx.run(ctx.on.config_changed(), state=state)
+    notices = [
+        notice
+        for notice in PollCheckCharm.notices
+        if notice.type == ops.pebble.NoticeType.CHANGE_UPDATE
+    ]
+    # The perform-check that failed, the recover-check opened for it, and the
+    # perform-check that follows recovery. A notice is keyed by its change ID,
+    # so the recover-check being opened and then completing is one notice with
+    # two occurrences, as it would be in Pebble.
+    assert [(notice.last_data['kind'], notice.occurrences) for notice in notices] == [
+        ('perform-check', 1),
+        ('recover-check', 2),
+        ('perform-check', 1),
+    ]
+    assert {notice.last_data['check-name'] for notice in notices} == {'chk1'}
+
+
+def test_check_behaviour_only_advances_the_check_read():
+    """Reading one check doesn't advance another check's sequence."""
+    ctx, state = _poll_state(
+        behaviours={
+            CheckBehaviour(
+                'chk1',
+                statuses=[ops.pebble.CheckStatus.UP, ops.pebble.CheckStatus.DOWN],
+            ),
+            CheckBehaviour(
+                'chk2',
+                statuses=[ops.pebble.CheckStatus.UP, ops.pebble.CheckStatus.DOWN],
+            ),
+        },
+        infos={CheckInfo('chk1'), CheckInfo('chk2')},
+        reads=2,
+        check_name='chk1',
+    )
+    state_out = ctx.run(ctx.on.config_changed(), state=state)
+    assert [info.status for info in PollCheckCharm.seen] == [
+        ops.pebble.CheckStatus.UP,
+        ops.pebble.CheckStatus.DOWN,
+    ]
+    # chk2 was never read, so it is still on its seeded status.
+    assert state_out.get_container('foo').get_check_info('chk2').status == (
+        ops.pebble.CheckStatus.UP
+    )
+
+
+def test_check_behaviour_inactive_and_back():
+    """An inactive entry stops the check, and starting again resets the counters."""
+    ctx, state = _poll_state(
+        behaviours={
+            CheckBehaviour(
+                'chk1',
+                statuses=[
+                    ops.pebble.CheckStatus.INACTIVE,
+                    ops.pebble.CheckStatus.UP,
+                ],
+            )
+        },
+        infos={CheckInfo('chk1', successes=9, failures=0)},
+        reads=2,
+    )
+    ctx.run(ctx.on.config_changed(), state=state)
+    stopped, restarted = PollCheckCharm.seen
+    # Stopping leaves the counts alone and reports no change ID.
+    assert stopped.status == ops.pebble.CheckStatus.INACTIVE
+    assert stopped.change_id is None
+    assert (stopped.failures, stopped.successes) == (0, 9)
+    # Starting again resets both counts, and then this read's poll succeeds.
+    assert restarted.status == ops.pebble.CheckStatus.UP
+    assert restarted.change_id is not None
+    assert (restarted.failures, restarted.successes) == (0, 1)
+
+
+def test_no_check_behaviour_keeps_the_seeded_status():
+    """A check with no declared behaviour reads the same every time, as before."""
+    ctx, state = _poll_state(
+        behaviours=set(),
+        infos={CheckInfo('chk1', status=ops.pebble.CheckStatus.DOWN, failures=3, successes=2)},
+        reads=3,
+    )
+    ctx.run(ctx.on.config_changed(), state=state)
+    assert [(info.status, info.failures, info.successes) for info in PollCheckCharm.seen] == [
+        (ops.pebble.CheckStatus.DOWN, 3, 2)
+    ] * 3
+
+
+def test_check_behaviour_for_an_unknown_check_is_inconsistent():
+    ctx, state = _poll_state(
+        behaviours={CheckBehaviour('nope', statuses=[ops.pebble.CheckStatus.UP])},
+        infos={CheckInfo('chk1')},
+        reads=1,
+    )
+    with pytest.raises(InconsistentScenarioError, match='no check with that name'):
+        ctx.run(ctx.on.config_changed(), state=state)
+
+
+def test_check_behaviour_needs_at_least_one_status():
+    with pytest.raises(ValueError, match='needs at least one status'):
+        CheckBehaviour('chk1')

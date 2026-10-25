@@ -202,6 +202,30 @@ def test_the_prompt_says_how_to_decline():
     assert "Install `ops` and `pytest`, not\n  `ops[testing]`." in text
 
 
+def test_the_prompt_scopes_the_hook_tool_guidance_to_substrate_none():
+    text = " ".join(extraction._SCHEMA_INSTRUCTIONS.split())
+    assert (
+        "under `testing.Context` fails whether or not the bug is real. For these bugs, on `substrate: none`:"
+        in text
+    )
+
+
+def test_the_prompt_puts_hook_tool_bugs_on_substrate_none():
+    """All 23 `#2709` answers in `spike-step-5/static-retry/RESULT.md` §29
+    said `substrate: lxd`, where the hook-tool guidance (scoped to
+    `substrate: none`) never applies and `commands[]` never runs."""
+    text = " ".join(extraction._SCHEMA_INSTRUCTIONS.split())
+    rule = text[text.index("A bug in what a Juju hook tool returns") :]
+    assert rule.startswith(
+        "A bug in what a Juju hook tool returns or how ops handles it (`relation-get`, `relation-list`, "
+        "`relation-ids`, `config-get`, `is-leader`, `secret-get`, and so on) is \"none\" when the issue "
+        "(or a comment) says what the tool printed or how it exited, for example `ERROR permission denied`. "
+        "Test it with fake hook tools, as described below, not by deploying a charm."
+    )
+    # It sits with the substrate choice, before the commands section.
+    assert text.index("A bug in what a Juju hook tool returns") < text.index('"commands" is a list of POSIX')
+
+
 def test_the_prompt_example_has_no_doubled_escapes():
     """The instructions are a plain string, so `\\n` in the source is `\n`
     in what the model reads, as it would be in the test file."""

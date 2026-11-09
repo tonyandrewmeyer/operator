@@ -32,7 +32,10 @@ jobs:
         with:
           mode: qserver
           viewerUrl: https://canonical.tiobe.com/tiobeweb/TICS/api/cfg?name=default
-          ticsAuthToken: ${{ secrets.TICSAUTHTOKEN }}
+          # TICSAUTHTOKEN is an organisation secret, and GitHub has no
+          # organisation-level environments, so the dedicated environment this
+          # audit asks for cannot be written here.
+          ticsAuthToken: ${{ secrets.TICSAUTHTOKEN }}  # zizmor: ignore[secrets-outside-env]
           project: operator
           installTics: true
 

@@ -12,6 +12,7 @@ permissions: {}
 jobs:
   update-pins:
     runs-on: ubuntu-latest
+    environment: update-charm-pins  # Required to access secrets.UPDATE_CHARM_PINS_ACCESS_TOKEN
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

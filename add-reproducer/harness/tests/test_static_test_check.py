@@ -854,7 +854,7 @@ def test_the_record_shows_the_retry_and_both_verdicts():
     hypothesis = extractor.extract(_issue())
     record = build_record(2045, extractor=extractor, hypothesis=hypothesis, llm=llm)
     test_check = record["test_check"]
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == 3
     assert test_check["ran"] is True
     assert test_check["retried"] is True
     assert test_check["both_failed"] is True

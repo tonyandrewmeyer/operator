@@ -30,7 +30,10 @@ from typing import Any
 
 # 2: adds `test_check`, the first pass's static check of its embedded test
 # file and whether that check sent the extraction round once more.
-SCHEMA_VERSION = 2
+# 3: adds `substrate_override`, set by the pipeline when a fake-hook-tool
+# test ran as `substrate: none` against the answer's own field
+# (`pipeline.override_substrate()`); `None` otherwise.
+SCHEMA_VERSION = 3
 
 
 def build(
@@ -69,6 +72,7 @@ def build(
         "second_pass": _second_pass_fields(second),
         "test_check": _test_check_fields(extractor),
         "final_in_scope": getattr(hypothesis, "in_scope", None),
+        "substrate_override": None,
         "llm_calls": list(getattr(llm, "calls", []) or []),
     }
     if error is not None:
@@ -187,6 +191,13 @@ def render(record: dict) -> list[str]:
     else:
         lines.append("  test check: nothing to check")
     lines.append(f"  final in_scope: {record.get('final_in_scope')}")
+    override = record.get("substrate_override")
+    if override:
+        tools = ", ".join(override.get("faked_hook_tools") or [])
+        lines.append(
+            f"  substrate override: {override.get('from')} -> {override.get('to')} "
+            f"(the test fakes hook tools: {tools})"
+        )
     if record.get("error"):
         lines.append(f"  error: {record['error']}")
     calls = record.get("llm_calls") or []

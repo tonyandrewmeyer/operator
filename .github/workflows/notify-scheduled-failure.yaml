@@ -18,6 +18,8 @@ on:
       OPENROUTER_API_KEY:
         required: false
 
+permissions: {}
+
 jobs:
   notify:
     runs-on: ubuntu-latest

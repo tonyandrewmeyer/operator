@@ -373,6 +373,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _unbound_after_try(tree)
     reasons += _testing_relation_dicts(tree)
     reasons += _model_framework(tree)
+    reasons += _unbuildable_meta(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -1797,30 +1798,37 @@ def _built_meta(call: ast.Call, names: _Names, *, follow: bool = True):
     """The `CharmMeta` a `CharmMeta(...)` / `CharmMeta.from_yaml(...)` call
     builds, with the installed ops, when every argument is a literal (or,
     with `follow`, a name assigned exactly once to one); `None` otherwise."""
+    return _build_meta(call, names, follow=follow)[0]
+
+
+def _build_meta(call: ast.Call, names: _Names, *, follow: bool = True) -> tuple[object | None, Exception | None]:
+    """`(the CharmMeta, None)` as `_built_meta()` builds it, `(None, the
+    exception)` when every argument is a literal and building it with the
+    installed ops raises, and `(None, None)` when `call` is not that."""
     ops = _ops()
     if ops is None:
-        return None
+        return None, None
     func = names.resolve(call.func)
     if func is ops.CharmMeta:
         build = ops.CharmMeta
     elif _same_function(func, ops.CharmMeta.from_yaml):
         build = ops.CharmMeta.from_yaml
     else:
-        return None
+        return None, None
     if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
-        return None
+        return None, None
     try:
         value = names.value_of if follow else (lambda node: node)
         args = [ast.literal_eval(value(a)) for a in call.args]
         kwargs = {k.arg: ast.literal_eval(value(k.value)) for k in call.keywords}
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-        return None
+        return None, None
     if build is not ops.CharmMeta and not all(isinstance(v, str) for v in [*args, *kwargs.values()]):
-        return None
+        return None, None
     try:
-        return build(*args, **kwargs)
-    except Exception:
-        return None
+        return build(*args, **kwargs), None
+    except Exception as exc:
+        return None, exc
 
 
 def _remote_endpoints(tree: ast.Module, names: _Names) -> frozenset:
@@ -2052,6 +2060,121 @@ def _certainly_fails(body: list[ast.stmt], names: _Names, *, handler: bool = Fal
             and not issubclass(cls, ops.ModelError)
         )
     return False
+
+
+def _unbuildable_meta(tree: ast.Module) -> list[str]:
+    """A `CharmMeta` built from literals that the installed ops cannot build,
+    in a fake-hook-tool test, where that certainly fails the test.
+
+    Live on `#2709`, one test was the prompt example's shape exactly, all
+    four hook tools faked and the error caught and asserted on, but its meta
+    was `CharmMeta.from_yaml('name: myapp\\nrequires:\\n  db:\\n')`: an
+    endpoint with no mapping, which raises `TypeError: 'NoneType' object is
+    not subscriptable` inside `CharmMeta` on ops 3.8.3 and `main` alike
+    (`spike-step-5/static-retry/RESULT.md` §30, 8-7). With `interface: db`
+    added it was a valid reproduction. `_built_meta()` already builds such a
+    literal, but treated a build that raises as unknown, so every rule that
+    needs the meta stayed silent.
+
+    Rejects a `CharmMeta(...)` / `CharmMeta.from_yaml(...)` call whose
+    arguments are all literals (or names assigned once to one, in the file or
+    in the test function) when building it with the installed ops raises,
+    the call is in a test function pytest runs as written (or at module
+    level, a collection error), and the exception certainly escapes the
+    test (`_escapes()`). Only in a fake-hook-tool test (`_faked_hook_tools()`),
+    where the meta is scaffolding for an `ops.Model` and not what the issue
+    is about: a bug in how ops parses metadata would be reproduced by exactly
+    such a call.
+
+    The reason quotes the error, and, when an endpoint under `requires`,
+    `provides` or `peers` is not a mapping with an `interface`, names it and
+    says what its mapping needs.
+    """
+    ops = _ops()
+    if ops is None or not _faked_hook_tools(tree):
+        return []
+    counts = _file_binding_counts(tree)
+    if counts is None:
+        return []
+    parents = _parents(tree)
+    tests = {id(function): function for function in _test_functions(tree)}
+    reasons = []
+    for node in ast.walk(tree):
+        if not _is_meta_call(node, _Names(tree, counts)):
+            continue
+        scope = parents.get(node)
+        while scope is not None and not isinstance(
+            scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
+        ):
+            scope = parents.get(scope)
+        if isinstance(scope, ast.Module):
+            names = _Names(tree, counts)
+        elif scope is not None and id(scope) in tests:
+            names = _Names(tree, counts, scope)
+        else:
+            continue
+        meta, error = _build_meta(node, names)
+        if error is None or not _escapes(node, parents, type(error), names):
+            continue
+        reasons.append(_unbuildable_meta_reason(node, names, error))
+    return list(dict.fromkeys(reasons))
+
+
+def _unbuildable_meta_reason(call: ast.Call, names: _Names, error: Exception) -> str:
+    message = (str(error).strip().splitlines() or [""])[0]
+    if len(message) > 160:
+        message = message[:160] + "..."
+    shown = f"{type(error).__name__}: {message}" if message else type(error).__name__
+    reason = (
+        f"line {call.lineno}: `{ast.unparse(call.func)}(...)` raises `{shown}` with the installed ops, "
+        "so the test fails there with or without the bug"
+    )
+    bad = _endpoints_without_mapping(call, names)
+    if bad:
+        listed = _and_list(f"`{endpoint}` (under `{section}`)" for section, endpoint in bad)
+        section, endpoint = bad[0]
+        reason += (
+            f"; every endpoint under `requires`, `provides` or `peers` needs a mapping with its "
+            f"`interface:`, and {listed} has none: write it as `{endpoint}:` with an indented "
+            f"`interface: {endpoint}` line under it (`{section}:\\n  {endpoint}:\\n    interface: {endpoint}\\n` "
+            "in the YAML string)"
+        )
+    else:
+        reason += "; build the meta from YAML (or a dict) the installed ops accepts, as in the example"
+    return reason
+
+
+def _endpoints_without_mapping(call: ast.Call, names: _Names) -> list[tuple[str, str]]:
+    """[(section, endpoint)] for each endpoint under `requires`, `provides` or
+    `peers` in the literal a `CharmMeta` call builds from that is not a
+    mapping with an `interface`; `[]` when that cannot be read."""
+    ops = _ops()
+    keyword = "raw" if ops is not None and names.resolve(call.func) is ops.CharmMeta else "metadata"
+    arg = _call_arg(call, 0, keyword)
+    if arg is None:
+        return []
+    try:
+        raw = ast.literal_eval(names.value_of(arg))
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return []
+    if isinstance(raw, str):
+        try:
+            import yaml
+
+            raw = yaml.safe_load(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, dict):
+        return []
+    found = []
+    for section in ("requires", "provides", "peers"):
+        endpoints = raw.get(section)
+        if not isinstance(endpoints, dict):
+            continue
+        for endpoint, value in endpoints.items():
+            if not (isinstance(value, dict) and "interface" in value):
+                found.append((section, str(endpoint)))
+    return found
 
 
 def _undeclared_endpoints(tree: ast.Module) -> list[str]:
@@ -2485,9 +2608,12 @@ def _relation_access(
     return None
 
 
-def _databag(node: ast.AST, relations: dict, contents: dict) -> str | None:
+def _databag(node: ast.AST, relations: dict, contents: dict, inline=None) -> str | None:
     """The relation name, when `node` is `R.data[X]` on a tracked relation, or
-    a name assigned once (at the top of the test, earlier) to that."""
+    a name assigned once (at the top of the test, earlier) to that. With
+    `inline`, a predicate, also `A.data[X]` where `A` is an expression it
+    accepts (a relation access written inline); then the name is `A`'s
+    source."""
     if isinstance(node, ast.Name) and node.id in contents:
         return contents[node.id]
     if (
@@ -2495,19 +2621,22 @@ def _databag(node: ast.AST, relations: dict, contents: dict) -> str | None:
         and isinstance(node.ctx, ast.Load)
         and isinstance(node.value, ast.Attribute)
         and node.value.attr == "data"
-        and isinstance(node.value.value, ast.Name)
-        and node.value.value.id in relations
     ):
-        return node.value.value.id
+        relation = node.value.value
+        if isinstance(relation, ast.Name) and relation.id in relations:
+            return relation.id
+        if inline is not None and not isinstance(relation, ast.Name) and inline(relation):
+            return ast.unparse(relation)
     return None
 
 
-def _databag_reads(target: ast.AST, relations: dict, contents: dict, names: _Names):
+def _databag_reads(target: ast.AST, relations: dict, contents: dict, names: _Names, inline=None):
     """Yield (read node, relation name) for each read of a relation databag
     in `target` that certainly loads it, which is when ops runs `relation-get`:
     `dict(bag)`, `len(bag)`, `bool(bag)`, `list(bag)`, `bag == {...}`,
     `bag != {...}`, `key in bag`, `bag[key]` and `bag.get(key)`. Not
-    `bag.keys()` and the like, which are lazy views."""
+    `bag.keys()` and the like, which are lazy views. `inline` is passed to
+    `_databag()`."""
 
     def mapping_literal(node: ast.AST) -> bool:
         return isinstance(node, ast.Dict) or (isinstance(node, ast.Call) and names.resolve(node.func) is dict)
@@ -2516,21 +2645,21 @@ def _databag_reads(target: ast.AST, relations: dict, contents: dict, names: _Nam
         relation = None
         if isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords:
             if names.resolve(node.func) in (dict, len, bool, list):
-                relation = _databag(node.args[0], relations, contents)
+                relation = _databag(node.args[0], relations, contents, inline)
         if relation is None and isinstance(node, ast.Call) and node.args and isinstance(node.func, ast.Attribute):
             if node.func.attr == "get":
-                relation = _databag(node.func.value, relations, contents)
+                relation = _databag(node.func.value, relations, contents, inline)
         if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
-            relation = _databag(node.value, relations, contents)
+            relation = _databag(node.value, relations, contents, inline)
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
             left, op, right = node.left, node.ops[0], node.comparators[0]
             if isinstance(op, (ast.Eq, ast.NotEq)):
                 if mapping_literal(right):
-                    relation = _databag(left, relations, contents)
+                    relation = _databag(left, relations, contents, inline)
                 elif mapping_literal(left):
-                    relation = _databag(right, relations, contents)
+                    relation = _databag(right, relations, contents, inline)
             elif isinstance(op, (ast.In, ast.NotIn)):
-                relation = _databag(right, relations, contents)
+                relation = _databag(right, relations, contents, inline)
         if relation is not None:
             yield node, relation
 
@@ -3192,7 +3321,7 @@ def _misread_block(block: ast.With | ast.Try, scope: _Scope, scripts, helpers, b
             continue
         if _inert(statement):
             continue
-        found = _only_reads(statement, scope, scripts, helpers, before) if not_found else None
+        found = _only_reads(statement, scope, scripts, helpers, before, inline=True) if not_found else None
         if not found:
             return []
         reads += found
@@ -3214,11 +3343,48 @@ def _misread_block(block: ast.With | ast.Try, scope: _Scope, scripts, helpers, b
     return reasons
 
 
-def _only_reads(statement: ast.stmt, scope: _Scope, scripts, helpers, before) -> list[tuple[ast.AST, ast.AST]] | None:
+def _only_reads(
+    statement: ast.stmt, scope: _Scope, scripts, helpers, before, *, inline: bool = False
+) -> list[tuple[ast.AST, ast.AST]] | None:
     """[(read, the databag it reads)] when `statement` is an expression, a
     plain assignment or an `assert` whose only calls are databag reads of
     relations the test assigned, with keys `_inert_key()` accepts, and that
-    looks up nothing but `.data`, `.app`, `.unit` and `.get`; else `None`."""
+    looks up nothing but `.data`, `.app`, `.unit` and `.get`; else `None`.
+
+    With `inline`, a databag read may also be of a relation access written
+    in place, `model.get_relation('db', 1).data[...]`, when the access
+    certainly raises no `ops.ModelError` (`_quiet_relation()`), its ID (if it
+    names one) is one the `relation-ids` fake certainly prints, and the key
+    is `.app` or `.unit` of such an access; what the access itself calls and
+    looks up is then allowed. Live on `#2709`, one
+    test read `dict(model.get_relation('db', 1).data[model.get_relation('db',
+    1).app])` inside `pytest.raises(ops.RelationNotFoundError)`
+    (`spike-step-5/static-retry/RESULT.md` §30, 8-1)."""
+    quiet: dict[int, ast.AST] = {}
+
+    def accepts(node: ast.AST) -> bool:
+        """A quiet access to a relation `relation-ids` certainly lists: one
+        it does not list can raise `RelationNotFoundError` on `main`, which
+        turns a failing `relation-get` on a relation that is gone into one."""
+        if not _quiet_relation(node, scope, scripts, helpers, before):
+            return False
+        access = _relation_access(node, scope.models, scope.ids)
+        listed = _certain_fake(scripts, helpers, before, "relation-ids", _listed_relation_ids)
+        if access is None or listed is None or (access[2] is not None and access[2] not in listed):
+            return False
+        quiet[id(node)] = node
+        return True
+
+    def remote_key(key: ast.AST) -> bool:
+        """For a read of an inline access, only its own `.app` or `.unit`."""
+        return (
+            isinstance(key, ast.Attribute)
+            and key.attr in ("app", "unit")
+            and not isinstance(key.value, ast.Name)
+            and accepts(key.value)
+        )
+
+    predicate = accepts if inline else None
     if isinstance(statement, ast.Assign):
         if not all(isinstance(t, ast.Name) for t in statement.targets):
             return None
@@ -3228,11 +3394,18 @@ def _only_reads(statement: ast.stmt, scope: _Scope, scripts, helpers, before) ->
     elif not isinstance(statement, ast.Expr):
         return None
     names = scope.names
-    reads = list(_databag_reads(statement, scope.relations, scope.contents, names))
+    reads = list(_databag_reads(statement, scope.relations, scope.contents, names, predicate))
     if not reads:
         return None
     read_ids = {id(read) for read, _ in reads}
+    # The keys may reach the same accesses (`.app` of one), so collect those too.
     for node in ast.walk(statement):
+        if isinstance(node, ast.Attribute) and node.attr in ("app", "unit") and inline:
+            accepts(node.value)
+    inside = {id(n) for access in quiet.values() for n in ast.walk(access)}
+    for node in ast.walk(statement):
+        if id(node) in inside:
+            continue
         if isinstance(node, ast.Call) and id(node) not in read_ids:
             return None
         if isinstance(node, ast.Attribute) and node.attr not in ("data", "app", "unit", "get"):
@@ -3240,8 +3413,10 @@ def _only_reads(statement: ast.stmt, scope: _Scope, scripts, helpers, before) ->
         if isinstance(node, (ast.NamedExpr, ast.Lambda, ast.Await, ast.Yield, ast.YieldFrom, ast.Starred)):
             return None
         if isinstance(node, ast.Subscript):
-            bag = _databag(node, scope.relations, {})
+            bag = _databag(node, scope.relations, {}, predicate)
             if bag is not None and not _inert_key(node.slice, scope, scripts, helpers, before):
+                return None
+            if bag is not None and bag not in scope.relations and not remote_key(node.slice):
                 return None
             if bag is None and not (id(node) in read_ids):
                 return None
@@ -3252,7 +3427,10 @@ def _only_reads(statement: ast.stmt, scope: _Scope, scripts, helpers, before) ->
         elif isinstance(read, ast.Subscript):
             bag = read.value
         else:
-            right = isinstance(read.ops[0], (ast.In, ast.NotIn)) or _databag(read.left, scope.relations, scope.contents) is None
+            right = (
+                isinstance(read.ops[0], (ast.In, ast.NotIn))
+                or _databag(read.left, scope.relations, scope.contents, predicate) is None
+            )
             bag = read.comparators[0] if right else read.left
         found.append((read, bag))
     return found
@@ -3945,6 +4123,14 @@ def _relation_id_count(script: str) -> int | None:
     except ValueError:
         return None
     return len(printed)
+
+
+def _listed_relation_ids(script: str) -> frozenset[int] | None:
+    """The relation IDs a `relation-ids` fake certainly prints, when
+    `_relation_id_count()` is sure of them; `None` otherwise."""
+    if _relation_id_count(script) is None:
+        return None
+    return frozenset(int(relation_id.split(":")[-1]) for relation_id in _certain_json(script))
 
 
 def _unit_names(script: str) -> bool | None:

@@ -317,6 +317,20 @@ def check_commands(commands: list[str]) -> StaticCheckResult | None:
     return check(test_file.body, path=test_file.path)
 
 
+def faked_hook_tools_in_commands(commands: list[str]) -> list[str]:
+    """`faked_hook_tools()` of the test file a heredoc in `commands[]` writes,
+    or `[]` when there is no such file.
+
+    Non-empty exactly when `commands[]` is a fake-hook-tool `_ModelBackend`
+    test, which only `substrate: none` runs; the pipeline runs such an
+    answer as `none` whatever its `substrate` field says
+    (`pipeline.override_substrate()`)."""
+    test_file = embedded_test_file(commands)
+    if test_file is None:
+        return []
+    return faked_hook_tools(test_file.body)
+
+
 def runs_under_pytest(commands: list[str]) -> bool:
     """Whether a command after the test file's heredoc runs pytest on it."""
     test_file = embedded_test_file(commands)

@@ -62,6 +62,37 @@ class PipelineResult:
     # dispatches that most needed explaining stopped. `None` means the run
     # never reached extraction (a filter drop). See `extraction_record.py`.
     extraction_record: dict | None = None
+    # Set when `override_substrate()` ran the answer as `substrate: none`
+    # against its own field: `{"from": <the field>, "to": "none",
+    # "faked_hook_tools": [...]}`. `None` for every other run, a native
+    # `none` included, so an overridden run can be told from one.
+    substrate_override: dict | None = None
+
+
+def override_substrate(hypothesis):
+    """The hypothesis to run, and the override record or `None`.
+
+    A `commands[]` that is a fake-hook-tool `_ModelBackend` test (what
+    `static_test_check.faked_hook_tools()` recognises) runs only on
+    `substrate: none`: it fakes the hook tools on `PATH` and needs no Juju.
+    On `#2709` 13 of 14 live answers wrote that test and none said `none`
+    (12 `lxd`, 2 `k8s`), so every one stopped at the stimulus gate without
+    running it, and a prompt rule asking for `none` moved nothing
+    (`spike-step-5/static-retry/RESULT.md` §29, §30). So the test decides:
+    such an answer is `none` for everything downstream (`needs_juju`, the
+    confidence gate, the static check gate, running `commands[]`, the
+    classifier and the composer), whatever its `substrate` field says.
+    Deterministic and narrow: no LLM call, and nothing beyond what
+    `faked_hook_tools()` already recognises."""
+    substrate = hypothesis.moving_parts.substrate
+    if substrate == "none":
+        return hypothesis, None
+    tools = static_test_check.faked_hook_tools_in_commands(hypothesis.commands)
+    if not tools:
+        return hypothesis, None
+    moving_parts = dataclasses.replace(hypothesis.moving_parts, substrate="none")
+    overridden = dataclasses.replace(hypothesis, moving_parts=moving_parts)
+    return overridden, {"from": substrate, "to": "none", "faked_hook_tools": tools}
 
 
 def _enclosing_python_project(path: Path) -> Path | None:
@@ -160,6 +191,8 @@ class Pipeline:
         # them past extraction, and a record that only some paths carried
         # would be worse than none.
         self._extraction_record: dict | None = None
+        # Same reason: set once, stamped onto whatever comes back.
+        self._substrate_override: dict | None = None
 
     @property
     def scratch_root(self) -> Path:
@@ -183,6 +216,7 @@ class Pipeline:
         # Cleared per issue: a batch run reuses one `Pipeline`, and a filter
         # drop must not inherit the previous issue's extraction record.
         self._extraction_record = None
+        self._substrate_override = None
         result = self._run_for_issue(
             issue,
             calibration_mode=calibration_mode,
@@ -191,6 +225,7 @@ class Pipeline:
             timestamp=timestamp,
         )
         result.extraction_record = extraction_record.refresh_calls(self._extraction_record, self.llm)
+        result.substrate_override = self._substrate_override
         return result
 
     def _run_for_issue(
@@ -249,6 +284,10 @@ class Pipeline:
         # confidence-gate-2639/RESULT.md); the confidence-gated false-keep
         # rate this exemption is measured against is 0/0, not merely 0-of-
         # something-untried.
+        # Before anything reads `substrate`. See `override_substrate()`.
+        hypothesis, self._substrate_override = override_substrate(hypothesis)
+        if self._extraction_record is not None:
+            self._extraction_record["substrate_override"] = self._substrate_override
         branch = runner_stage.choose_branch(hypothesis)
         # Ahead of the confidence gate, which would also stop it (the
         # extraction is told to answer "low"), so that the record says why.

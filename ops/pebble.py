@@ -1200,7 +1200,8 @@ class Check:
         if self.exec is None:
             self.exec = {}
         for name, value in other.items():
-            if not value:
+            # A user-id or group-id of 0 (root) is a real value, so only skip None.
+            if not value and not (name in ('user-id', 'group-id') and value is not None):
                 continue
             if name == 'environment':
                 current = self.exec.get(name, {})

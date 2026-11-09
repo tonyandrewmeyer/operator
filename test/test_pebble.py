@@ -1240,6 +1240,24 @@ class TestCheck:
         assert one != d
         assert one != 5
 
+    def test_merge_exec_zero_ids(self):
+        c = pebble.Check(
+            'chk',
+            {
+                'override': 'merge',
+                'exec': {'command': 'x', 'user-id': 1000, 'group-id': 2000},
+            },
+        )
+        c._merge(
+            pebble.Check(
+                'chk',
+                {'override': 'merge', 'exec': {'command': 'x', 'user-id': 0, 'group-id': 0}},
+            )
+        )
+        assert c.exec is not None
+        assert c.exec['user-id'] == 0
+        assert c.exec['group-id'] == 0
+
 
 class TestLogTarget:
     def _assert_empty(self, target: pebble.LogTarget, name: str):

@@ -374,6 +374,8 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _testing_relation_dicts(tree)
     reasons += _model_framework(tree)
     reasons += _unbuildable_meta(tree)
+    reasons += _fake_without_shebang(tree)
+    reasons += _missing_charm_meta_attribute(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -2175,6 +2177,244 @@ def _endpoints_without_mapping(call: ast.Call, names: _Names) -> list[tuple[str,
             if not (isinstance(value, dict) and "interface" in value):
                 found.append((section, str(endpoint)))
     return found
+
+
+# -- a fake with no `#!` line, and an attribute `CharmMeta` lacks ------------
+#
+# Both from the §29 control answers, which the substrate override now runs
+# (`spike-step-5/static-retry/RESULT.md` §31): c-2 wrote its fakes as
+# `path.write_text(script)` with no `#!` line and died on `OSError: [Errno 8]
+# Exec format error: 'relation-ids'`; c-7 built its meta with
+# `CharmMeta.from_yaml_file(...)` (and §27's 6-6 with `CharmMeta.from_dict(...)`),
+# neither of which exists. All three fail the same way on ops 3.8.3 and `main`.
+
+
+def _fake_writer(func: ast.FunctionDef) -> tuple[int, list, bool] | None:
+    """(index of the tool-name parameter, the pieces of what it writes, whether
+    it `chmod`s the file) for a module-level helper that writes one file,
+    `<dir> / name` (directly or through a name assigned once to that), with
+    `write_text(...)`; `None` for anything else. A piece is a string, a
+    parameter's index (an `int`), or `None` for anything unknown."""
+    args = func.args
+    if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults:
+        return None
+    params = [a.arg for a in args.args]
+    paths: dict[str, int] = {}  # {local name: tool-name parameter index}
+
+    def tool_param(node: ast.AST) -> int | None:
+        if isinstance(node, ast.Name) and node.id in paths:
+            return paths[node.id]
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Div)
+            and isinstance(node.right, ast.Name)
+            and node.right.id in params
+        ):
+            return params.index(node.right.id)
+        return None
+
+    counts = _local_binding_counts(func) or {}
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and counts.get(node.targets[0].id) == 1
+            and (at := tool_param(node.value)) is not None
+        ):
+            paths[node.targets[0].id] = at
+    writes = []
+    chmod = False
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        at = tool_param(node.func.value)
+        if node.func.attr == "write_text" and at is not None and len(node.args) == 1 and not node.keywords:
+            parts = _concatenated(node.args[0])
+            if parts is None:
+                return None
+            writes.append((at, [p if isinstance(p, str) else (params.index(p.id) if isinstance(p, ast.Name) and p.id in params else None) for p in parts]))
+        elif node.func.attr == "chmod" and at is not None:
+            chmod = True
+        elif node.func.attr == "chmod" and isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+            if node.args and tool_param(node.args[0]) is not None:
+                chmod = True
+    if len(writes) != 1:
+        return None
+    name_at, pieces = writes[0]
+    if name_at in [p for p in pieces if isinstance(p, int)]:
+        return None
+    return name_at, pieces, chmod
+
+
+def _lacks_shebang(pieces: list) -> bool:
+    """Whether text built from `pieces` (strings, `None` for unknown) certainly
+    does not start with `#!`."""
+    known = ""
+    for piece in pieces:
+        if not isinstance(piece, str):
+            # Only what comes before the first unknown piece is certain.
+            return known[:2] != "#!"[: len(known[:2])] if known else False
+        known += piece
+    return not known.startswith("#!")
+
+
+def _shebangless_fakes(tree: ast.Module) -> dict[str, int]:
+    """{hook tool: line of the call that writes its fake} for each hook tool
+    the file fakes exactly once, through a recognised writer helper
+    (`_fake_writer()`) that makes the file executable, with a script that
+    certainly leaves the file without a `#!` line."""
+    writers = {
+        node.name: shape
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and (shape := _fake_writer(node)) is not None and shape[2]
+    }
+    found: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in writers):
+            continue
+        name_at, pieces, _ = writers[node.func.id]
+        if node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
+            continue
+        indexes = [p for p in pieces if isinstance(p, int)]
+        if len(node.args) <= max([name_at, *indexes]):
+            continue
+        tool = node.args[name_at]
+        if not (isinstance(tool, ast.Constant) and tool.value in _HOOK_TOOLS):
+            continue
+        text = []
+        for piece in pieces:
+            if isinstance(piece, int):
+                arg = node.args[piece]
+                piece = arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else None
+            text.append(piece)
+        if _lacks_shebang(text):
+            found[tool.value] = node.lineno
+    scripts = _fake_scripts(tree)
+    return {tool: line for tool, line in found.items() if len(scripts.get(tool, [])) == 1}
+
+
+def _fake_without_shebang(tree: ast.Module) -> list[str]:
+    """A hook tool fake whose file has no `#!` line, run by an access the test
+    certainly makes.
+
+    The kernel cannot run an executable text file that does not start with
+    `#!`, and ops runs hook tools with `subprocess.run()`, not a shell, so
+    the first one it runs raises `OSError: [Errno 8] Exec format error`
+    before the test reaches the bug, on every version of ops. §29's control
+    answer c-2 wrote its fakes with `path.write_text(script)` and died on
+    `relation-ids` that way on 3.8.3 and `main`
+    (`spike-step-5/static-retry/RESULT.md` §31).
+
+    Only for a fake written once, by a module-level helper that writes
+    `<dir> / name` with `write_text(...)` and `chmod`s it, whose text
+    certainly does not start with `#!` (a literal, or the call's literal
+    script argument, at the start); and only when an access
+    `_hook_tool_accesses()` is certain runs uses that tool first and its
+    `OSError` certainly escapes the test (`_escapes()`).
+    """
+    missing = _shebangless_fakes(tree)
+    if not missing:
+        return []
+    found = _hook_tool_accesses(tree)
+    counts = _file_binding_counts(tree)
+    if not found or counts is None:
+        return []
+    parents = _parents(tree)
+    reasons = []
+    for access in found:
+        if access.first not in missing:
+            continue
+        names = _Names(tree, counts, access.function)
+        if not _escapes(access.node, parents, OSError, names):
+            continue
+        tools = sorted(missing)
+        listed = _and_list(f"`{t}`" for t in tools)
+        reasons.append(
+            f"line {access.node.lineno}: `{ast.unparse(access.node)}` runs `{access.first}` first, and the "
+            f"{listed} fake{'s' if len(tools) > 1 else ''} the test writes "
+            f"{'have' if len(tools) > 1 else 'has'} no `#!` line, so ops fails with `OSError: [Errno 8] "
+            f"Exec format error: '{access.first}'` before it reaches the bug, on every version of ops; "
+            "start every fake with a `#!` line, for example `#!/bin/sh`, as in the example "
+            "(`path.write_text('#!/bin/sh\\n' + script + '\\n')`)"
+        )
+        break
+    return reasons
+
+
+def _missing_charm_meta_attribute(tree: ast.Module) -> list[str]:
+    """A read of an attribute the installed `CharmMeta` class does not have,
+    in a fake-hook-tool test, where that certainly fails the test.
+
+    §29's control answer c-7 built its meta with
+    `ops.CharmMeta.from_yaml_file('metadata.yaml')`, and §27's 6-6 with
+    `ops.CharmMeta.from_dict(meta)`: neither exists on ops 3.8.3 or `main`,
+    so both died on `AttributeError` before reaching the bug
+    (`spike-step-5/static-retry/RESULT.md` §31).
+
+    `CharmMeta` however it is named (`ops.CharmMeta`, `ops.charm.CharmMeta`,
+    an imported or aliased name, a name assigned once to it), checked
+    against the installed class, as `_model_framework()` checks `ops.Model`.
+    Only a load of the attribute, not one the file ever sets (by assignment
+    or `setattr`), in a test function pytest runs as written or at module
+    level, with the `AttributeError` certainly escaping the test
+    (`_escapes()`). Only in a fake-hook-tool test, as `_unbuildable_meta()`:
+    there the meta is scaffolding for an `ops.Model`.
+    """
+    ops = _ops()
+    if ops is None or not _faked_hook_tools(tree):
+        return []
+    counts = _file_binding_counts(tree)
+    if counts is None:
+        return []
+    set_somewhere = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load)
+    } | {
+        arg.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for arg in node.args
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == "setattr")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "setattr")
+        )
+    }
+    parents = _parents(tree)
+    tests = {id(function): function for function in _test_functions(tree)}
+    reasons = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)):
+            continue
+        if node.attr in set_somewhere or node.attr.startswith("__"):
+            continue
+        scope = parents.get(node)
+        while scope is not None and not isinstance(
+            scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
+        ):
+            scope = parents.get(scope)
+        if isinstance(scope, ast.Module):
+            names = _Names(tree, counts)
+        elif scope is not None and id(scope) in tests:
+            names = _Names(tree, counts, scope)
+        else:
+            continue
+        value = node.value
+        for _ in range(5):  # through `M = ops.CharmMeta`, and so on
+            value = names.value_of(value)
+        if names.resolve(value) is not ops.CharmMeta:
+            continue
+        if inspect.getattr_static(ops.CharmMeta, node.attr, None) is not None or hasattr(ops.CharmMeta, node.attr):
+            continue
+        if not _escapes(node, parents, AttributeError, names):
+            continue
+        reasons.append(
+            f"line {node.lineno}: `{ast.unparse(node)}` does not exist: `CharmMeta` has no `{node.attr}` "
+            "in the installed ops, so this raises `AttributeError` with or without the bug; build the meta from a "
+            "YAML string with `CharmMeta.from_yaml(...)`, as in the example "
+            "(`ops.CharmMeta.from_yaml('name: myapp\\nrequires:\\n  db:\\n    interface: db\\n')`)"
+        )
+    return list(dict.fromkeys(reasons))
 
 
 def _undeclared_endpoints(tree: ast.Module) -> list[str]:

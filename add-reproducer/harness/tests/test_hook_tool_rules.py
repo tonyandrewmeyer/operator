@@ -431,7 +431,13 @@ def test_is_leader_needs_a_helper_that_writes_the_script_as_it_is(helper):
     del fakes["is-leader"]
     access = "relation = model.get_relation('db', 2)\ndict(relation.data[relation.app])"
     source = _shape(access, fakes).replace('path.write_text("#!/bin/sh\\n" + script + "\\n")', helper)
-    assert check(source).passed, check(source).reasons
+    reasons = check(source).reasons
+    if helper == "path.write_text(script)":
+        # No `#!` line at all: the fakes cannot run, which a rule of its own
+        # rejects (§32); the `is-leader` rule still says nothing.
+        assert reasons and all("no `#!` line" in r for r in reasons), reasons
+    else:
+        assert not reasons, reasons
 
 
 def test_an_f_string_helper_is_recognised():

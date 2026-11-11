@@ -3421,7 +3421,10 @@ def _databag_not_read(tree: ast.Module) -> list[str]:
         statement = place.statement
         before = function.body[:index]
         if isinstance(statement, (ast.With, ast.Try)):
-            reasons += _misread_block(statement, scope, scripts, helpers, before, ops)
+            found = _misread_block(statement, scope, scripts, helpers, before, ops)
+            if not found and isinstance(statement, ast.Try) and statement is function.body[index]:
+                found = _asserts_only_in_handlers(statement, function, scope, scripts, helpers, before, ops)
+            reasons += found
         elif (
             isinstance(statement, ast.Expr)
             and _looked_up(statement.value, scope, scripts, helpers, before)
@@ -3436,6 +3439,56 @@ def _databag_not_read(tree: ast.Module) -> list[str]:
                 )
             )
     return list(dict.fromkeys(reasons))
+
+
+def _asserts_only_in_handlers(
+    block: ast.Try, function: ast.FunctionDef, scope: _Scope, scripts, helpers, before, ops
+) -> list[str]:
+    """A `try` at the top of the test whose body is only unread databag
+    lookups (`_looked_up()`) and `pass`, whose handlers are all `except X`
+    with `X` an `ops.ModelError` subclass, with no `else` or `finally`, where
+    at least one handler could fail on an assertion and nothing else in the
+    test could. The lookups raise nothing, so no handler runs and the test
+    passes whether or not the bug is there: a runner job with no
+    information.
+
+    Live on `#2709` (§32's 9-5): `relation.data[relation.app]` in a `try`
+    with `except ops.RelationNotFoundError: pass` and `except
+    ops.ModelError: assert False`, and nothing after; it passes on 3.8.3 and
+    `main`. `_misread_block()` covers the shape where the `try` fails when
+    its body completes; this is the shape where it passes."""
+    if not block.handlers or block.orelse or block.finalbody:
+        return []
+    names = scope.names
+    for handler in block.handlers:
+        if handler.type is None:
+            return []
+        for t in handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]:
+            cls = names.resolve(t)
+            if not (isinstance(cls, type) and issubclass(cls, ops.ModelError)):
+                return []
+    lookups = []
+    for statement in block.body:
+        if isinstance(statement, ast.Pass):
+            continue
+        if isinstance(statement, ast.Expr) and _looked_up(statement.value, scope, scripts, helpers, before):
+            lookups.append(statement.value)
+            continue
+        return []
+    if not lookups:
+        return []
+    if not any(_may_fail_an_assertion(h, scope.functions) for h in block.handlers):
+        return []
+    if any(_may_fail_an_assertion(s, scope.functions) for s in function.body if s is not block):
+        return []
+    excepts = _and_list(f"`except {ast.unparse(h.type)}`" for h in block.handlers)
+    around = (
+        f"so the {excepts} after it never {'run' if len(block.handlers) > 1 else 'runs'}, and the test's "
+        f"only assertions are in {'those handlers' if len(block.handlers) > 1 else 'that handler'}, "
+        "so it passes whether or not the bug is there"
+    )
+    fails = _relation_get_fails(scripts, helpers, before)
+    return [_not_read_reason(node, around, fails, ", in place of that `try`,") for node in lookups]
 
 
 def _looked_up(node: ast.AST, scope: _Scope, scripts, helpers, before) -> bool:
@@ -3947,7 +4000,9 @@ def _expected_raise(block: ast.With | ast.Try, function, index: int, names: _Nam
     handlers alone bind a name read later counts too. Without `lazy`, the
     body has only lookups (`_lookup_expected_to_raise()`); with it, only
     that last `try` form, and a body with at least one unread databag
-    lookup, `lazy(node)` (`_unbound_after_try()`)."""
+    lookup, `lazy(node, local)` (`_unbound_after_try()`), as a statement or
+    assigned to a name nothing later in the `try` reads; `local` is the
+    relations the `try` assigned so far from lookups `quiet()` accepts."""
     body = block.body
     if isinstance(block, ast.With):
         if len(block.items) != 1:
@@ -3986,7 +4041,11 @@ def _expected_raise(block: ast.With | ast.Try, function, index: int, names: _Nam
             )
         drop = " outside the `try`"
     lookups, unread = [], []
-    for statement in statements:
+    # With `lazy`: relations the `try` itself assigns from a lookup that
+    # raises nothing (`relation = model.get_relation('db', 1)`, §33's 9-4).
+    local: set[str] = set()
+    counts = _local_binding_counts(function) if lazy is not None and function is not None else None
+    for position, statement in enumerate(statements):
         if isinstance(statement, ast.Pass) or _inert(statement):
             continue
         value = None
@@ -3996,9 +4055,33 @@ def _expected_raise(block: ast.With | ast.Try, function, index: int, names: _Nam
             value = statement.value
         if value is not None and quiet(value):
             lookups.append(value)
+            if (
+                lazy is not None
+                and isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and counts is not None
+                and counts.get(statement.targets[0].id) == 1
+            ):
+                local.add(statement.targets[0].id)
             continue
-        if lazy is not None and isinstance(statement, ast.Expr) and lazy(statement.value):
+        if lazy is not None and isinstance(statement, ast.Expr) and lazy(statement.value, frozenset(local)):
             unread.append(statement.value)
+            continue
+        if (
+            lazy is not None
+            and isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and lazy(statement.value, frozenset(local))
+            and not any(
+                isinstance(n, ast.Name) and n.id == statement.targets[0].id
+                for later in statements[position + 1 :]
+                for n in ast.walk(later)
+            )
+        ):
+            # A lookup assigned to a name nothing in the `try` reads: no
+            # more a read than the bare statement.
+            unread.append(statement)
             continue
         return []
     if lazy is None:
@@ -4174,7 +4257,15 @@ def _unbound_after_try(tree: ast.Module) -> list[str]:
     tracked model's `.app` or `.unit`, which are always keys of `R.data`.
     `RelationDataContent` loads lazily, so the lookup runs no hook tool and
     raises nothing (§20; by running on 3.8.3 and `main`, the read is never
-    reached and `result` is unbound on both)."""
+    reached and `result` is unbound on both).
+
+    Live on `#2709` (§32's 9-4), the relation was looked up inside the same
+    `try` and the lookup assigned to a name: `relation =
+    model.get_relation('db', 1)`; `data = relation.data[relation.app]`. So
+    `R` may also be a name the `try` assigns once from a lookup that
+    certainly raises nothing (`_raises_nothing()`), and the lookup may be
+    the value of a plain assignment to a name nothing later in the `try`
+    reads. Nothing wider."""
     ops = _ops()
     if ops is None or not _faked_hook_tools(tree):
         return []
@@ -4199,19 +4290,22 @@ def _unbound_after_try(tree: ast.Module) -> list[str]:
             scope.names,
             quiet,
             lambda node, drop, around, fails=fails: _unbound_fix(node, around, fails),
-            lambda node, scope=scope: _lazy_lookup(node, scope),
+            lambda node, local, scope=scope: _lazy_lookup(node, scope, local),
         )
     return list(dict.fromkeys(reasons))
 
 
-def _lazy_lookup(node: ast.AST, scope: _Scope) -> bool:
+def _lazy_lookup(node: ast.AST, scope: _Scope, local: frozenset = frozenset()) -> bool:
+    """`R.data[K]` with `R` a relation the test assigned at its top, or one
+    the same `try` assigned from a lookup that raises nothing (`local`), and
+    `K` that relation's `.app`, or the tracked model's `.app` or `.unit`."""
     if not (
         isinstance(node, ast.Subscript)
         and isinstance(node.ctx, ast.Load)
         and isinstance(node.value, ast.Attribute)
         and node.value.attr == "data"
         and isinstance(node.value.value, ast.Name)
-        and node.value.value.id in scope.relations
+        and (node.value.value.id in scope.relations or node.value.value.id in local)
     ):
         return False
     relation = node.value.value.id
@@ -4225,6 +4319,15 @@ def _lazy_lookup(node: ast.AST, scope: _Scope) -> bool:
 
 
 def _unbound_fix(node: ast.AST, around: str, fails: int | None) -> str:
+    if isinstance(node, ast.Assign):
+        name = ast.unparse(node.targets[0])
+        return (
+            f"line {node.lineno}: `{ast.unparse(node)}` only looks the databag up, and `{name}` is not "
+            "read before the `try` ends: `RelationDataContent` loads lazily, so this runs no `relation-get` "
+            f"and raises nothing, with or without the bug, so {around}; read the databag inside the `try` "
+            "and bind the result there too, then compare it with what the issue says it should be (a "
+            f"relation that is gone reads as `{{}}`): {_read_and_assert(node.value, fails)}"
+        )
     return (
         f"line {node.lineno}: `{ast.unparse(node)}` only looks the databag up and never reads it: "
         "`RelationDataContent` loads lazily, so this runs no `relation-get` and raises nothing, with or "

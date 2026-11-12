@@ -376,6 +376,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _unbuildable_meta(tree)
     reasons += _fake_without_shebang(tree)
     reasons += _missing_charm_meta_attribute(tree)
+    reasons += _from_yaml_non_string(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -2177,6 +2178,138 @@ def _endpoints_without_mapping(call: ast.Call, names: _Names) -> list[tuple[str,
             if not (isinstance(value, dict) and "interface" in value):
                 found.append((section, str(endpoint)))
     return found
+
+
+# -- `CharmMeta.from_yaml()` given a dict --------------------------------------
+#
+# Live on `#2709`, one final answer (10-5) and one first answer (10-2) built
+# their meta with `ops.CharmMeta.from_yaml({...})`, a dict where the method
+# takes a YAML string or stream (`spike-step-5/static-retry/RESULT.md` §33).
+# Both raise `TypeError: a string or stream input is required` on ops 3.8.3
+# and `main`, and the check let 10-5 through: `_build_meta()` only builds a
+# `from_yaml` meta from string literals, so `_unbuildable_meta()` was silent,
+# and with no meta built the undeclared-endpoint rule was silent too.
+
+_NON_STRING_KINDS = {ast.Dict: "a dict", ast.List: "a list", ast.Set: "a set", ast.Tuple: "a tuple"}
+
+
+def _non_string_literal(node: ast.AST) -> tuple[str, object] | None:
+    """`(what it is, a value of the same type)` when `node` is a dict, list,
+    set or tuple display or a number (a `-` on one included); `None` for
+    anything else. The value is what the installed ops is tried with: it
+    stands in for the display, whose own items need not be literals."""
+    for kind, label in _NON_STRING_KINDS.items():
+        if isinstance(node, kind):
+            if kind is not ast.Dict and any(isinstance(e, ast.Starred) for e in node.elts):
+                return None
+            return label, {ast.Dict: {}, ast.List: [], ast.Set: set(), ast.Tuple: ()}[kind]
+    number = node.operand if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)) else node
+    if (
+        isinstance(number, ast.Constant)
+        and isinstance(number.value, (int, float, complex))
+        and not isinstance(number.value, bool)
+    ):
+        return "a number", number.value
+    return None
+
+
+def _from_yaml_non_string(tree: ast.Module) -> list[str]:
+    """`CharmMeta.from_yaml()` passed a non-string literal, where that
+    certainly fails the test.
+
+    Rejects a `CharmMeta.from_yaml(...)` call (however `CharmMeta` is
+    reached) whose first argument (or `metadata=`) is a dict, list, set or
+    tuple display, or a number, or a name assigned exactly once in the file,
+    by a plain `name = ...` statement at the top level of the test function
+    (before the call) or of the module, to one of those; when calling the
+    installed ops' `from_yaml` with an empty value of that type (or the
+    number) raises; the call is in a test function pytest runs as written (or
+    at module level); and the exception certainly escapes the test
+    (`_escapes()`). A string, a call (`path.read_text()`, `open(...)`), an
+    f-string, or a name assigned more than once or from anything else is left
+    alone, as is a `from_yaml` the installed ops would accept the value in.
+    """
+    ops = _ops()
+    if ops is None:
+        return []
+    counts = _file_binding_counts(tree)
+    if counts is None:
+        return []
+    parents = _parents(tree)
+    tests = {id(function): function for function in _test_functions(tree)}
+    reasons = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not _same_function(_Names(tree, counts).resolve(node.func), ops.CharmMeta.from_yaml):
+            continue
+        scope = parents.get(node)
+        while scope is not None and not isinstance(
+            scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
+        ):
+            scope = parents.get(scope)
+        if isinstance(scope, ast.Module):
+            names = _Names(tree, counts)
+        elif scope is not None and id(scope) in tests:
+            names = _Names(tree, counts, scope)
+        else:
+            continue
+        if not _same_function(names.resolve(node.func), ops.CharmMeta.from_yaml):
+            continue
+        arg = _call_arg(node, 0, "metadata")
+        if arg is None:
+            continue
+        literal, assigned = arg, None
+        if isinstance(arg, ast.Name):
+            assigned = names.assignments.get(arg.id)
+            if assigned is None:
+                continue
+            local = scope is not tree and assigned in scope.body
+            if not (local and assigned.lineno < node.lineno) and assigned not in tree.body:
+                continue
+            literal = assigned.value
+        found = _non_string_literal(literal)
+        if found is None:
+            continue
+        kind, value = found
+        try:
+            ops.CharmMeta.from_yaml(value)
+        except Exception as exc:
+            error = exc
+        else:
+            continue
+        if not _escapes(node, parents, type(error), names):
+            continue
+        reasons.append(_from_yaml_non_string_reason(node, arg, assigned, kind, literal, error))
+    return list(dict.fromkeys(reasons))
+
+
+def _from_yaml_non_string_reason(
+    call: ast.Call, arg: ast.AST, assigned: ast.Assign | None, kind: str, literal: ast.AST, error: Exception
+) -> str:
+    message = (str(error).strip().splitlines() or [""])[0]
+    if len(message) > 160:
+        message = message[:160] + "..."
+    shown = f"{type(error).__name__}: {message}" if message else type(error).__name__
+    given = f"`{arg.id}`, {kind} (line {assigned.lineno})" if assigned is not None else kind
+    reason = (
+        f"line {call.lineno}: `{ast.unparse(call.func)}(...)` is given {given}, but it takes the "
+        f"metadata as a YAML string (or a stream): with the installed ops, {kind} raises `{shown}` "
+        "there, so the test fails before it reaches the bug, with or without it; pass the YAML as a "
+        "string, as in the example (`ops.CharmMeta.from_yaml('name: myapp\\nrequires:\\n  db:\\n    "
+        "interface: db\\n')`)"
+    )
+    if isinstance(literal, ast.Dict):
+        try:
+            import yaml
+
+            raw = ast.literal_eval(literal)
+            text = yaml.safe_dump(raw, sort_keys=False, default_flow_style=False) if raw else ""
+        except Exception:
+            text = ""
+        if text and len(text) <= 300:
+            reason += f"; here that is `{text!r}`"
+    return reason
 
 
 # -- a fake with no `#!` line, and an attribute `CharmMeta` lacks ------------

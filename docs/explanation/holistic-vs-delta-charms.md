@@ -6,6 +6,10 @@ The charming community has developed two approaches to writing robust, stateless
 - Holistic charms reconcile towards a goal state on every event.
 - Delta charms handle each Juju event individually.
 
+```{tip}
+Charm Tech recommends the holistic approach for most charms, and especially for Kubernetes charms and charms that use several charm libraries. Holistic charms are easier to make robust and easier to test well. See [](#which-approach-to-use) for when a delta charm is still a reasonable choice.
+```
+
 ## Handling events holistically
 
 A typical holistic charm subscribes the same observer method, often called `_reconcile`, to all interesting Juju events.
@@ -206,11 +210,14 @@ However, the charm code and tests can get messy when dependencies between events
 
 A good rule of thumb is this: if you're starting to use `defer` in various places, consider whether it's time to rewrite the charm using the reconciler pattern.
 
+(which-approach-to-use)=
 ## Which approach to use?
 
-At a high level, simple workloads are served well by delta charms.
-Complex workloads are more robust if the reconciler pattern is followed.
-The reconciler pattern is especially suitable for mature, feature-rich charms that use several charm libraries.
+Charm Tech recommends the holistic approach.
+Start new charms with a reconciler, and when an existing delta charm starts to grow `defer` calls or ordering bugs, move it towards one.
+The reconciler pattern is especially suitable for Kubernetes charms and for mature, feature-rich charms that use several charm libraries.
+
+A delta charm can still be a reasonable choice for a simple workload whose behaviour maps directly onto Juju events. See [](#when-to-use-the-delta-approach).
 
 ### Dedicated handlers for specific Juju events
 
@@ -254,6 +261,7 @@ This comes down to two observations:
 - The charm author is thinking about their workload more than about minute Juju semantics.
 - When the Juju event is taken out of the equation, the same number of unit tests covers a larger portion of state and event space.
 
+(when-to-use-the-delta-approach)=
 ### When to use the delta approach
 
 A delta approach is most appropriate when the Juju event model can be mapped directly to the workload semantics. Simple operators can typically be written as delta charms.

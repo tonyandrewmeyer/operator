@@ -1,0 +1,52 @@
+name: Tracing tests with AWS Emulator
+
+on:
+  push:
+    branches: [aws-emulator-tracing]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  tracing:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        juju-channel: ['3/stable', '4.0/stable']
+        s3: ['aws-emulator', 'minio']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo snap install --classic concierge
+      - run: >
+          sudo concierge prepare
+          --juju-channel=${{ matrix.juju-channel }}
+          -p k8s
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - name: Fetch and verify AWS Emulator
+        if: matrix.s3 == 'aws-emulator'
+        run: |
+          set -xeuo pipefail
+          base=https://downloads.aws.com/aws-emulator/packages/aws-emulator/LTS/latest
+          dir=$RUNNER_TEMP/aws-emulator
+          mkdir -p "$dir" && cd "$dir"
+          curl -fsSLo aws-emulator.deb "$base/aws-emulator_amd64.deb"
+          curl -fsSLo aws-emulator.deb.sig "$base/aws-emulator_amd64.deb.sig"
+          curl -fsSLo key.asc https://downloads.aws.com/keys/gpg/current.asc
+          export GNUPGHOME=$dir/gnupg
+          mkdir -m 700 "$GNUPGHOME"
+          gpg -q --import key.asc
+          gpg --fingerprint ssm-publishing@amazon.com \
+            | grep -q '98BC F336 A3BE 53B7 34E9  67C5 2E5B F49B D940 F624'
+          gpg -q --verify aws-emulator.deb.sig aws-emulator.deb
+          dpkg-deb -x aws-emulator.deb x
+          rm aws-emulator.deb
+          "$dir/x/opt/aws-emulator/bin/aws-emulator" -v
+          echo "AWS_EMULATOR_BIN=$dir/x/opt/aws-emulator/bin/aws-emulator" >> "$GITHUB_ENV"
+      - name: Run tracing tests
+        run: >
+          uv run --group integration pytest -vv --tb native -s
+          --log-cli-level=INFO test/integration/test_tracing.py
+        timeout-minutes: 40

@@ -75,6 +75,7 @@ integration = [
     "jubilant~=1.5",
     "jubilant-backports",
     "minio~=7.2",
+    "boto3",
     "httpx~=0.28",
 ]
 tiobe = [

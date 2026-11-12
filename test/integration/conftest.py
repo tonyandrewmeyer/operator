@@ -15,12 +15,17 @@
 
 from __future__ import annotations
 
+import base64
+import configparser
 import contextlib
 import logging
+import os
 import pathlib
 import socket
+import ssl
 import subprocess
 import time
+import urllib.request
 from collections.abc import Callable, Generator
 
 import jubilant
@@ -110,8 +115,69 @@ def _xfail_on_k8s_juju4(juju: jubilant.Juju, reason: str) -> None:
         pytest.xfail(reason)
 
 
+def _host_ip() -> str:
+    """Return the host address that pods can reach (the default-route source)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(('192.0.2.1', 80))
+        return sock.getsockname()[0]
+
+
+@pytest.fixture(scope='session')
+def aws_emulator(tmp_path_factory: pytest.TempPathFactory) -> Generator[dict[str, str] | None]:
+    """Start AWS Emulator on the host if AWS_EMULATOR_BIN is set, else yield None."""
+    binary = os.environ.get('AWS_EMULATOR_BIN')
+    if not binary:
+        yield None
+        return
+    home = tmp_path_factory.mktemp('aws-emulator-home')
+    ip = _host_ip()
+    with socket.socket() as sock:
+        sock.bind((ip, 0))
+        port = sock.getsockname()[1]
+    log = (home / 'emulator.log').open('wb')
+    proc = subprocess.Popen(
+        [binary, '-t', 'off', '-b', ip, '-p', str(port), '--idle-timeout', '7200'],
+        env={**os.environ, 'HOME': str(home)},
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    emu_dir = home / '.aws' / 'emulator' / str(port)
+    ca = emu_dir / 'ca.pem'
+    endpoint = f'https://{ip}:{port}'
+    deadline = time.monotonic() + 30
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError(f'aws-emulator exited; see {home / "emulator.log"}')
+        if ca.exists():
+            try:
+                ctx = ssl.create_default_context(cafile=str(ca))
+                urllib.request.urlopen(f'{endpoint}/__admin/health', context=ctx)  # ruff: ignore[suspicious-url-open-usage]
+                break
+            except OSError:
+                pass
+        if time.monotonic() > deadline:
+            proc.kill()
+            raise TimeoutError('aws-emulator did not become healthy in 30s')
+        time.sleep(0.05)
+    creds = configparser.ConfigParser()
+    creds.read(emu_dir / 'emulator_credentials')
+    section = creds[creds.sections()[0]]
+    logging.info('aws-emulator at %s, log %s', endpoint, home / 'emulator.log')
+    try:
+        yield {
+            'endpoint': endpoint,
+            'access-key': section['aws_access_key_id'],
+            'secret-key': section['aws_secret_access_key'],
+            'ca-file': str(ca),
+            'log': str(home / 'emulator.log'),
+        }
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 @pytest.fixture
-def tracing_juju() -> Generator[jubilant.Juju]:
+def tracing_juju(aws_emulator: dict[str, str] | None) -> Generator[jubilant.Juju]:
     """Make a fresh Juju model with the tracing part of COS ready.
 
     Unlike the module-scoped `juju` fixture, this makes a new model for each
@@ -125,15 +191,20 @@ def tracing_juju() -> Generator[jubilant.Juju]:
         # later dispatch, so make update-status fire frequently to bound how
         # long the tests wait for spans to arrive.
         juju.cli('model-config', 'update-status-hook-interval=1m')
-        _deploy_tracing_stack(juju)
+        _deploy_tracing_stack(juju, aws_emulator)
         yield juju
+        if aws_emulator is not None:
+            _report_emulator_bucket(juju, aws_emulator)
         print(juju.debug_log())
 
 
-def _deploy_tracing_stack(juju: jubilant.Juju) -> None:
+def _deploy_tracing_stack(juju: jubilant.Juju, aws_emulator: dict[str, str] | None) -> None:
     """Deploy tempo, its worker, and the minio/s3 storage it requires."""
     deploy_tempo(juju)
     deploy_tempo_worker(juju)
+    if aws_emulator is not None:
+        _use_aws_emulator(juju, aws_emulator)
+        return
     minio_config = {'access-key': 'accesskey', 'secret-key': 'mysoverysecretkey'}
     if juju.show_model().agent_version.startswith('4.'):
         # On Juju 4, the default minio channel resolves to a podspec charm that
@@ -199,6 +270,76 @@ def _deploy_tracing_stack(juju: jubilant.Juju) -> None:
     #
     # This process may take a while.
 
+    juju.wait(jubilant.all_active)
+
+
+def _report_emulator_bucket(juju: jubilant.Juju, emu: dict[str, str]) -> None:
+    import boto3
+    from botocore.config import Config
+
+    s3 = boto3.client(
+        's3',
+        endpoint_url=emu['endpoint'],
+        aws_access_key_id=emu['access-key'],
+        aws_secret_access_key=emu['secret-key'],
+        region_name='us-east-1',
+        verify=emu['ca-file'],
+        config=Config(s3={'addressing_style': 'path'}),
+    )
+    pages = s3.get_paginator('list_objects_v2').paginate(Bucket=f'tempo-{juju.model}')
+    keys = [(o['Key'], o['Size']) for p in pages for o in p.get('Contents', [])]
+    print(f'EMULATOR-BUCKET objects={len(keys)}')
+    for key, size in keys[:50]:
+        print(f'EMULATOR-BUCKET {size:>10} {key}')
+    for pod in ('tempo-worker-0', 'tempo-0'):
+        out = subprocess.run(
+            ['kubectl', '-n', juju.model, 'logs', pod, '--all-containers'],  # ruff: ignore[start-process-with-partial-path]
+            capture_output=True,
+            text=True,
+        ).stdout
+        hits = [ln for ln in out.splitlines() if 's3' in ln.lower() or 'level=error' in ln]
+        print(f'EMULATOR-PODLOG {pod} lines={len(out.splitlines())} s3_or_error={len(hits)}')
+        for ln in hits[:20]:
+            print(f'EMULATOR-PODLOG {pod} {ln[:300]}')
+
+
+def _use_aws_emulator(juju: jubilant.Juju, emu: dict[str, str]) -> None:
+    """Point s3-integrator at a host-side AWS Emulator instead of deploying minio."""
+    import boto3
+    from botocore.config import Config
+
+    bucket = f'tempo-{juju.model}'
+    boto3.client(
+        's3',
+        endpoint_url=emu['endpoint'],
+        aws_access_key_id=emu['access-key'],
+        aws_secret_access_key=emu['secret-key'],
+        region_name='us-east-1',
+        verify=emu['ca-file'],
+        config=Config(s3={'addressing_style': 'path'}),
+    ).create_bucket(Bucket=bucket)
+
+    juju.deploy('s3-integrator')
+    juju.integrate('tempo:s3', 's3-integrator')
+    juju.integrate('tempo:tempo-cluster', 'tempo-worker')
+    juju.wait(lambda status: jubilant.all_blocked(status, 's3-integrator'))
+
+    ca_b64 = base64.b64encode(pathlib.Path(emu['ca-file']).read_bytes()).decode()
+    juju.config(
+        's3-integrator',
+        {
+            'endpoint': emu['endpoint'],
+            'bucket': bucket,
+            'region': 'us-east-1',
+            's3-uri-style': 'path',
+            'tls-ca-chain': ca_b64,
+        },
+    )
+    juju.run(
+        's3-integrator/0',
+        'sync-s3-credentials',
+        {'access-key': emu['access-key'], 'secret-key': emu['secret-key']},
+    )
     juju.wait(jubilant.all_active)
 
 

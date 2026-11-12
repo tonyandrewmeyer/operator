@@ -191,7 +191,12 @@ def tracing_juju(aws_emulator: dict[str, str] | None) -> Generator[jubilant.Juju
         # later dispatch, so make update-status fire frequently to bound how
         # long the tests wait for spans to arrive.
         juju.cli('model-config', 'update-status-hook-interval=1m')
-        _deploy_tracing_stack(juju, aws_emulator)
+        try:
+            _deploy_tracing_stack(juju, aws_emulator)
+        except Exception:
+            print(juju.cli('status', '--format', 'yaml'))
+            print(juju.debug_log(limit=2000))
+            raise
         yield juju
         if aws_emulator is not None:
             _report_emulator_bucket(juju, aws_emulator)
@@ -322,7 +327,15 @@ def _use_aws_emulator(juju: jubilant.Juju, emu: dict[str, str]) -> None:
     juju.deploy('s3-integrator')
     juju.integrate('tempo:s3', 's3-integrator')
     juju.integrate('tempo:tempo-cluster', 'tempo-worker')
-    juju.wait(lambda status: jubilant.all_blocked(status, 's3-integrator'))
+    # Unlike the minio path, nothing here takes minutes to come up, so wait for
+    # tempo's own restart cycle to settle before handing it S3 config.
+    juju.wait(
+        lambda status: (
+            jubilant.all_blocked(status, 's3-integrator')
+            and jubilant.all_agents_idle(status, 'tempo', 'tempo-worker')
+        ),
+        error=lambda status: jubilant.any_error(status, 'tempo', 'tempo-worker'),
+    )
 
     ca_b64 = base64.b64encode(pathlib.Path(emu['ca-file']).read_bytes()).decode()
     juju.config(

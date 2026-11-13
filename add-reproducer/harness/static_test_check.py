@@ -4678,36 +4678,212 @@ def _uncaught_hook_tool_error(tree: ast.Module) -> list[str]:
     reasons = []
     defined = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     for access in accesses:
-        node, tool = access.node, access.first
-        if access.asserted or not _calls_only(access.target, node):
-            continue
-        before = access.function.body[: access.index]
-        # `asserted` looks one call deep; here any call into the file's own
-        # functions but the fake helper might fail an assertion first.
-        if any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in defined - set(helpers)
-            for statement in before + access.earlier
-            for n in ast.walk(statement)
-        ):
-            continue
-        failure = _certain_fake(scripts, helpers, before, tool, _certain_failure)
+        failure = _certain_model_error(access, tree, names, scripts, helpers, defined, ops)
         if failure is None:
             continue
         code, stderr = failure
-        lowered = stderr.lower()
-        if "not found" in lowered:
-            continue
-        if _security_event_runs_is_leader() and any(m in lowered for m in _AUTHZ_MESSAGES):
-            if tool == "is-leader":
-                continue
-            if _certain_fake(scripts, helpers, before, "is-leader", _prints_a_json_bool) is None:
-                continue
-        if tool == "relation-get" and not _relation_get_runs(access, tree, names, ops):
-            continue
-        if any(_may_catch(t, ops.ModelError, names) for t in access.caught):
-            continue
         reasons.append(_uncaught_reason(access, code, stderr))
+    for access, assigned in _read_after_try(tree):
+        failure = _certain_model_error(access, tree, names, scripts, helpers, defined, ops)
+        if failure is None:
+            continue
+        code, stderr = failure
+        reasons.append(_read_after_try_reason(access, assigned, code, stderr))
     return list(dict.fromkeys(reasons))
+
+
+def _certain_model_error(access: _Access, tree, names: _Names, scripts, helpers, defined, ops) -> tuple[int, str] | None:
+    """(exit status, stderr) of the failing fake when `access` certainly
+    raises an `ops.ModelError` that nothing around it catches, under the
+    conditions `_uncaught_hook_tool_error()` lists; `None` otherwise."""
+    node, tool = access.node, access.first
+    if access.asserted or not _calls_only(access.target, node):
+        return None
+    before = access.function.body[: access.index]
+    # `asserted` looks one call deep; here any call into the file's own
+    # functions but the fake helper might fail an assertion first.
+    if any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in defined - set(helpers)
+        for statement in before + access.earlier
+        for n in ast.walk(statement)
+    ):
+        return None
+    failure = _certain_fake(scripts, helpers, before, tool, _certain_failure)
+    if failure is None:
+        return None
+    code, stderr = failure
+    lowered = stderr.lower()
+    if "not found" in lowered:
+        return None
+    if _security_event_runs_is_leader() and any(m in lowered for m in _AUTHZ_MESSAGES):
+        if tool == "is-leader":
+            return None
+        if _certain_fake(scripts, helpers, before, "is-leader", _prints_a_json_bool) is None:
+            return None
+    if tool == "relation-get" and not _relation_get_runs(access, tree, names, ops):
+        return None
+    if any(_may_catch(t, ops.ModelError, names) for t in access.caught):
+        return None
+    return code, stderr
+
+
+def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
+    """A databag looked up inside a top-level `try` and first read after it:
+    (the read, as an `_Access`, and the lookup's assignment).
+
+    Live on `#2709` (§33's 10-5, repaired to a YAML meta in §34), the test
+    looked the relation and its databag up inside a `try` whose handler
+    catches `ops.ModelError`, and compared the databag after the `try`:
+    `try: rel = model.get_relation('db', 1)` / `rel_data = rel.data[model.app]`
+    / `except ops.ModelError as e: rel_data = e`, then `assert rel_data ==
+    {}`. `RelationDataContent` loads lazily, so the lookup runs no hook tool,
+    and `relation-get` runs at the comparison, outside the `try`; on ops 3.8.3
+    its `ModelError` escapes and the test dies instead of asserting.
+
+    Only this shape, nothing wider: a top-level `try` with no `else` or
+    `finally`, a handler that may catch `ops.ModelError`, and a body that is
+    only `pass`, relations assigned once from lookups that certainly raise
+    nothing (`_raises_nothing()`), and exactly one `N = R.data[K]`
+    (`_lazy_lookup()`: `R` a tracked relation or one of those, `K` its
+    `.app` or the tracked model's `.app` / `.unit`). `N` is bound nowhere
+    else in the test but in the handlers, and the first top-level statement
+    after the `try` that reads `N` is a simple statement whose only read of
+    `N` certainly loads the databag (`_databag_reads()`). Whether that read
+    then certainly raises an uncaught `ModelError` is decided as for any
+    other access, by `_certain_model_error()`."""
+    ops = _ops()
+    if ops is None or not _faked_hook_tools(tree):
+        return []
+    scripts = _fake_scripts(tree)
+    helpers = _fake_helpers(tree)
+    places: dict[tuple[int, int], tuple[_Place, _Scope]] = {}
+    functions: dict[int, ast.FunctionDef] = {}
+    for function, index, place, scope in _scan_tests(tree):
+        functions[id(function)] = function
+        if place.statement is function.body[index]:
+            places.setdefault((id(function), index), (place, scope))
+    found: list[tuple[_Access, ast.Assign]] = []
+    for (function_id, index), (place, scope) in places.items():
+        function = functions[function_id]
+        statement = function.body[index]
+        if not isinstance(statement, ast.Try) or statement.orelse or statement.finalbody:
+            continue
+        if not any(_may_catch(h.type, ops.ModelError, scope.names) for h in statement.handlers):
+            continue
+        before = function.body[:index]
+        declared = _declared_endpoints(tree, scope.names)
+        local: dict[str, tuple[str, int | None, bool]] = {}
+        lookup: ast.Assign | None = None
+        shape = True
+        for inner in statement.body:
+            if isinstance(inner, ast.Pass):
+                continue
+            if not (
+                isinstance(inner, ast.Assign)
+                and len(inner.targets) == 1
+                and isinstance(inner.targets[0], ast.Name)
+            ):
+                shape = False
+                break
+            name = inner.targets[0].id
+            value = inner.value
+            if lookup is None and _lazy_lookup(value, scope, frozenset(local)):
+                lookup = inner
+                continue
+            access = _relation_access(value, scope.models)
+            if (
+                lookup is None
+                and access is not None
+                and scope.names.counts.get(name) == 1
+                and _raises_nothing(value, scope, scripts, helpers, before, declared)
+            ):
+                needs_list = access[0] == ("relation-ids",) and not scope.ids
+                local[name] = (access[1], access[2], needs_list)
+                continue
+            shape = False
+            break
+        if not shape or lookup is None:
+            continue
+        name = lookup.targets[0].id
+        relation = lookup.value.value.value.id
+        in_handlers = {id(n) for h in statement.handlers for n in ast.walk(h)}
+        bound = [
+            n
+            for n in ast.walk(function)
+            if (isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Load))
+            or (isinstance(n, ast.arg) and n.arg == name)
+            or (isinstance(n, ast.ExceptHandler) and n.name == name)
+        ]
+        if [n for n in bound if id(n) not in in_handlers] != [lookup.targets[0]]:
+            continue
+        if any(n.id == name for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
+            continue
+        for later in range(index + 1, len(function.body)):
+            target = function.body[later]
+            loads = [n for n in ast.walk(target) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)]
+            if not loads:
+                continue
+            if not isinstance(target, _SIMPLE_STATEMENTS) or (function_id, later) not in places:
+                break
+            later_place, later_scope = places[(function_id, later)]
+            relations = dict(later_scope.relations)
+            relations.update({k: v for k, v in local.items() if k not in relations})
+            if relation not in relations:
+                break
+            reads = [
+                read
+                for read, on in _databag_reads(target, relations, {name: relation}, later_scope.names)
+                if on == relation and any(n is load for n in ast.walk(read) for load in loads)
+            ]
+            if len(reads) != 1:
+                break
+            read = reads[0]
+            inside = {id(n) for n in ast.walk(read)}
+            if not all(id(n) in inside for n in loads) or not _unconditional(read, target):
+                break
+            endpoint, relation_id, needs_list = relations[relation]
+            tools = ("relation-list", "relation-get") if needs_list else ("relation-get",)
+            found.append(
+                (
+                    _Access(
+                        function,
+                        later,
+                        read,
+                        tools,
+                        "relation-get",
+                        endpoint,
+                        relation_id,
+                        target,
+                        False,
+                        [],
+                        later_scope.asserted,
+                        False,
+                        False,
+                        [],
+                    ),
+                    lookup,
+                )
+            )
+            break
+    return found
+
+
+def _read_after_try_reason(access: _Access, assigned: ast.Assign, code: int, stderr: str) -> str:
+    name = ast.unparse(assigned.targets[0])
+    lookup = ast.unparse(assigned.value)
+    printed = f', printing "{stderr}" to stderr' if stderr else ""
+    return (
+        f"line {access.node.lineno}: `{ast.unparse(access.node)}` is the first read of `{name}`, which line "
+        f"{assigned.lineno} (`{ast.unparse(assigned)}`) assigned inside the `try`: `RelationDataContent` "
+        "loads lazily, so that line only looks the databag up and runs no hook tool, and the "
+        f"`relation-get` runs here, where `{name}` is first read, outside the `try`; the test's "
+        f"`relation-get` fake exits {code}{printed}, so the installed ops raises `ops.ModelError` there, and "
+        "the `except` after the lookup does not catch it: the test dies on that exception instead of "
+        "failing an assertion, so its run cannot tell the bug from a broken test; read the databag "
+        f"inside the `try`, so the handler catches that: `try: {name} = dict({lookup})` / `except "
+        f"ops.ModelError as e: {name} = e` / `assert {name} == <what the issue says it should be>`, so "
+        "the buggy version fails that assertion and the fixed version passes"
+    )
 
 
 def _uncaught_reason(access: _Access, code: int, stderr: str) -> str:

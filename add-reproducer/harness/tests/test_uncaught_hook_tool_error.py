@@ -71,7 +71,13 @@ EXPECTED = {
     (4, "§17 reasons"): [],
     (5, "§17 reasons"): [],
     (6, "§17 reasons"): [],
-    (6, "§17 reasons and the is-leader hint"): [],
+    # Run 6 catches `ModelError` around the lookup but first reads the
+    # databag after the `try`, where `relation-get` runs and its `ModelError`
+    # escapes (§35); without the `is-leader` fake it dies on that first.
+    (6, "§17 reasons and the is-leader hint"): [
+        "is the first read of `data`",
+        "`try: data = dict(relation.data[model.app])`",
+    ],
     (7, "§17 reasons"): [],
     # Each repaired again from the §18 reason: all three are valid.
     (0, "§17 reasons, then the §18 reason"): [],

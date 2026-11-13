@@ -2941,7 +2941,10 @@ class Client:
         else:
             source_io: _AnyStrFileLikeIO = source
         boundary = binascii.hexlify(os.urandom(16))
-        path_escaped = path.replace('"', '\\"').encode('utf-8')
+        # Pebble reads this with Go's mime.ParseMediaType, where a backslash
+        # escapes the next character if it's a tspecial. Escape the same two
+        # characters that Go's own multipart.Writer does.
+        path_escaped = path.replace('\\', '\\\\').replace('"', '\\"').encode('utf-8')
         content_type = f'multipart/form-data; boundary="{boundary.decode("utf-8")}"'
 
         def generator() -> Generator[bytes, None, None]:

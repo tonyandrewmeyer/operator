@@ -2810,6 +2810,41 @@ bad path\r
             'files': [{'path': '/foo/bar'}],
         }
 
+    @pytest.mark.parametrize(
+        'path,escaped',
+        [
+            ('/foo/b"ar', b'/foo/b\\"ar'),
+            ('/foo/b\\ar', b'/foo/b\\\\ar'),
+            ('/foo/b\\"ar', b'/foo/b\\\\\\"ar'),
+            ('/foo/b\\/ar', b'/foo/b\\\\/ar'),
+            ('/foo/bar\\', b'/foo/bar\\\\'),
+        ],
+    )
+    def test_push_path_escaping(self, client: MockClient, path: str, escaped: bytes):
+        client.responses.append((
+            {'Content-Type': 'application/json'},
+            json.dumps({
+                'result': [{'path': path}],
+                'status': 'OK',
+                'status-code': 200,
+                'type': 'sync',
+            }).encode(),
+        ))
+
+        client.push(path, 'content')
+
+        headers, body = client.requests[0][3:]
+        chunks = list(body)
+        # Pebble reads the filename with Go's mime.ParseMediaType, where a
+        # backslash escapes the next character if it's a tspecial.
+        assert b'; filename="' + escaped + b'"\r\n' in b''.join(chunks)
+        req, filename, content = self._parse_write_multipart(
+            headers['Content-Type'], (chunk for chunk in chunks)
+        )
+        assert filename == path
+        assert content == b'content'
+        assert req == {'action': 'write', 'files': [{'path': path}]}
+
     def _parse_write_multipart(self, content_type: str, body: _bytes_generator):
         message = email.message.Message()
         message['Content-Type'] = content_type

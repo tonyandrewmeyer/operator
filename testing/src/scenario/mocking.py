@@ -1057,6 +1057,16 @@ class _MockPebbleClient(_TestingPebbleClient):
                 f"'Container(..., execs={{scenario.Exec({list(command)}, ...)}})'",
             )
 
+        # A handler can compute its result from the command: an Exec (or a
+        # subclass) with a ``_respond(command, stdin, environment, container)``
+        # method that returns the Exec to use for this call. ``container`` is
+        # the in-dispatch Container, so the handler can see the current plan.
+        respond = getattr(handler, '_respond', None)
+        if respond is not None:
+            if stdin is not None and hasattr(stdin, 'read'):
+                stdin = stdin.read()  # type: ignore
+            handler = respond(list(command), stdin, dict(environment or {}), self._container)
+
         if stdin is None:
             proc_stdin = self._transform_exec_handler_output('', encoding)
         else:

@@ -2851,7 +2851,7 @@ def _class_sources(charm_type: type[Any]) -> list[pathlib.Path]:
     """The file a charm class is defined in, to find the charmlibs libraries it uses."""
     try:
         source = inspect.getsourcefile(charm_type)
-    except TypeError:
+    except (OSError, TypeError):
         return []
     return [pathlib.Path(source)] if source else []
 

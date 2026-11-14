@@ -39,6 +39,7 @@ import inspect
 import json
 import re
 import shlex
+import subprocess
 import typing
 
 from models import StaticCheckResult, embedded_test_file, runs_under_pytest_after
@@ -371,10 +372,12 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _hand_built_relations(tree)
     reasons += _lookup_expected_to_raise(tree)
     reasons += _unbound_after_try(tree)
+    reasons += _isinstance_after_try(tree)
     reasons += _testing_relation_dicts(tree)
     reasons += _model_framework(tree)
     reasons += _unbuildable_meta(tree)
     reasons += _fake_without_shebang(tree)
+    reasons += _invalid_shell_fake(tree)
     reasons += _missing_charm_meta_attribute(tree)
     reasons += _from_yaml_non_string(tree)
     # Several rules can name the same line for the same reason (a nested
@@ -2472,6 +2475,133 @@ def _fake_without_shebang(tree: ast.Module) -> list[str]:
             "(`path.write_text('#!/bin/sh\\n' + script + '\\n')`)"
         )
         break
+    return reasons
+
+
+@functools.cache
+def _shell_syntax_error(text: str) -> tuple[int, str] | None:
+    """(exit status, `sh`'s message) when `sh -n` (parse only, run nothing)
+    rejects `text` with a syntax error; `None` when it parses, or when `sh`
+    cannot be run or says nothing certain."""
+    try:
+        done = subprocess.run(
+            ["/bin/sh", "-n"], input=text, capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode == 0:
+        return None
+    message = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else ""
+    at = message.find("Syntax error")
+    if at < 0:
+        at = message.find("syntax error")
+    return (done.returncode, message[at:]) if at >= 0 else None
+
+
+# What to write instead, by tool, in `_invalid_shell_fake()`'s reason.
+_VALID_FAKE_EXAMPLES = {
+    "relation-ids": "echo '[\"db:2\"]'",
+    "relation-list": "echo '[\"provider/0\"]'",
+    "is-leader": "echo true",
+}
+
+
+def _literal_script(arg: ast.AST, tree: ast.Module, function: ast.FunctionDef, names: _Names) -> str | None:
+    """A fake's script when it is a string literal, or a name assigned once,
+    by a plain statement at the top of the module or of `function`, to one;
+    `None` for anything else (an f-string, a concatenation, a call, ...)."""
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if not (isinstance(arg, ast.Name) and arg.id in names.assignments):
+        return None
+    assigned = names.assignments[arg.id]
+    if not any(assigned is s for s in (*tree.body, *function.body)):
+        return None
+    value = assigned.value
+    return value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
+
+
+def _invalid_shell_fake(tree: ast.Module) -> list[str]:
+    """A hook tool fake whose script is not valid shell, run first by an
+    access the test certainly makes.
+
+    Live on `#2709` (§35's 11-7), the `relation-ids` fake's script was
+    `echo '['"db:2'"]'` (unbalanced quotes): `sh` exits 2
+    with `Syntax error: Unterminated quoted string`, so `get_relation()`
+    raised a plain `ModelError` on 3.8.3 and `main` alike, before ops
+    reached the code the issue is about. The rules that read fake scripts
+    use `shlex`, which raises on the unbalanced quote, so each treated the
+    script as unknown and said nothing; the test then failed the same way on
+    both versions and was classified as a reproduction.
+
+    Validity is decided by `sh -n` on the file the helper writes (parse
+    only, nothing runs), not by `shlex`. Only for a fake written once, by a
+    module-level helper in the example's shape (`_fake_helper()`: `"#!/bin/sh"`, a newline,
+    the script and a newline, to `<dir> / name`) that `chmod`s the file, with a
+    literal script (a string, or a name assigned once at the top of the
+    module or the test to one) in a statement at the top of the test; and
+    only when the tool is the first one an access `_hook_tool_accesses()` is
+    certain runs after that statement. Not for `relation-get`, whose failure
+    a version of ops may turn into something else. An f-string, a
+    concatenation, a call and a shell heredoc are left alone."""
+    accesses = _hook_tool_accesses(tree)
+    if not accesses:
+        return []
+    helpers = {
+        node.name: shape
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and (shape := _fake_helper(node)) is not None
+        and (writer := _fake_writer(node)) is not None
+        and writer[2]
+    }
+    if not helpers:
+        return []
+    scripts = _fake_scripts(tree)
+    counts = _file_binding_counts(tree)
+    if counts is None:
+        return []
+    reasons: list[str] = []
+    reported: set[str] = set()
+    for access in accesses:
+        tool = access.tools[0]
+        if tool == "relation-get" or tool in reported or len(scripts.get(tool, [])) != 1:
+            continue
+        names = _Names(tree, counts, access.function)
+        for statement in access.function.body[: access.index]:
+            call = statement.value if isinstance(statement, ast.Expr) else None
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id in helpers
+                and not call.keywords
+                and not any(isinstance(a, ast.Starred) for a in call.args)
+            ):
+                continue
+            name_at, script_at = helpers[call.func.id]
+            if len(call.args) <= max(name_at, script_at):
+                continue
+            named = call.args[name_at]
+            if not (isinstance(named, ast.Constant) and named.value == tool):
+                continue
+            script = _literal_script(call.args[script_at], tree, access.function, names)
+            if script is None:
+                break
+            failure = _shell_syntax_error("#!/bin/sh\n" + script + "\n")
+            if failure is None:
+                break
+            code, error = failure
+            reported.add(tool)
+            example = _VALID_FAKE_EXAMPLES.get(tool, _VALID_FAKE_EXAMPLES["relation-ids"])
+            reasons.append(
+                f"line {call.lineno}: the `{tool}` fake's script, `{script}`, is not valid shell: `sh` "
+                f"exits {code} with `{error}` whenever `{tool}` runs, on every version of ops, so "
+                f"`{ast.unparse(access.node)}` (line {access.node.lineno}) fails on that `{tool}` with a "
+                "plain `ops.ModelError` before the code under test runs, and the test cannot tell the bug "
+                "from a broken fake; quote the script so it parses, with the JSON in single quotes and "
+                f"nothing else, for example `{example}`"
+            )
+            break
     return reasons
 
 
@@ -4727,33 +4857,31 @@ def _certain_model_error(access: _Access, tree, names: _Names, scripts, helpers,
     return code, stderr
 
 
-def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
-    """A databag looked up inside a top-level `try` and first read after it:
-    (the read, as an `_Access`, and the lookup's assignment).
+class _TryLookup(typing.NamedTuple):
+    """A top-level `try` whose body only looks a databag up, for
+    `_try_lookups()`."""
 
-    Live on `#2709` (§33's 10-5, repaired to a YAML meta in §34), the test
-    looked the relation and its databag up inside a `try` whose handler
-    catches `ops.ModelError`, and compared the databag after the `try`:
-    `try: rel = model.get_relation('db', 1)` / `rel_data = rel.data[model.app]`
-    / `except ops.ModelError as e: rel_data = e`, then `assert rel_data ==
-    {}`. `RelationDataContent` loads lazily, so the lookup runs no hook tool,
-    and `relation-get` runs at the comparison, outside the `try`; on ops 3.8.3
-    its `ModelError` escapes and the test dies instead of asserting.
+    function: ast.FunctionDef
+    index: int  # of the `try` in `function.body`
+    statement: ast.Try
+    scope: _Scope
+    lookup: ast.Assign  # `N = R.data[K]`
+    local: dict  # relations the `try` assigns: {name: (endpoint, ID, needs `relation-list`)}
+    # {index in `function.body`: (`_Place`, `_Scope`)} of the test's top-level statements
+    places: dict
 
-    Only this shape, nothing wider: a top-level `try` with no `else` or
-    `finally`, a handler that may catch `ops.ModelError`, and a body that is
-    only `pass`, relations assigned once from lookups that certainly raise
-    nothing (`_raises_nothing()`), and exactly one `N = R.data[K]`
-    (`_lazy_lookup()`: `R` a tracked relation or one of those, `K` its
-    `.app` or the tracked model's `.app` / `.unit`). `N` is bound nowhere
-    else in the test but in the handlers, and the first top-level statement
-    after the `try` that reads `N` is a simple statement whose only read of
-    `N` certainly loads the databag (`_databag_reads()`). Whether that read
-    then certainly raises an uncaught `ModelError` is decided as for any
-    other access, by `_certain_model_error()`."""
+
+def _try_lookups(tree: ast.Module):
+    """Yield a `_TryLookup` for each top-level `try` of a fake-hook-tool test
+    with no `else` or `finally` whose body is only `pass`, relations
+    assigned once from lookups that certainly raise nothing
+    (`_raises_nothing()`), and exactly one `N = R.data[K]` (`_lazy_lookup()`),
+    where `N` is not read in the `try` and is bound nowhere else in the test
+    but in the handlers. Shared by `_read_after_try()` and
+    `_isinstance_after_try()`."""
     ops = _ops()
     if ops is None or not _faked_hook_tools(tree):
-        return []
+        return
     scripts = _fake_scripts(tree)
     helpers = _fake_helpers(tree)
     places: dict[tuple[int, int], tuple[_Place, _Scope]] = {}
@@ -4762,13 +4890,10 @@ def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
         functions[id(function)] = function
         if place.statement is function.body[index]:
             places.setdefault((id(function), index), (place, scope))
-    found: list[tuple[_Access, ast.Assign]] = []
     for (function_id, index), (place, scope) in places.items():
         function = functions[function_id]
         statement = function.body[index]
         if not isinstance(statement, ast.Try) or statement.orelse or statement.finalbody:
-            continue
-        if not any(_may_catch(h.type, ops.ModelError, scope.names) for h in statement.handlers):
             continue
         before = function.body[:index]
         declared = _declared_endpoints(tree, scope.names)
@@ -4805,7 +4930,6 @@ def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
         if not shape or lookup is None:
             continue
         name = lookup.targets[0].id
-        relation = lookup.value.value.value.id
         in_handlers = {id(n) for h in statement.handlers for n in ast.walk(h)}
         bound = [
             n
@@ -4818,14 +4942,59 @@ def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
             continue
         if any(n.id == name for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
             continue
+        yield _TryLookup(
+            function,
+            index,
+            statement,
+            scope,
+            lookup,
+            local,
+            {i: v for (f, i), v in places.items() if f == function_id},
+        )
+
+
+def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
+    """A databag looked up inside a top-level `try` and first read after it:
+    (the read, as an `_Access`, and the lookup's assignment).
+
+    Live on `#2709` (§33's 10-5, repaired to a YAML meta in §34), the test
+    looked the relation and its databag up inside a `try` whose handler
+    catches `ops.ModelError`, and compared the databag after the `try`:
+    `try: rel = model.get_relation('db', 1)` / `rel_data = rel.data[model.app]`
+    / `except ops.ModelError as e: rel_data = e`, then `assert rel_data ==
+    {}`. `RelationDataContent` loads lazily, so the lookup runs no hook tool,
+    and `relation-get` runs at the comparison, outside the `try`; on ops 3.8.3
+    its `ModelError` escapes and the test dies instead of asserting.
+
+    Only this shape, nothing wider: a top-level `try` with no `else` or
+    `finally`, a handler that may catch `ops.ModelError`, and a body that is
+    only `pass`, relations assigned once from lookups that certainly raise
+    nothing (`_raises_nothing()`), and exactly one `N = R.data[K]`
+    (`_lazy_lookup()`: `R` a tracked relation or one of those, `K` its
+    `.app` or the tracked model's `.app` / `.unit`). `N` is bound nowhere
+    else in the test but in the handlers, and the first top-level statement
+    after the `try` that reads `N` is a simple statement whose only read of
+    `N` certainly loads the databag (`_databag_reads()`). Whether that read
+    then certainly raises an uncaught `ModelError` is decided as for any
+    other access, by `_certain_model_error()`."""
+    ops = _ops()
+    if ops is None:
+        return []
+    found: list[tuple[_Access, ast.Assign]] = []
+    for item in _try_lookups(tree):
+        function, index, statement, scope, lookup, local, places = item
+        if not any(_may_catch(h.type, ops.ModelError, scope.names) for h in statement.handlers):
+            continue
+        name = lookup.targets[0].id
+        relation = lookup.value.value.value.id
         for later in range(index + 1, len(function.body)):
             target = function.body[later]
             loads = [n for n in ast.walk(target) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)]
             if not loads:
                 continue
-            if not isinstance(target, _SIMPLE_STATEMENTS) or (function_id, later) not in places:
+            if not isinstance(target, _SIMPLE_STATEMENTS) or later not in places:
                 break
-            later_place, later_scope = places[(function_id, later)]
+            later_place, later_scope = places[later]
             relations = dict(later_scope.relations)
             relations.update({k: v for k, v in local.items() if k not in relations})
             if relation not in relations:
@@ -4866,6 +5035,95 @@ def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
             )
             break
     return found
+
+
+def _isinstance_after_try(tree: ast.Module) -> list[str]:
+    """An unread databag lookup in a top-level `try`, then `assert
+    isinstance(N, X)` after it with `X` an exception class: an assertion
+    that certainly fails on every version.
+
+    Live on `#2709` (§35's 11-7, with its fakes' quoting fixed), the test
+    looked the relation and its databag up inside a `try` and checked the
+    name's type after it: `try: relation = model.get_relation('db', 2)` /
+    `relation_data = relation.data[relation.app]` / `except ops.ModelError
+    as e: relation_data = e`, then `assert isinstance(relation_data,
+    ops.RelationNotFoundError)`. `RelationDataContent` loads lazily, so the
+    lookup runs no hook tool and raises nothing, the handler never runs, and
+    `relation_data` is a `RelationDataContent` on 3.8.3 and `main` alike:
+    the assertion fails on both, and that looks like a reproduction. §35
+    found the shape in 4 saved answers.
+
+    The `try` is the one `_try_lookups()` finds (its body certainly raises
+    nothing; `N` is not read in it and is bound nowhere else but in the
+    handlers). Then the first top-level statement after it that reads `N`
+    must be `assert isinstance(N, X)`, the call being the whole test of the
+    `assert`, with `isinstance` the builtin and `X` an exception class (or a
+    tuple of them) the check can name; and when the lookup's key is the
+    relation's own `.app`, the `relation-list` fake must certainly print unit
+    names, so that the key is set. Nothing wider: a name read in the `try`,
+    a class that is not an exception, a branch around the `assert`, an
+    `else` or `finally`, and a lookup that may raise are left alone."""
+    reasons: list[str] = []
+    scripts = _fake_scripts(tree)
+    helpers = _fake_helpers(tree)
+    for function, index, statement, scope, lookup, local, places in _try_lookups(tree):
+        name = lookup.targets[0].id
+        key = lookup.value.slice
+        relation = lookup.value.value.value.id
+        if key.value.id == relation and key.attr == "app":
+            before = function.body[:index]
+            if _certain_fake(scripts, helpers, before, "relation-list", _unit_names) is None:
+                continue
+        for later in range(index + 1, len(function.body)):
+            target = function.body[later]
+            if not any(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load) for n in ast.walk(target)):
+                continue
+            if later not in places or not isinstance(target, ast.Assert):
+                break
+            names = places[later][1].names
+            test = target.test
+            if not (
+                isinstance(test, ast.Call)
+                and names.resolve(test.func) is builtins.isinstance
+                and len(test.args) == 2
+                and not test.keywords
+                and isinstance(test.args[0], ast.Name)
+                and test.args[0].id == name
+            ):
+                break
+            classes = test.args[1].elts if isinstance(test.args[1], ast.Tuple) else [test.args[1]]
+            resolved = [names.resolve(c) for c in classes]
+            if not classes or not all(isinstance(c, type) and issubclass(c, BaseException) for c in resolved):
+                break
+            if any(isinstance(n, ast.Name) and n.id == name for c in classes for n in ast.walk(c)):
+                break
+            reasons.append(_isinstance_after_try_reason(target, lookup, _relation_get_fails(scripts, helpers, function.body[:index])))
+            break
+    return list(dict.fromkeys(reasons))
+
+
+def _isinstance_after_try_reason(statement: ast.Assert, assigned: ast.Assign, fails: int | None) -> str:
+    name = ast.unparse(assigned.targets[0])
+    lookup = ast.unparse(assigned.value)
+    classes = ast.unparse(statement.test.args[1])
+    if fails is None:
+        fix = f"`try: {name} = dict({lookup})` / `except ops.ModelError as e: {name} = e` / `assert {name} == {{}}`"
+    else:
+        fix = (
+            f"the test's `relation-get` fake exits {fails}, so on a version of ops with the bug that read "
+            f"raises `ops.ModelError`, which the handler then catches: `try: {name} = dict({lookup})` / "
+            f"`except ops.ModelError as e: {name} = e` / `assert {name} == {{}}`"
+        )
+    return (
+        f"line {statement.lineno}: `{ast.unparse(statement)}` can never pass: line {assigned.lineno} "
+        f"(`{ast.unparse(assigned)}`) only looks the databag up, and nothing reads `{name}` before the "
+        "`try` ends: `RelationDataContent` loads lazily, so that line runs no `relation-get` and raises "
+        f"nothing, with or without the bug, the handler never runs, and `{name}` is a "
+        f"`RelationDataContent` on every version, never an instance of `{classes}`, so the assertion "
+        "fails with the fix as well as without it; read the databag with `dict(...)` inside the `try`, "
+        f"catch `ops.ModelError` into `{name}`, and assert what the issue says the result should be (a "
+        f"relation that is gone reads as `{{}}`): {fix}"
+    )
 
 
 def _read_after_try_reason(access: _Access, assigned: ast.Assign, code: int, stderr: str) -> str:

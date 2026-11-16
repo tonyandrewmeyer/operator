@@ -72,6 +72,7 @@ from .context import CharmEvents, Context, Manager
 from .errors import StateValidationError  # For backwards compatibility.
 from .state import (
     ActiveStatus,
+    AddLayer,
     Address,
     AnyJson,
     BindAddress,
@@ -99,6 +100,7 @@ from .state import (
     RelationBase,
     Resource,
     Secret,
+    ServiceOp,
     State,
     Storage,
     StoredState,
@@ -114,6 +116,7 @@ from .state import (
 __all__ = [
     'ActionFailed',
     'ActiveStatus',
+    'AddLayer',
     'Address',
     'AnyJson',
     'BindAddress',
@@ -144,6 +147,7 @@ __all__ = [
     'RelationBase',
     'Resource',
     'Secret',
+    'ServiceOp',
     'State',
     'StateValidationError',
     'Storage',

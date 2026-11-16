@@ -911,7 +911,7 @@ class _MockPebbleClient(_TestingPebbleClient):
 
     def _record_service_op(self, op: _ServiceOpName, services: Sequence[str]) -> None:
         record = ServiceOp(op=op, services=tuple(services))
-        self._context.service_ops_history.setdefault(self._container_name, []).append(record)
+        self._context.service_history.setdefault(self._container_name, []).append(record)
 
     def _enabled_service_names(self) -> list[str]:
         # The services that ``replan`` and ``autostart`` will try to start.

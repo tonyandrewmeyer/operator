@@ -1,7 +1,7 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Tests for Context.service_ops_history and Context.add_layer_history."""
+"""Tests for Context.service_history and Context.add_layer_history."""
 
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def test_restart_records_a_single_op(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_ContainerActionCharm, 'action', 'restart-a')
     ctx = _make_ctx()
     ctx.run(ctx.on.config_changed(), State(containers={_container_with_layer()}))
-    assert ctx.service_ops_history == {
+    assert ctx.service_history == {
         'foo': [ServiceOp('restart', ('svc-a',))],
     }
 
@@ -117,7 +117,7 @@ def test_start_records_only_start_not_restart(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_ContainerActionCharm, 'action', 'start-a')
     ctx = _make_ctx()
     ctx.run(ctx.on.config_changed(), State(containers={_container_with_layer()}))
-    ops_for_foo = ctx.service_ops_history['foo']
+    ops_for_foo = ctx.service_history['foo']
     assert ServiceOp('start', ('svc-a',)) in ops_for_foo
     assert not any(o.op == 'restart' for o in ops_for_foo)
 
@@ -132,7 +132,7 @@ def test_stop_records_a_stop_op(monkeypatch: pytest.MonkeyPatch):
         service_statuses={'svc-a': pebble.ServiceStatus.ACTIVE},
     )
     ctx.run(ctx.on.config_changed(), State(containers={container}))
-    assert ctx.service_ops_history['foo'] == [ServiceOp('stop', ('svc-a',))]
+    assert ctx.service_history['foo'] == [ServiceOp('stop', ('svc-a',))]
 
 
 def test_replan_records_enabled_services_from_plan(monkeypatch: pytest.MonkeyPatch):
@@ -142,7 +142,7 @@ def test_replan_records_enabled_services_from_plan(monkeypatch: pytest.MonkeyPat
     ctx.run(ctx.on.config_changed(), State(containers={_container_with_layer()}))
     # The base class implements replan as calling autostart internally, so both
     # ops appear; both should list only the enabled service.
-    ops_for_foo = ctx.service_ops_history['foo']
+    ops_for_foo = ctx.service_history['foo']
     assert ServiceOp('replan', ('svc-a',)) in ops_for_foo
     assert ServiceOp('autostart', ('svc-a',)) in ops_for_foo
     # 'replan' is recorded before its internal autostart call.
@@ -155,10 +155,10 @@ def test_autostart_records_enabled_services(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_ContainerActionCharm, 'action', 'autostart')
     ctx = _make_ctx()
     ctx.run(ctx.on.config_changed(), State(containers={_container_with_layer()}))
-    assert ctx.service_ops_history['foo'] == [ServiceOp('autostart', ('svc-a',))]
+    assert ctx.service_history['foo'] == [ServiceOp('autostart', ('svc-a',))]
 
 
-def test_get_service_ops_filters_by_service(monkeypatch: pytest.MonkeyPatch):
+def test_get_service_history_filters_by_service(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_ContainerActionCharm, 'action', 'sequence')
     ctx = _make_ctx()
     container = Container(
@@ -169,19 +169,19 @@ def test_get_service_ops_filters_by_service(monkeypatch: pytest.MonkeyPatch):
     )
     ctx.run(ctx.on.config_changed(), State(containers={container}))
     # All ops on svc-a (start, stop, then restart targeting both):
-    a_ops = ctx.get_service_ops('foo', 'svc-a')
+    a_ops = ctx.get_service_history('foo', 'svc-a')
     assert a_ops == [
         ServiceOp('start', ('svc-a',)),
         ServiceOp('stop', ('svc-a',)),
         ServiceOp('restart', ('svc-a', 'svc-b')),
     ]
     # svc-b is only touched by the restart call:
-    b_ops = ctx.get_service_ops('foo', 'svc-b')
+    b_ops = ctx.get_service_history('foo', 'svc-b')
     assert b_ops == [ServiceOp('restart', ('svc-a', 'svc-b'))]
     # Unfiltered returns everything for the container.
-    assert ctx.get_service_ops('foo') == ctx.service_ops_history['foo']
+    assert ctx.get_service_history('foo') == ctx.service_history['foo']
     # Unknown container returns an empty list, not a KeyError.
-    assert ctx.get_service_ops('does-not-exist') == []
+    assert ctx.get_service_history('does-not-exist') == []
 
 
 def test_can_not_connect_does_not_record(monkeypatch: pytest.MonkeyPatch):
@@ -196,7 +196,7 @@ def test_can_not_connect_does_not_record(monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(UncaughtCharmError) as exc_info:
         ctx.run(ctx.on.config_changed(), State(containers={container}))
     assert isinstance(exc_info.value.__cause__, pebble.ConnectionError)
-    assert ctx.service_ops_history == {}
+    assert ctx.service_history == {}
     assert ctx.add_layer_history == {}
 
 
@@ -210,7 +210,7 @@ def test_multiple_ops_recorded_in_order(monkeypatch: pytest.MonkeyPatch):
         service_statuses={'svc-a': pebble.ServiceStatus.ACTIVE},
     )
     ctx.run(ctx.on.config_changed(), State(containers={container}))
-    assert ctx.service_ops_history['foo'] == [
+    assert ctx.service_history['foo'] == [
         ServiceOp('start', ('svc-a',)),
         ServiceOp('stop', ('svc-a',)),
         ServiceOp('restart', ('svc-a', 'svc-b')),
@@ -223,7 +223,7 @@ def test_history_is_reset_between_runs(monkeypatch: pytest.MonkeyPatch):
     ctx = _make_ctx()
     state = State(containers={_container_with_layer()})
     ctx.run(ctx.on.config_changed(), state)
-    assert ctx.service_ops_history['foo'] == [ServiceOp('restart', ('svc-a',))]
+    assert ctx.service_history['foo'] == [ServiceOp('restart', ('svc-a',))]
 
     # Second run with a different action: history should reflect only the new run.
     monkeypatch.setattr(_ContainerActionCharm, 'action', 'stop-a')
@@ -234,7 +234,7 @@ def test_history_is_reset_between_runs(monkeypatch: pytest.MonkeyPatch):
         service_statuses={'svc-a': pebble.ServiceStatus.ACTIVE},
     )
     ctx.run(ctx.on.config_changed(), State(containers={container}))
-    assert ctx.service_ops_history['foo'] == [ServiceOp('stop', ('svc-a',))]
+    assert ctx.service_history['foo'] == [ServiceOp('stop', ('svc-a',))]
 
 
 def test_add_layer_records_label_and_layer(monkeypatch: pytest.MonkeyPatch):

@@ -477,7 +477,7 @@ class Context(Generic[CharmType]):
     - :attr:`action_results`
     - :attr:`trace_data`
     - :attr:`exec_history`
-    - :attr:`service_ops_history`
+    - :attr:`service_history`
     - :attr:`add_layer_history`
 
     This allows you to write assertions not only on the output state, but also, to some
@@ -575,7 +575,7 @@ class Context(Generic[CharmType]):
     Keyed by container name. Reset at the start of each :meth:`run` call.
     """
 
-    service_ops_history: dict[str, list[ServiceOp]]
+    service_history: dict[str, list[ServiceOp]]
     """A record of the Pebble service lifecycle operations the charm has invoked.
 
     Each entry corresponds to one call to :meth:`ops.Container.start`,
@@ -592,11 +592,11 @@ class Context(Generic[CharmType]):
 
         ctx = Context(MyCharm)
         ctx.run(ctx.on.start(), State(containers={Container('foo', can_connect=True)}))
-        assert ctx.service_ops_history['foo'] == [
+        assert ctx.service_history['foo'] == [
             ServiceOp('restart', ('myservice',)),
         ]
 
-    Or use :meth:`get_service_ops` to filter to a specific service.
+    Or use :meth:`get_service_history` to filter to a specific service.
     """
 
     add_layer_history: dict[str, list[AddLayer]]
@@ -824,7 +824,7 @@ class Context(Generic[CharmType]):
         self.app_status_history: list[_EntityStatus] = []
         self.unit_status_history: list[_EntityStatus] = []
         self.exec_history: dict[str, list[ExecArgs]] = {}
-        self.service_ops_history: dict[str, list[ServiceOp]] = {}
+        self.service_history: dict[str, list[ServiceOp]] = {}
         self.add_layer_history: dict[str, list[AddLayer]] = {}
         self.workload_version_history: list[str] = []
         self.removed_secret_revisions: list[int] = []
@@ -859,7 +859,7 @@ class Context(Generic[CharmType]):
         """Hook for Runtime to set the output state."""
         self._output_state = output_state
 
-    def get_service_ops(
+    def get_service_history(
         self,
         container: str,
         service: str | None = None,
@@ -870,7 +870,7 @@ class Context(Generic[CharmType]):
         :arg service: if given, only return operations whose
             :attr:`ServiceOp.services` contains this name.
         """
-        ops_ = self.service_ops_history.get(container, [])
+        ops_ = self.service_history.get(container, [])
         if service is not None:
             ops_ = [o for o in ops_ if service in o.services]
         return ops_
@@ -1007,7 +1007,7 @@ class Context(Generic[CharmType]):
         # Reset per-run history fields so that they reflect only the current
         # run when a Context is reused across multiple ctx.run() calls.
         self.exec_history.clear()
-        self.service_ops_history.clear()
+        self.service_history.clear()
         self.add_layer_history.clear()
 
         runtime = Runtime(

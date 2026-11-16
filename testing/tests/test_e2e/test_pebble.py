@@ -1614,7 +1614,7 @@ def test_check_failure_restarts_the_service_that_names_it():
     state_out = ctx.run(ctx.on.config_changed(), state=state)
     # The restart is recorded against the check that caused it. The status is
     # the ACTIVE the service already had, so the record is the only evidence.
-    assert ctx.service_ops_history['foo'] == [ServiceOp('restart', ('guarded',), caused_by='chk1')]
+    assert ctx.service_history['foo'] == [ServiceOp('restart', ('guarded',), caused_by='chk1')]
     container_out = state_out.get_container('foo')
     assert container_out.service_statuses['guarded'] == ops.pebble.ServiceStatus.ACTIVE
     assert container_out.get_check_info('chk1').status == ops.pebble.CheckStatus.DOWN
@@ -1624,7 +1624,7 @@ def test_check_failure_leaves_other_services_alone():
     """Only services naming the check in on-check-failure are restarted."""
     ctx, state = _check_failure_state()
     ctx.run(ctx.on.config_changed(), state=state)
-    restarted = [name for op in ctx.service_ops_history['foo'] for name in op.services]
+    restarted = [name for op in ctx.service_history['foo'] for name in op.services]
     assert restarted == ['guarded']
 
 
@@ -1641,7 +1641,7 @@ def test_check_failure_acts_once_per_transition():
     )
     ctx.run(ctx.on.config_changed(), state=state)
     # Two transitions into DOWN, so two restarts -- not one per read.
-    assert ctx.service_ops_history['foo'] == [
+    assert ctx.service_history['foo'] == [
         ServiceOp('restart', ('guarded',), caused_by='chk1'),
         ServiceOp('restart', ('guarded',), caused_by='chk1'),
     ]
@@ -1656,7 +1656,7 @@ def test_check_failure_skips_a_stopped_service():
         },
     )
     state_out = ctx.run(ctx.on.config_changed(), state=state)
-    assert 'foo' not in ctx.service_ops_history
+    assert 'foo' not in ctx.service_history
     assert (
         state_out.get_container('foo').service_statuses['guarded']
         == ops.pebble.ServiceStatus.INACTIVE
@@ -1687,7 +1687,7 @@ def test_check_failure_ignore_does_nothing():
         service_statuses={'guarded': ops.pebble.ServiceStatus.ACTIVE},
     )
     ctx.run(ctx.on.config_changed(), state=state)
-    assert 'foo' not in ctx.service_ops_history
+    assert 'foo' not in ctx.service_history
 
 
 def test_check_failure_unsupported_action_raises():
@@ -1731,4 +1731,4 @@ def test_charm_invoked_ops_have_no_cause():
     ctx = Context(RestartCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
     container = Container('foo', can_connect=True, layers={'layer1': CHECK_FAILURE_LAYER})
     ctx.run(ctx.on.config_changed(), state=State(containers={container}))
-    assert ctx.service_ops_history['foo'] == [ServiceOp('restart', ('unguarded',))]
+    assert ctx.service_history['foo'] == [ServiceOp('restart', ('unguarded',))]

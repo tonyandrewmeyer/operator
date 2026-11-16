@@ -936,7 +936,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         caused_by: str | None = None,
     ) -> None:
         record = ServiceOp(op=op, services=tuple(services), caused_by=caused_by)
-        self._context.service_ops_history.setdefault(self._container_name, []).append(record)
+        self._context.service_history.setdefault(self._container_name, []).append(record)
 
     def _apply_check_failure_actions(self, check_name: str) -> None:
         """Carry out the ``on-check-failure`` actions for a check that went down.

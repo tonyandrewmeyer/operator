@@ -358,6 +358,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _attribute_chains(tree)
     reasons += _testing_names(tree)
     reasons += _unset_charm_root(tree)
+    reasons += _tmp_fixture_without_charm_root(tree)
     reasons += _charm_assigns_read_only_property(tree)
     reasons += _assert_in_charm(tree)
     reasons += _str_compared_with_path(tree)
@@ -1155,6 +1156,117 @@ def _unset_charm_root(tree: ast.Module) -> list[str]:
                 "none, so comparing with it says nothing about the bug. It is not the directory "
                 "the charm runs in; read that in a handler"
             )
+    return list(dict.fromkeys(reasons))
+
+
+_TMP_FIXTURES = ("tmp_path", "tmpdir")
+_PATH_WRAPPERS = {"str", "Path", "pathlib.Path", "os.fspath", "os.path.realpath", "os.path.abspath"}
+
+
+def _fixture_read(operand: ast.AST, name: str) -> ast.Name | None:
+    """The `name` read `operand` is, through `str()`, `Path()`,
+    `os.fspath()`, `.resolve()` and `/ ...`, or `None` when it is not one."""
+    while True:
+        if isinstance(operand, ast.Name):
+            return operand if operand.id == name else None
+        if (
+            isinstance(operand, ast.Call)
+            and len(operand.args) == 1
+            and not operand.keywords
+            and ast.unparse(operand.func) in _PATH_WRAPPERS
+        ):
+            operand = operand.args[0]
+        elif (
+            isinstance(operand, ast.Call)
+            and not operand.args
+            and not operand.keywords
+            and isinstance(operand.func, ast.Attribute)
+            and operand.func.attr == "resolve"
+        ):
+            operand = operand.func.value
+        elif isinstance(operand, ast.BinOp) and isinstance(operand.op, ast.Div):
+            operand = operand.left
+        else:
+            return None
+
+
+def _is_fixture_decorator(node: ast.AST) -> bool:
+    if isinstance(node, ast.Call):
+        node = node.func
+    return ast.unparse(node) in {"fixture", "pytest.fixture"}
+
+
+def _tmp_fixture_without_charm_root(tree: ast.Module) -> list[str]:
+    """A value compared with pytest's `tmp_path` or `tmpdir` in a test that
+    never hands the fixture to the charm.
+
+    The fixture is a directory pytest makes for the test, and `ops.testing`
+    only uses it as the charm root when it is given as
+    `Context(charm_root=...)`; otherwise the charm root is a separate
+    temporary directory, so a test comparing the charm's cwd (or anything
+    else the charm sees) with the fixture has the same result whether or not
+    the bug is real (`spike-step-5/static-retry/RESULT.md` §38's
+    prbar2045-8, §39). Only when the test function builds a `Context(...)`
+    itself and every read of the fixture in it is an operand of an `==`,
+    `!=`, `in` or `not in` comparison (bare, or in `str()`, `Path()`,
+    `os.fspath()`, `.resolve()`, or `/ ...`): any other use, `charm_root=`
+    included, might hand the directory to the charm. A fixture that a
+    `@pytest.fixture` in the file also takes is left alone (it shares the
+    test's directory and might pass it on), as is a name a decorator
+    mentions or the test rebinds.
+    """
+    shared: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+            _is_fixture_decorator(d) for d in node.decorator_list
+        ):
+            shared.update(a.arg for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs])
+    reasons = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or not func.name.startswith("test"):
+            continue
+        contexts = sorted({n.lineno for n in ast.walk(func) if _is_context_call(n)})
+        if not contexts:
+            continue
+        own_args = [*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs]
+        params = {a.arg for a in own_args}
+        decorators = " ".join(ast.unparse(d) for d in func.decorator_list)
+        for name in _TMP_FIXTURES:
+            if name not in params or name in shared or name in decorators:
+                continue
+            compared: list[ast.AST] = []
+            allowed: set[int] = set()
+            for compare in ast.walk(func):
+                if not isinstance(compare, ast.Compare) or not any(
+                    isinstance(op, (ast.Eq, ast.NotEq, ast.In, ast.NotIn)) for op in compare.ops
+                ):
+                    continue
+                for operand in [compare.left, *compare.comparators]:
+                    read = _fixture_read(operand, name)
+                    if read is not None:
+                        compared.append(operand)
+                        allowed.add(id(read))
+            uses = [n for n in ast.walk(func) if isinstance(n, ast.Name) and n.id == name]
+            rebound = any(
+                isinstance(n, ast.arg) and n.arg == name and all(n is not a for a in own_args)
+                for n in ast.walk(func)
+            ) or any(not isinstance(n.ctx, ast.Load) for n in uses)
+            if not compared or rebound or any(id(n) not in allowed for n in uses):
+                continue
+            if len(contexts) == 1:
+                built = f"line {contexts[0]}'s `Context(...)` is"
+            else:
+                built = "the `Context(...)`s on lines " + ", ".join(map(str, contexts)) + " are"
+            for operand in compared:
+                reasons.append(
+                    f"line {operand.lineno}: the test compares with `{ast.unparse(operand)}`, but "
+                    f"`{name}` is pytest's own temporary directory for this test and nothing hands it "
+                    f"to the charm: {built} not given it as `charm_root=`, so the charm root is a "
+                    "separate temporary directory and the comparison comes out the same whether or "
+                    f"not the bug is real; pass the fixture as `Context(..., charm_root={name})` if "
+                    "the charm root should be that directory, or read the charm's directory in a "
+                    "handler as `self.framework.charm_dir` and compare with that"
+                )
     return list(dict.fromkeys(reasons))
 
 

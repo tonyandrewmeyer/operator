@@ -1,0 +1,39 @@
+name: Review tier
+
+# Decides how many approvals a PR needs (one for a small change, two for
+# everything else) and fails until it has them. The rules are in
+# .github/review-tier.toml, read from the base branch, never from the PR.
+# A new review re-runs the check, so an approval turns it green.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+concurrency:
+  group: review-tier-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # The job id is the check name the ruleset requires.
+  review-tier:
+    name: review-tier
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # To read the configuration and the changed files.
+      pull-requests: read  # To read the PR, its commits, timeline and reviews.
+    steps:
+      # No checkout: everything is read through the API, from the base branch.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # TODO: re-pin to the canonical/charm-tech-code merge commit once review-tier lands there.
+        run: >-
+          uvx --from "git+https://github.com/tonyandrewmeyer/charm-tech-code@9df1a830b13d2f551ece7f3e06011e6168bb37fb#subdirectory=review-tier"
+          review-tier "$PR_NUMBER"

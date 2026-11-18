@@ -1,0 +1,39 @@
+# How many approvals a PR needs: read by .github/workflows/review-tier.yaml
+# from the base branch, so a PR can't change the rules it is judged by.
+# A small change needs one approval; everything else needs two.
+line-limit = 300
+team = [
+    "benhoyt", "dwilding", "hpidcock", "james-garner-canonical",
+    "MattPatchava", "tromai", "tonyandrewmeyer",
+]
+
+[low-risk]  # Team PRs that only touch these paths. `*` matches across `/`.
+allow = [
+    "test/*", "testing/tests/*", "tracing/test/*", "examples/*", "docs/*",
+    "CONTRIBUTING.md", "HACKING.md", "README.md", "*/README.md", "testing/UPGRADING.md",
+]
+except = [
+    "docs/conf.py", "*requirements*.txt", "*uv.lock", "*pyproject.toml", "examples/*/tox.ini",
+]
+
+[release]  # PRs opened by propose-release.yaml and create-draft-release.yaml.
+author = "github-actions[bot]"
+branches = ["release-prep-*", "post-release-*"]
+files = [
+    "CHANGES.md", "docs/explanation/versions.md", "ops/version.py", "uv.lock",
+    "pyproject.toml", "testing/pyproject.toml", "tracing/pyproject.toml",
+]
+# Only version lines and pins between our own packages may change in these.
+line-checked = ["ops/version.py", "pyproject.toml", "testing/pyproject.toml", "tracing/pyproject.toml"]
+lockfile = "uv.lock"
+packages = ["ops", "ops-scenario", "ops-tracing"]
+
+[bot]
+author = "prints-charming-bot"
+
+[bot.branches.auto-update-external-charm-pins]
+files = [".github/workflows/db-charm-tests.yaml", ".github/workflows/observability-charm-tests.yaml"]
+lines = '\s*commit: [0-9a-f]{40}  # .*'
+
+[bot.branches.auto-update-best-practice-docs]
+files = ["docs/reuse/best-practices.txt"]

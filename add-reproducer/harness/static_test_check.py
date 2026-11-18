@@ -359,6 +359,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _testing_names(tree)
     reasons += _unset_charm_root(tree)
     reasons += _tmp_fixture_without_charm_root(tree)
+    reasons += _charm_name_as_path_without_charm_root(tree)
     reasons += _charm_assigns_read_only_property(tree)
     reasons += _assert_in_charm(tree)
     reasons += _str_compared_with_path(tree)
@@ -1267,6 +1268,218 @@ def _tmp_fixture_without_charm_root(tree: ast.Module) -> list[str]:
                     "the charm root should be that directory, or read the charm's directory in a "
                     "handler as `self.framework.charm_dir` and compare with that"
                 )
+    return list(dict.fromkeys(reasons))
+
+
+def _module_constant(tree: ast.Module, name: str) -> ast.AST | None:
+    """The value a name is bound to by the file's only binding of it, a
+    module-level `name = ...`, or `None`."""
+    found = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id == name:
+                if found is not None:
+                    return None
+                found = node.value
+    if found is None:
+        return None
+    stores = sum(
+        1
+        for n in ast.walk(tree)
+        if (isinstance(n, ast.Name) and n.id == name and not isinstance(n.ctx, ast.Load))
+        or (isinstance(n, ast.arg) and n.arg == name)
+    )
+    return found if stores == 1 else None
+
+
+def _meta_name(tree: ast.Module, meta: ast.AST, _depth: int = 0) -> str | None:
+    """The charm name a `Context(meta=...)` argument gives: a dict literal's
+    `'name'`, a module-level dict bound to a name, or `yaml.safe_load()` of
+    a string literal (or a module-level one)."""
+    if _depth > 3:
+        return None
+    if isinstance(meta, ast.Name):
+        value = _module_constant(tree, meta.id)
+        return None if value is None else _meta_name(tree, value, _depth + 1)
+    if isinstance(meta, ast.Dict):
+        for key, value in zip(meta.keys, meta.values):
+            if isinstance(key, ast.Constant) and key.value == "name":
+                if isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value:
+                    return value.value
+                return None
+        return None
+    if (
+        isinstance(meta, ast.Call)
+        and ast.unparse(meta.func) in {"yaml.safe_load", "safe_load"}
+        and len(meta.args) == 1
+    ):
+        text = meta.args[0]
+        if isinstance(text, ast.Name):
+            text = _module_constant(tree, text.id)
+        if isinstance(text, ast.Constant) and isinstance(text.value, str):
+            try:
+                import yaml
+
+                loaded = yaml.safe_load(text.value)
+            except Exception:
+                return None
+            if isinstance(loaded, dict) and isinstance(loaded.get("name"), str) and loaded["name"]:
+                return loaded["name"]
+    return None
+
+
+_PATH_WORDS = ("cwd", "dir", "path", "root", "folder")
+_PATH_SOURCES = ("getcwd", "cwd()", "charm_dir", "Path(", "JUJU_CHARM_DIR", "__file__")
+
+
+def _path_like(expr: ast.AST, tree: ast.Module) -> bool:
+    """Whether `expr` reads as a filesystem path: its own text names one
+    (`cwd`, `..._dir`, `path`, `root`), or it is a name or subscript that
+    the file assigns from `os.getcwd()`, `Path.cwd()`, `charm_dir` or the
+    like."""
+    text = ast.unparse(expr)
+    if any(w in text.lower() for w in _PATH_WORDS):
+        return True
+    if not isinstance(expr, (ast.Name, ast.Subscript)):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(ast.unparse(t) == text for t in targets):
+                value = ast.unparse(node.value)
+                if any(s in value for s in _PATH_SOURCES):
+                    return True
+    return False
+
+
+def _name_component(node: ast.AST, names: set[str], *, last: bool = True) -> str | None:
+    """The charm name a string literal ends with as a path component
+    (`'my-charm'`, `'/my-charm'`, `'/charms/my-charm/'`), or with
+    `last=False` has as any component (`'/my-charm/src'`), or `None`."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        parts = [p for p in node.value.split("/") if p]
+        if not parts:
+            return None
+        for part in parts[-1:] if last else parts:
+            if part in names:
+                return part
+    return None
+
+
+def _last_component(node: ast.AST) -> bool:
+    """`os.path.basename(...)`, `Path(...).name`, or `....split('/')[-1]`."""
+    if isinstance(node, ast.Call) and ast.unparse(node.func) in {"os.path.basename", "basename", "posixpath.basename"}:
+        return True
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "name"
+        and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) in {"Path", "pathlib.Path", "PurePath", "pathlib.PurePath", "PosixPath"}
+    ):
+        return True
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.UnaryOp)
+        and isinstance(node.slice.op, ast.USub)
+        and isinstance(node.slice.operand, ast.Constant)
+        and node.slice.operand.value == 1
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr in {"split", "rsplit"}
+        and node.value.args
+        and ast.unparse(node.value.args[0]) in {"'/'", '"/"', "os.sep", "os.path.sep"}
+    ):
+        return True
+    return False
+
+
+def _charm_name_as_path_without_charm_root(tree: ast.Module) -> list[str]:
+    """A value matched against the charm's name as a path component, in a
+    test whose `Context(...)`s are all built without `charm_root=`.
+
+    Without `charm_root=`, `ops.testing` makes the charm root a `tempfile`
+    directory (`/tmp/tmpXXXX`), never named after the charm, so a test that
+    checks the charm's cwd (or anything else) ends in `/<name>` fails
+    whether or not the bug is real (`spike-step-5/static-retry/RESULT.md`
+    §39's 2045b-1 and 2045b-5, §40). The name is the `meta=` the test's
+    `Context` is given: a dict literal, a module-level dict, or
+    `yaml.safe_load()` of a string. Matches: `.endswith()` a string whose
+    last path component is the name (`'<name>'`, `'/<name>'`,
+    `'/charms/<name>'`); `os.path.basename(...)`, `Path(...).name` or
+    `.split('/')[-1]` compared (`==`, `!=`) with `'<name>'`; and `'<name>'`
+    (or a path with it as a component) `in ...` / `not in`. For `.endswith()` and `in` with a bare
+    `'<name>'` (no `/`), only when the other side reads as a path (its text
+    names `cwd`, a directory, `path` or `root`, or the file assigns it from
+    `os.getcwd()` or the like), so `'my-charm' in status.message` is left
+    alone. Left alone: any `Context` given `charm_root=` or `**` arguments,
+    a test that builds no `Context`, and the name compared any other way
+    (`self.app.name == 'my-charm'`, `self.meta.name`).
+    """
+    reasons = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or not func.name.startswith("test"):
+            continue
+        contexts = [n for n in ast.walk(func) if _is_context_call(n)]
+        if not contexts:
+            continue
+        if any(k.arg in {"charm_root", None} for c in contexts for k in c.keywords):
+            continue
+        if any(isinstance(a, ast.Starred) for c in contexts for a in c.args):
+            continue
+        names: set[str] = set()
+        for c in contexts:
+            meta = next((k.value for k in c.keywords if k.arg == "meta"), c.args[1] if len(c.args) > 1 else None)
+            name = None if meta is None else _meta_name(tree, meta)
+            if name:
+                names.add(name)
+        if not names:
+            continue
+        found: list[tuple[ast.AST, str]] = []
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "endswith"
+                and len(node.args) == 1
+                and not node.keywords
+            ):
+                arg = node.args[0]
+                options = arg.elts if isinstance(arg, ast.Tuple) else [arg]
+                for option in options:
+                    value = _name_component(option, names)
+                    if value is not None and ("/" in option.value or _path_like(node.func.value, tree)):
+                        found.append((node, value))
+                        break
+            elif isinstance(node, ast.Compare) and len(node.ops) == 1:
+                op, left, right = node.ops[0], node.left, node.comparators[0]
+                if isinstance(op, (ast.Eq, ast.NotEq)):
+                    for a, b in ((left, right), (right, left)):
+                        value = _name_component(b, names)
+                        if value is not None and "/" not in b.value.strip("/") and _last_component(a):
+                            found.append((node, value))
+                            break
+                elif isinstance(op, (ast.In, ast.NotIn)):
+                    value = _name_component(left, names, last=False)
+                    if value is not None and not isinstance(
+                        right, (ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp, ast.SetComp, ast.DictComp)
+                    ) and ("/" in left.value or _path_like(right, tree)):
+                        found.append((node, value))
+        if not found:
+            continue
+        lines = sorted({c.lineno for c in contexts})
+        if len(lines) == 1:
+            built = f"line {lines[0]}'s `Context(...)` is"
+        else:
+            built = "the `Context(...)`s on lines " + ", ".join(map(str, lines)) + " are"
+        for node, name in found:
+            reasons.append(
+                f"line {node.lineno}: `{ast.unparse(node)}` matches a path against the charm's name "
+                f"`{name}`, but {built} not given `charm_root=`, so the charm root is a temporary "
+                "directory that `ops.testing` makes and is not named after the charm, and the match "
+                "comes out the same whether or not the bug is real; read the charm's directory in a "
+                "handler as `self.framework.charm_dir` and compare with that (or pass a "
+                f"`Context(..., charm_root=...)` named `{name}` if the test needs that name)"
+            )
     return list(dict.fromkeys(reasons))
 
 

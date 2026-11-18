@@ -5248,6 +5248,28 @@ class PebbleStorageAPIsTestMixin:
             client.push('file', '')
         assert excinfo.value.kind == 'generic-file-error'
 
+    @pytest.mark.parametrize('name', ['b\rar', 'b\nar', 'b\x00ar'])
+    def test_push_path_with_control_character_fails(
+        self,
+        pebble_dir: str,
+        client: PebbleClientType,
+        name: str,
+    ):
+        with pytest.raises(ValueError, match='CR, LF, or NUL'):
+            client.push(f'{pebble_dir}/{name}', 'data')
+        assert client.list_files(f'{pebble_dir}/') == []
+
+    @pytest.mark.parametrize('name', ['file', 'back\\slash', 'crème'])
+    def test_push_and_pull_awkward_path(
+        self,
+        pebble_dir: str,
+        client: PebbleClientType,
+        name: str,
+    ):
+        client.push(f'{pebble_dir}/{name}', 'data')
+        with client.pull(f'{pebble_dir}/{name}') as infile:
+            assert infile.read() == 'data'
+
     def test_pull_not_found(
         self,
         client: PebbleClientType,

@@ -3607,6 +3607,7 @@ class _TestingPebbleClient:
         group: str | None = None,
     ) -> None:
         path = str(path)
+        pebble._check_push_path(path)
         self._check_connection()
         if permissions is not None and not (0 <= permissions <= 0o777):
             raise pebble.PathError(

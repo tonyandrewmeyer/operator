@@ -159,6 +159,40 @@ def test_fs_pull(tmp_path: pathlib.Path, make_dirs: bool):
         assert not state_delta(out_purged, state)
 
 
+@pytest.mark.parametrize('path', ['/foo/b\rar', '/foo/b\nar', '/foo/b\x00ar'])
+def test_fs_push_path_with_control_character(path: str):
+    def callback(self: ops.CharmBase):
+        container = self.unit.get_container('foo')
+        with pytest.raises(ValueError, match='CR, LF, or NUL'):
+            container.push(path, 'data', make_dirs=True)
+        assert not container.exists(path)
+
+    trigger(
+        State(containers={Container(name='foo', can_connect=True)}),
+        charm_type=Charm,
+        meta={'name': 'foo', 'containers': {'foo': {}}},
+        event='start',
+        post_event=callback,
+    )
+
+
+@pytest.mark.parametrize('path', ['/foo/file', '/foo/back\\slash', '/foo/crème'])
+def test_fs_push_awkward_path(path: str):
+    def callback(self: ops.CharmBase):
+        container = self.unit.get_container('foo')
+        container.push(path, 'data', make_dirs=True)
+        with container.pull(path) as infile:
+            assert infile.read() == 'data'
+
+    trigger(
+        State(containers={Container(name='foo', can_connect=True)}),
+        charm_type=Charm,
+        meta={'name': 'foo', 'containers': {'foo': {}}},
+        event='start',
+        post_event=callback,
+    )
+
+
 LS = """
 .rw-rw-r--  228 ubuntu ubuntu 18 jan 12:05 -- charmcraft.yaml
 .rw-rw-r--  497 ubuntu ubuntu 18 jan 12:05 -- config.yaml

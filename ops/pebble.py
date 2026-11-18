@@ -412,6 +412,18 @@ def _format_timeout(timeout: float) -> str:
     return f'{timeout:.3f}s'
 
 
+def _check_push_path(path: str) -> None:
+    """Raise ValueError if ``path`` can't be sent to Pebble in a push request.
+
+    This is also used by the testing Pebble client, so that unit tests refuse
+    the same paths as real Pebble.
+    """
+    # These would end the filename early in the multipart header, and Pebble
+    # would reject the request with an error that doesn't mention the path.
+    if any(c in path for c in '\r\n\x00'):
+        raise ValueError(f'cannot push to a path containing CR, LF, or NUL: {path!r}')
+
+
 def _start_thread(target: Callable[..., Any], *args: Any, **kwargs: Any) -> threading.Thread:
     """Helper to simplify starting a thread.
 
@@ -2887,10 +2899,7 @@ class Client:
                 character, which can't be sent to Pebble.
         """
         path = str(path)
-        # These would end the filename early in the multipart header, and Pebble
-        # would reject the request with an error that doesn't mention the path.
-        if any(c in path for c in '\r\n\x00'):
-            raise ValueError(f'cannot push to a path containing CR, LF, or NUL: {path!r}')
+        _check_push_path(path)
         with self._start_span('pebble push') as span:
             info = self._make_auth_dict(permissions, user_id, user, group_id, group)
             info['path'] = path

@@ -111,7 +111,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # Pin the Python. `python-version` exports `UV_PYTHON` for every later
+      # step, so both environments this job builds use it: the harness's own
+      # (`uv run` below) and each issue's scratch project (`uv sync`, then the
+      # extraction's `uv init` / `uv add` / `uv run`), whose environment
+      # `seams/runner.py:scratch_command_env()` passes through unchanged.
+      # Unpinned, both took whatever `ubuntu-latest` provides (3.12 on 24.04),
+      # and the static check, the reproducer and the spike's measurement venvs
+      # agreed only by that accident
+      # (`spike-step-5/static-retry/RESULT.md` §40 point 2, §41).
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          python-version: '3.12'
 
       # No `snap install concierge` step and no `concierge prepare` step: the
       # harness does both, in the one place that needs them. `concierge` is

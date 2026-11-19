@@ -147,6 +147,18 @@ def test_check_info_container_matches_event():
         )
 
 
+def test_check_info_threshold_zero_in_plan():
+    # Pebble treats a threshold of 0 as unset, and reports the default of 3.
+    check = CheckInfo('http-check', threshold=3)
+    layer = ops.pebble.Layer({'checks': {'http-check': {'override': 'replace', 'threshold': 0}}})
+    container = Container('foo', check_infos={check}, layers={'base': layer})
+    assert_consistent(
+        State(containers={container}),
+        Event('foo-pebble-check-failed', _container=container, _check_info=check),
+        _CharmSpec(MyCharm, {'containers': {'foo': {}}}),
+    )
+
+
 def test_container_meta_mismatch():
     assert_inconsistent(
         State(containers={Container('bar')}),

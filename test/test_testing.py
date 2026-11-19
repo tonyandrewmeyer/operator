@@ -7195,6 +7195,27 @@ class TestChecks:
         assert chk3.failures == 0
         assert chk3.status == pebble.CheckStatus.INACTIVE
 
+    @pytest.mark.parametrize('threshold', [None, 0])
+    def test_add_layer_check_default_threshold(
+        self, request: pytest.FixtureRequest, threshold: int | None
+    ):
+        check: pebble.CheckDict = {'override': 'replace', 'exec': {'command': 'foo'}}
+        if threshold is not None:
+            check['threshold'] = threshold
+        harness = ops.testing.Harness(
+            ops.CharmBase,
+            meta='name: mycharm\ncontainers:\n  mycontainer:',
+        )
+        request.addfinalizer(harness.cleanup)
+        harness.set_can_connect('mycontainer', True)
+        harness.begin()
+        container = harness.charm.unit.get_container('mycontainer')
+        container.add_layer('mylayer', pebble.Layer({'checks': {'chk': check}}))
+        # Like Pebble, a threshold of 0 is treated as unset, so defaults to 3.
+        assert container.get_checks('chk')['chk'].threshold == 3
+        container.replan()
+        assert container.get_checks('chk')['chk'].threshold == 3
+
     def test_start_checks(self, request: pytest.FixtureRequest):
         container = self._container_with_layer(request)
         changed = container.start_checks('chk1', 'chk2', 'chk3')

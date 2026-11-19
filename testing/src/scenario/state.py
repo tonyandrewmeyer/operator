@@ -1231,7 +1231,13 @@ class ServiceStart(Enum):
     after the service has been up for more than a second doesn't fail the
     call that started it). The resulting status depends on
     :attr:`ServiceBehaviour.exit_code` and the service's ``on-success``/
-    ``on-failure`` policy; see :class:`ServiceExitCode`."""
+    ``on-failure`` policy; see :class:`ServiceExitCode`.
+
+    If that policy is a shutdown (``shutdown``, ``success-shutdown`` or
+    ``failure-shutdown``), the call still succeeds, and then Pebble shuts
+    itself down: every later Pebble call in the run raises
+    :class:`ops.pebble.ConnectionError`, and the output state's container has
+    ``can_connect=False``."""
 
 
 class ServiceExitCode(Enum):
@@ -1267,10 +1273,13 @@ class ServiceFailureMode(Enum):
     or the raw string ``'backoff'`` for ``on-failure: restart`` (Pebble's
     default). ``'backoff'`` has no :class:`ops.pebble.ServiceStatus` member,
     so :attr:`ops.pebble.ServiceInfo.current` is a plain :class:`str` in that
-    case, exactly as with real Pebble. Only the ``ignore`` and ``restart``
-    (including unset, which defaults to ``restart``) policies are supported;
-    a service configured with any other ``on-failure`` value raises
-    ``NotImplementedError``."""
+    case, exactly as with real Pebble.
+
+    With ``on-failure: shutdown`` or ``on-failure: success-shutdown``, the
+    start still raises :class:`ops.pebble.ChangeError` (its text names the
+    action), and then Pebble shuts itself down: every later Pebble call in
+    the run raises :class:`ops.pebble.ConnectionError`, and the output
+    state's container has ``can_connect=False``."""
 
     EXEC_ERROR = 'exec-error'
     """The configured command can't be exec'd at all (for example, the

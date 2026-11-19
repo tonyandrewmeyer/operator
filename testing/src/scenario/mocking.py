@@ -163,6 +163,11 @@ class _MockExecProcess:
 
 _NOT_GIVEN = object()  # non-None default value sentinel
 
+# The service actions that make Pebble shut itself down rather than act on
+# the service. Which kind of shutdown each one is (success or failure) makes
+# no difference to a charm: either way the daemon goes away.
+_SHUTDOWN_ACTIONS = frozenset({'shutdown', 'success-shutdown', 'failure-shutdown'})
+
 
 # pyright: reportIncompatibleMethodOverride=false
 class _MockModelBackend(_ModelBackend):  # type: ignore
@@ -993,6 +998,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         self._apply_exit_behaviours(enabled)
         self._emit_service_notices(enabled)
         self._update_state_check_infos()
+        self._shut_down_after_exits(enabled)
 
     def start_services(
         self,
@@ -1008,6 +1014,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         change_id = super().start_services(services, timeout=timeout, delay=delay)
         self._apply_exit_behaviours(services)
         self._emit_service_notices(services)
+        self._shut_down_after_exits(services)
         return change_id
 
     def stop_services(
@@ -1109,6 +1116,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         change_id = super().restart_services(services, timeout=timeout, delay=delay)
         self._apply_exit_behaviours(services)
         self._emit_service_notices(services)
+        self._shut_down_after_exits(services)
         return change_id
 
     def autostart_services(self, timeout: float = 30.0, delay: float = 0.1):
@@ -1120,6 +1128,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         change_id = super().autostart_services(timeout=timeout, delay=delay)
         self._apply_exit_behaviours(enabled)
         self._emit_service_notices(enabled)
+        self._shut_down_after_exits(enabled)
         return change_id
 
     def _enabled_service_names(self) -> list[str]:
@@ -1175,6 +1184,55 @@ class _MockPebbleClient(_TestingPebbleClient):
             if behaviour is None or behaviour.start is not ServiceStart.EXITS:
                 continue
             self._service_status[name] = self._service_exit_detail(known_services[name], behaviour)
+
+    def _shut_down_after_exits(self, services: list[str]) -> None:
+        """Shut Pebble down if a requested ``EXITS`` service's exit action says to.
+
+        Called last, after the call has succeeded and the services' notices
+        are recorded: the start itself isn't affected, only what comes after.
+        """
+        known_services = self._render_services()
+        for name in services:
+            behaviour = self._find_service_behaviour(name)
+            if behaviour is None or behaviour.start is not ServiceStart.EXITS:
+                continue
+            if self._shutdown_action(known_services[name], behaviour) is not None:
+                self._shut_down()
+                return
+
+    def _shutdown_action(self, service: pebble.Service, behaviour: ServiceBehaviour) -> str | None:
+        """The shutdown action the service's declared exit triggers, if any.
+
+        Pebble applies ``on-failure`` to a nonzero exit and ``on-success`` to a
+        clean one, both for a service that exits while it is starting
+        (``FAILS``) and for one that exits later (``EXITS``). A service that
+        can't be exec'd at all never exits, so it never triggers either.
+        """
+        if behaviour.start is ServiceStart.FAILS:
+            if behaviour.failure_mode is ServiceFailureMode.EXEC_ERROR:
+                return None
+            action = service.on_failure
+        elif behaviour.start is ServiceStart.EXITS:
+            if behaviour.exit_code is ServiceExitCode.SUCCESS:
+                action = service.on_success
+            else:
+                action = service.on_failure
+        else:
+            return None
+        return action if action in _SHUTDOWN_ACTIONS else None
+
+    def _shut_down(self) -> None:
+        """Make the container unreachable for the rest of the run.
+
+        When a service's ``on-success``, ``on-failure`` or ``on-check-failure``
+        action is a shutdown, Pebble shuts itself down. The charm may get one
+        more call in before the daemon is gone; this models the usual outcome,
+        where it doesn't: every later Pebble call raises
+        :class:`ops.pebble.ConnectionError`, and the output state's container
+        has ``can_connect=False``. Restarting the container happens between
+        hooks, so it isn't modelled.
+        """
+        object.__setattr__(self._container, 'can_connect', False)
 
     def _service_requires_closure(
         self,
@@ -1686,6 +1744,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         us here (``start``/``restart``/``autostart``/``replan``), and the
         change summary's verb follows it.
         """
+        self._check_connection()
         if not services:
             raise self._api_error(400, 'must specify services for start action')
         known_services = self._render_services()
@@ -1856,6 +1915,14 @@ class _MockPebbleClient(_TestingPebbleClient):
         if len(ordered) > 1:
             summary += f' and {len(ordered) - 1} more'
 
+        # A service whose exit action is a shutdown takes Pebble down after
+        # the change finishes. A held service never ran, so it never exited.
+        shuts_down = any(
+            self._shutdown_action(known_services[name], behaviour) is not None
+            for name in ordered
+            if name not in held and (behaviour := self._find_service_behaviour(name)) is not None
+        )
+
         if not bullets:
             # No FAILS behaviour anywhere in the closure: every pulled-in
             # member started successfully too (§24.3's `yankee`/`zulu`, both
@@ -1873,6 +1940,8 @@ class _MockPebbleClient(_TestingPebbleClient):
                 ready_time=ready_time,
             )
             self._changes[change.id] = change
+            if shuts_down:
+                self._shut_down()
             return change.id
 
         err = 'cannot perform the following tasks:\n' + '\n'.join(bullets)
@@ -1887,6 +1956,10 @@ class _MockPebbleClient(_TestingPebbleClient):
             spawn_time=spawn_time,
             ready_time=ready_time,
         )
+        if shuts_down:
+            # The charm still gets the error for the start, and then finds
+            # Pebble gone on its next call.
+            self._shut_down()
         raise pebble.ChangeError(err, change)
 
     def _service_failure_detail(
@@ -1903,8 +1976,10 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         verb = self._on_failure_verb(service.on_failure)
         reason = f'service start attempt: exited quickly with code 1, will {verb}'
+        # Pebble leaves the service exited (ERROR) for ignore and for the
+        # shutdown actions, and in backoff for restart.
         status: pebble.ServiceStatus | str = (
-            pebble.ServiceStatus.ERROR if verb == 'ignore' else 'backoff'
+            'backoff' if verb == 'restart' else pebble.ServiceStatus.ERROR
         )
         log = [
             f'{_rfc3339_now()} INFO Most recent service output:',
@@ -1916,11 +1991,13 @@ class _MockPebbleClient(_TestingPebbleClient):
     def _on_failure_verb(on_failure: str) -> str:
         if on_failure in ('', 'restart'):
             return 'restart'
-        if on_failure == 'ignore':
-            return 'ignore'
+        # Pebble doesn't accept failure-shutdown for on-failure.
+        if on_failure in ('ignore', 'shutdown', 'success-shutdown'):
+            return on_failure
         raise NotImplementedError(
-            f'ServiceStart.FAILS does not model on-failure: {on_failure!r} yet; only '
-            "'' (Pebble's default, equivalent to 'restart') and 'ignore'."
+            f'on-failure: {on_failure!r} is not modelled; only '
+            "'' (Pebble's default, equivalent to 'restart'), 'restart', 'ignore', "
+            "'shutdown' and 'success-shutdown' are."
         )
 
     def _service_exit_detail(
@@ -1938,19 +2015,27 @@ class _MockPebbleClient(_TestingPebbleClient):
         """
         if behaviour.exit_code is ServiceExitCode.SUCCESS:
             verb = self._on_success_verb(service.on_success)
-            return pebble.ServiceStatus.INACTIVE if verb == 'ignore' else 'backoff'
-        verb = self._on_failure_verb(service.on_failure)
-        return pebble.ServiceStatus.ERROR if verb == 'ignore' else 'backoff'
+        else:
+            verb = self._on_failure_verb(service.on_failure)
+        if verb == 'restart':
+            return 'backoff'
+        if verb == 'ignore' and behaviour.exit_code is ServiceExitCode.SUCCESS:
+            return pebble.ServiceStatus.INACTIVE
+        # Pebble leaves the service exited (ERROR) after a nonzero exit with
+        # ignore, and after any exit whose action is a shutdown.
+        return pebble.ServiceStatus.ERROR
 
     @staticmethod
     def _on_success_verb(on_success: str) -> str:
         if on_success in ('', 'restart'):
             return 'restart'
-        if on_success == 'ignore':
-            return 'ignore'
+        # Pebble doesn't accept success-shutdown for on-success.
+        if on_success in ('ignore', 'shutdown', 'failure-shutdown'):
+            return on_success
         raise NotImplementedError(
-            f'ServiceStart.EXITS does not model on-success: {on_success!r} yet; only '
-            "'' (Pebble's default, equivalent to 'restart') and 'ignore'."
+            f'on-success: {on_success!r} is not modelled; only '
+            "'' (Pebble's default, equivalent to 'restart'), 'restart', 'ignore', "
+            "'shutdown' and 'failure-shutdown' are."
         )
 
     def add_layer(

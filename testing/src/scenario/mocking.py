@@ -50,6 +50,7 @@ from ops.pebble import Client, ExecError
 from .errors import ActionMissingFromContextError
 from .logger import logger as scenario_logger
 from .state import (
+    AddLayer,
     CharmType,
     CheckBehaviour,
     CheckInfo,
@@ -59,14 +60,18 @@ from .state import (
     PeerRelation,
     Relation,
     RelationBase,
+    ServiceOp,
     Storage,
     SubordinateRelation,
     _EntityStatus,
     _port_cls_by_protocol,
     _RawPortProtocolLiteral,
+    _ServiceOpName,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Sequence
+
     from .context import Context
     from .state import Container as ContainerSpec
     from .state import Exec, Secret, State, _CharmSpec, _Event
@@ -843,6 +848,9 @@ class _MockPebbleClient(_TestingPebbleClient):
         # How many times each check has been read, which is what advances a
         # CheckBehaviour's declared statuses.
         self._check_reads: dict[str, int] = {}
+        # Set when an on-check-failure action shuts Pebble down partway through
+        # a call; the call finishes, and then the container becomes unreachable.
+        self._shutdown_pending = False
 
         # load any existing notices and check information from the state
         self._notices: dict[tuple[str, str], pebble.Notice] = {}
@@ -924,9 +932,110 @@ class _MockPebbleClient(_TestingPebbleClient):
             infos.add(check_info)
         object.__setattr__(self._container, 'check_infos', frozenset(infos))
 
+    def _record_service_op(
+        self,
+        op: _ServiceOpName,
+        services: Sequence[str],
+        caused_by: str | None = None,
+    ) -> None:
+        record = ServiceOp(op=op, services=tuple(services), caused_by=caused_by)
+        self._context.service_history.setdefault(self._container_name, []).append(record)
+
+    def _apply_check_failure_actions(self, check_name: str) -> None:
+        """Carry out the ``on-check-failure`` actions for a check that went down.
+
+        Pebble restarts a running service that names this check in its
+        ``on-check-failure``. The service ends up back in the ``ACTIVE`` status
+        it already had -- and Pebble records no change for the restart -- so
+        the recorded operation is the only evidence the restart happened.
+
+        Only services that are currently running are restarted; what Pebble
+        does for a service that is stopped when its check fails has not been
+        established, so this leaves them alone.
+
+        ``shutdown`` and ``success-shutdown`` make Pebble shut itself down,
+        for a service that is running, or has exited or is in backoff (the
+        states Pebble acts on). The read that saw the check go down still
+        returns, and then the container is unreachable for the rest of the
+        run: see :meth:`_shut_down`.
+        """
+        for name, service in self._render_services().items():
+            action = service.on_check_failure.get(check_name)
+            if action is None or action == 'ignore':
+                continue
+            status = self._service_status.get(name)
+            # Pebble doesn't accept failure-shutdown for on-check-failure.
+            if action in ('shutdown', 'success-shutdown'):
+                if status in (
+                    pebble.ServiceStatus.ACTIVE,
+                    pebble.ServiceStatus.ERROR,
+                    'backoff',
+                ):
+                    self._shutdown_pending = True
+                continue
+            if action != 'restart':
+                raise NotImplementedError(
+                    f'on-check-failure: {action!r} is not modelled; only '
+                    "'restart', 'ignore', 'shutdown' and 'success-shutdown' are."
+                )
+            if status is not pebble.ServiceStatus.ACTIVE:
+                continue
+            self._service_status[name] = pebble.ServiceStatus.ACTIVE
+            self._record_service_op('restart', (name,), caused_by=check_name)
+
+    def _enabled_service_names(self) -> list[str]:
+        # The services that ``replan`` and ``autostart`` will try to start.
+        return [
+            name
+            for name, service in self._render_services().items()
+            if service.startup == pebble.ServiceStartup.ENABLED.value
+        ]
+
+    def autostart_services(self, timeout: float = 30.0, delay: float = 0.1):
+        # _check_connection runs first so that, on ConnectionError, no record
+        # is made; otherwise we record the charm's intent before calling super.
+        self._check_connection()
+        self._record_service_op('autostart', self._enabled_service_names())
+        return super().autostart_services(timeout=timeout, delay=delay)
+
     def replan_services(self, timeout: float = 30.0, delay: float = 0.1):
+        # Note: this calls autostart_services internally, which will also
+        # record an 'autostart' op; that's intentional and mirrors what Pebble
+        # actually does on a replan.
+        self._check_connection()
+        self._record_service_op('replan', self._enabled_service_names())
         super().replan_services(timeout=timeout, delay=delay)
         self._update_state_check_infos()
+
+    def start_services(
+        self,
+        services: list[str],
+        timeout: float = 30.0,
+        delay: float = 0.1,
+    ) -> pebble.ChangeID:
+        self._check_connection()
+        self._record_service_op('start', services)
+        return super().start_services(services, timeout=timeout, delay=delay)
+
+    def stop_services(
+        self,
+        services: list[str],
+        timeout: float = 30.0,
+        delay: float = 0.1,
+    ) -> pebble.ChangeID:
+        self._check_connection()
+        self._record_service_op('stop', services)
+        return super().stop_services(services, timeout=timeout, delay=delay)
+
+    def restart_services(
+        self,
+        services: list[str],
+        timeout: float = 30.0,
+        delay: float = 0.1,
+    ) -> pebble.ChangeID:
+        self._check_connection()
+        self._record_service_op('restart', services)
+        return super().restart_services(services, timeout=timeout, delay=delay)
 
     def add_layer(
         self,
@@ -935,6 +1044,12 @@ class _MockPebbleClient(_TestingPebbleClient):
         *,
         combine: bool = False,
     ):
+        self._check_connection()
+        # Coerce to a pebble.Layer so the recorded value is consistent and
+        # comparable regardless of how the charm passed the layer in.
+        layer_obj = layer if isinstance(layer, pebble.Layer) else pebble.Layer(layer)
+        record = AddLayer(label=label, layer=layer_obj, combine=combine)
+        self._context.add_layer_history.setdefault(self._container_name, []).append(record)
         super().add_layer(label, layer, combine=combine)
         self._update_state_check_infos()
 
@@ -1070,6 +1185,7 @@ class _MockPebbleClient(_TestingPebbleClient):
             info.status = pebble.CheckStatus.DOWN
             info.failures = info.threshold
             self._new_check_change(info, down=True)
+            self._apply_check_failure_actions(name)
         else:
             # Recovery: the recover-check is Done, a new perform-check starts,
             # and the success count restarts from one rather than zero.
@@ -1094,7 +1210,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         # Each call gets its own CheckInfo objects, as a real client does. The
         # mock updates its own in place, and a charm that holds on to one from
         # an earlier read should not see it move.
-        return [
+        infos = [
             pebble.CheckInfo(
                 name=info.name,
                 level=info.level,
@@ -1107,6 +1223,22 @@ class _MockPebbleClient(_TestingPebbleClient):
             )
             for info in super().get_checks(level=level, names=names)
         ]
+        if self._shutdown_pending:
+            self._shut_down()
+        return infos
+
+    def _shut_down(self) -> None:
+        """Make the container unreachable for the rest of the run.
+
+        When a service's ``on-check-failure`` action is a shutdown, Pebble
+        shuts itself down. The charm may get one more call in before the
+        daemon is gone; this models the usual outcome, where it doesn't: every
+        later Pebble call raises :class:`ops.pebble.ConnectionError`, and the
+        output state's container has ``can_connect=False``. Restarting the
+        container happens between hooks, so it isn't modelled.
+        """
+        self._shutdown_pending = False
+        object.__setattr__(self._container, 'can_connect', False)
 
     @property
     def _container(self) -> ContainerSpec:

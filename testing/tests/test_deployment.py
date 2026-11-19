@@ -9,6 +9,7 @@ import itertools
 import pathlib
 import sys
 import textwrap
+from collections import deque
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -17,7 +18,10 @@ from scenario import (
     ActiveStatus,
     CloudSpec,
     Container,
+    ErrorStatus,
+    Event,
     Exec,
+    MaintenanceStatus,
     Model,
     PeerRelation,
     Secret,
@@ -28,7 +32,7 @@ from scenario import (
 )
 from scenario._deployment import App, CharmSpec, Dispatch, Juju, Unit, _Candidate
 from scenario._juju_errors import JujuError
-from scenario.errors import InconsistentScenarioError, UncaughtCharmError
+from scenario.errors import InconsistentScenarioError
 
 import ops
 
@@ -444,9 +448,12 @@ def test_a_container_can_be_connected_to_from_its_pebble_ready(juju: Juju):
 
 
 def test_a_charm_that_calls_pebble_in_install_fails(juju: Juju):
-    juju.deploy(CharmSpec(UnguardedCharm, meta=EXEC_META))
-    with pytest.raises(UncaughtCharmError, match='Cannot connect to Pebble'):
-        juju.settle()
+    app = juju.deploy(CharmSpec(UnguardedCharm, meta=EXEC_META))
+    trace = juju.settle()
+    assert [d.event.name for d in trace] == ['install']
+    assert trace[0].error is not None
+    assert 'Cannot connect to Pebble' in trace[0].error
+    assert app.leader.state.unit_status == ErrorStatus('hook failed: "install"')
 
 
 def test_each_container_is_connected_by_its_own_pebble_ready(juju: Juju):
@@ -1304,3 +1311,320 @@ def test_a_budget_stops_settling_with_the_rest_pending(juju: Juju):
     assert first == expected[:3]
     rest = juju.settle()
     assert [*first, *rest] == expected
+
+
+# remove_unit
+
+
+def test_removing_a_unit_tears_it_down_and_its_peers_see_it_depart(juju: Juju):
+    app = juju.deploy(spec(PeerCharm, PEER_META), num_units=3)
+    juju.settle()
+    doomed = app.units[2]
+    juju.remove_unit(app, num_units=1)
+    assert {u.state.planned_units for u in app.units.values()} == {2}
+    trace = juju.settle()
+    assert [(d.event.name, d.event._relation_remote_unit_id) for d in trace if d.unit_id == 2] == [
+        ('replicas_relation_departed', 0),
+        ('replicas_relation_departed', 1),
+        ('replicas_relation_broken', None),
+        ('stop', None),
+        ('remove', None),
+    ]
+    broken = next(i for i, d in enumerate(trace) if d.event.name == 'replicas_relation_broken')
+    for unit_id in (0, 1):
+        departed = [
+            (i, d)
+            for i, d in enumerate(trace)
+            if d.unit_id == unit_id and d.event.name == 'replicas_relation_departed'
+        ]
+        assert len(departed) == 1
+        index, dispatch = departed[0]
+        # Peers see it depart once it has left the relation.
+        assert index > broken
+        assert dispatch.event._relation_departed_unit_id == 2
+        assert 2 not in peer_relation(app.units[unit_id]).peers_data
+    assert list(app.units) == [0, 1]
+    assert doomed.state.get_relations('replicas') == ()
+
+
+def test_a_removed_unit_runs_nothing_else_it_had_pending(juju: Juju):
+    app = deploy_mycharm(juju, num_units=3)
+    juju.settle()
+    juju.config(app, {'log_level': 'debug'})
+    juju.remove_unit(app, num_units=1)
+    # Nor does a unit that's being removed get config-changed.
+    juju.config(app, {'log_level': 'warning'})
+    trace = juju.settle()
+    assert events(trace, 'myapp/2') == ['stop', 'remove']
+    assert events(trace, 'myapp/0') == ['config_changed']
+    assert events(trace, 'myapp/1') == ['config_changed']
+
+
+def test_a_unit_in_error_is_removed_once_its_failed_hook_is_resolved(juju: Juju):
+    app = deploy_failing(juju, num_units=2)
+    juju.settle()
+    juju.remove_unit(app, num_units=1)
+    assert events(juju.settle(), 'failing/1') == ['start']
+    juju.config(app, {'fail_on': 'nothing'})
+    assert events(juju.settle(), 'failing/1') == [
+        'start',
+        'replicas_relation_broken',
+        'stop',
+        'remove',
+    ]
+    assert list(app.units) == [0]
+
+
+def test_a_unit_removed_before_install_runs_nothing(juju: Juju):
+    app = deploy_mycharm(juju, num_units=2)
+    juju.remove_unit(app, num_units=1)
+    assert list(app.units) == [0]
+    trace = juju.settle()
+    assert {d.unit_name for d in trace} == {'myapp/0'}
+
+
+def test_removing_the_leader_elects_the_lowest_unit_after_the_old_leader_has_gone():
+    with Juju(cloud_spec=CloudSpec(type='lxd', name='localhost')) as juju:
+        app = juju.deploy(spec(PeerCharm, PEER_META), num_units=3)
+        juju.settle()
+        juju.remove_unit(app.units[0])
+        trace = juju.settle()
+    removed = next(i for i, d in enumerate(trace) if d.event.name == 'remove')
+    elected = [(i, d.unit_name) for i, d in enumerate(trace) if d.event.name == 'leader_elected']
+    assert len(elected) == 1
+    assert elected[0][0] > removed
+    assert elected[0][1] == 'myapp/1'
+    assert app.leader is app.units[1]
+    assert app.units[1].state.leader
+    assert not app.units[2].state.leader
+    # Juju only runs leader-settings-changed when the leader settings change.
+    assert 'leader_settings_changed' not in [d.event.name for d in trace]
+
+
+def test_a_new_leader_that_has_not_started_runs_leader_elected_instead():
+    with Juju(cloud_spec=CloudSpec(type='lxd', name='localhost')) as juju:
+        app = deploy_mycharm(juju, num_units=3)
+        juju.remove_unit(app.units[0])
+        trace = juju.settle()
+    assert events(trace, 'myapp/1') == ['install', 'leader_elected', 'config_changed', 'start']
+    assert events(trace, 'myapp/2')[1] == 'leader_settings_changed'
+
+
+@pytest.mark.parametrize(
+    ('cloud', 'args', 'match'),
+    [
+        ('kubernetes', ('unit',), 'scaled down by count'),
+        ('kubernetes', ('app',), 'scaled down by count'),
+        ('lxd', ('app',), 'removed by name'),
+        ('lxd', ('unit', 'unit'), 'already being removed'),
+        ('lxd', ('unit', 'other'), 'every unit'),
+    ],
+)
+def test_remove_unit_rejects_the_wrong_form_and_removing_every_unit(
+    cloud: str, args: tuple[str, ...], match: str
+):
+    with Juju(cloud_spec=CloudSpec(type=cloud, name='localhost')) as juju:
+        app = deploy_mycharm(juju, num_units=2)
+        things = {'app': app, 'unit': app.units[0], 'other': app.units[1]}
+        if args == ('unit', 'unit'):
+            juju.remove_unit(app.units[0])
+            args = ('unit',)
+        with pytest.raises(JujuError, match=match):
+            juju.remove_unit(*(things[a] for a in args))
+
+
+def test_remove_unit_cannot_scale_an_application_to_zero(juju: Juju):
+    app = deploy_mycharm(juju, num_units=2)
+    with pytest.raises(JujuError, match='every unit'):
+        juju.remove_unit(app, num_units=2)
+
+
+def test_a_peer_that_leaves_before_a_unit_sees_it_join_is_never_seen(juju: Juju):
+    app = juju.deploy(spec(PeerCharm, PEER_META))
+    juju.settle()
+    juju.add_unit(app)
+    # Run myapp/1 up to its relation-created, which queues the joins on myapp/0.
+    while not juju._queues['myapp', 0]:
+        juju._settle(budget=1)
+    juju.remove_unit(app, num_units=1)
+    # Let myapp/1 go before myapp/0 has its turn.
+    juju._scheduler = _Last()
+    trace = juju.settle()
+    assert events(trace, 'myapp/1') == ['replicas_relation_broken', 'remove']
+    # The relation-joined and the relation-changed for myapp/1 are both dropped.
+    assert events(trace, 'myapp/0') == []
+    assert peer_relation(app.units[0]).peers_data == {}
+
+
+# Leadership and config-changed ahead of relation hooks
+
+
+def test_config_changed_runs_ahead_of_waiting_relation_hooks(juju: Juju):
+    app = juju.deploy(spec(PeerCharm, PEER_META))
+    juju.settle()
+    juju.add_unit(app)
+    while not juju._queues['myapp', 0]:
+        juju._settle(budget=1)
+    juju.config(app, {'log_level': 'debug'})
+    assert events(juju.settle(), 'myapp/0') == [
+        'config_changed',
+        'replicas_relation_joined',
+        'replicas_relation_changed',
+    ]
+
+
+@pytest.mark.parametrize(
+    ('waiting', 'expected'),
+    [
+        (['x_relation_joined', 'x_relation_changed', 'config_changed', 'leader_elected'], 3),
+        (['x_relation_departed', 'config_changed', 'start', 'leader_elected'], 1),
+        (['x_relation_broken', 'leader_settings_changed', 'config_changed'], 1),
+        (['install', 'leader_elected'], 0),
+        (['x_relation_created', 'config_changed'], 0),
+        (['config_changed', 'x_relation_changed'], 0),
+    ],
+)
+def test_leadership_then_config_changed_go_ahead_of_relation_hooks(
+    waiting: list[str], expected: int
+):
+    queue = deque(_deployment._Queued(Event(name)) for name in waiting)
+    assert _deployment._next_index(queue, in_error=False) == expected
+    assert _deployment._next_index(queue, in_error=True) == 0
+
+
+# Failed hooks
+
+
+FAILING_META: dict[str, Any] = {
+    'name': 'failing',
+    'peers': {'replicas': {'interface': 'failing-peer'}},
+    'containers': {'workload': {}},
+    'config': {
+        'options': {
+            'fail_on': {'type': 'string', 'default': 'start'},
+            'log_level': {'type': 'string', 'default': 'info'},
+        }
+    },
+}
+
+
+class FailingCharm(ops.CharmBase):
+    """Raises in the event its config names, and says what it last ran otherwise."""
+
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        for event in (
+            self.on.install,
+            self.on.config_changed,
+            self.on.start,
+            self.on['replicas'].relation_created,
+            self.on['replicas'].relation_changed,
+            self.on['workload'].pebble_ready,
+        ):
+            framework.observe(event, self._on_any)
+
+    def _on_any(self, event: ops.EventBase):
+        if event.handle.kind == self.config['fail_on']:
+            raise RuntimeError(f'cannot {event.handle.kind}')
+        self.unit.status = ops.MaintenanceStatus(event.handle.kind)
+
+
+def deploy_failing(juju: Juju, **kwargs: Any) -> App:
+    return juju.deploy(CharmSpec(FailingCharm, meta=FAILING_META), **kwargs)
+
+
+def test_a_failed_hook_puts_the_unit_in_error_and_the_rest_carries_on(juju: Juju):
+    failing = deploy_failing(juju)
+    other = deploy_mycharm(juju)
+    trace = juju.settle()
+    assert events(trace, 'failing/0') == [
+        'install',
+        'replicas_relation_created',
+        'leader_elected',
+        'config_changed',
+        'start',
+    ]
+    failed = next(d for d in trace if d.error is not None)
+    assert failed.event.name == 'start'
+    assert failed.error is not None
+    assert 'RuntimeError: cannot start' in failed.error
+    assert failed.state_in.unit_status == MaintenanceStatus('config_changed')
+    assert failed.state_out.unit_status == ErrorStatus('hook failed: "start"')
+    assert all(d.error is None for d in trace if d is not failed)
+    assert failing.leader.state.unit_status == ErrorStatus('hook failed: "start"')
+    assert other.leader.state.unit_status == ActiveStatus('start:info')
+
+
+@pytest.mark.parametrize(
+    ('fail_on', 'hook'),
+    [
+        ('install', 'install'),
+        ('workload_pebble_ready', 'pebble-ready'),
+        ('replicas_relation_changed', 'replicas-relation-changed'),
+    ],
+)
+def test_the_error_status_names_the_hook_as_juju_does(juju: Juju, fail_on: str, hook: str):
+    app = deploy_failing(juju, num_units=2, config={'fail_on': fail_on})
+    juju.settle()
+    assert app.units[1].state.unit_status == ErrorStatus(f'hook failed: "{hook}"')
+
+
+def test_each_settle_retries_the_failed_hook_once(juju: Juju):
+    app = deploy_failing(juju)
+    juju.settle()
+    for _ in range(2):
+        trace = juju.settle()
+        assert [(d.event.name, d.error is not None) for d in trace] == [('start', True)]
+        # The charm sees the status it set, not the error.
+        assert trace[0].state_in.unit_status == MaintenanceStatus('config_changed')
+    assert app.leader.state.unit_status == ErrorStatus('hook failed: "start"')
+
+
+def test_a_hook_that_failed_recovers_once_a_later_operation_fixes_it(juju: Juju):
+    app = deploy_failing(juju)
+    juju.settle()
+    juju.config(app, {'fail_on': 'nothing'})
+    trace = juju.settle()
+    assert [(d.event.name, d.error) for d in trace] == [
+        ('start', None),
+        ('workload_pebble_ready', None),
+        ('config_changed', None),
+    ]
+    assert app.leader.state.unit_status == MaintenanceStatus('config_changed')
+
+
+def test_without_automatic_retries_only_resolved_moves_the_unit_on():
+    with Juju(automatically_retry_hooks=False) as juju:
+        app = deploy_failing(juju)
+        juju.settle()
+        juju.config(app, {'fail_on': 'nothing'})
+        assert juju.settle() == []
+        juju.resolved(app.leader)
+        trace = juju.settle()
+    assert [d.event.name for d in trace] == ['start', 'workload_pebble_ready', 'config_changed']
+
+
+def test_resolved_with_no_retry_drops_the_hook_and_carries_on(juju: Juju):
+    app = deploy_failing(juju)
+    juju.settle()
+    juju.resolved(app.leader, retry=False)
+    assert app.leader.state.unit_status == MaintenanceStatus('config_changed')
+    trace = juju.settle()
+    assert [d.event.name for d in trace] == ['workload_pebble_ready']
+
+
+def test_resolved_with_no_retry_on_relation_created_still_joins_the_unit(juju: Juju):
+    app = deploy_failing(juju, num_units=2, config={'fail_on': 'replicas_relation_created'})
+    juju.settle()
+    for unit in app.units.values():
+        juju.resolved(unit, retry=False)
+    juju.config(app, {'fail_on': 'nothing'})
+    juju.settle()
+    assert list(peer_relation(app.units[0]).peers_data) == [1]
+
+
+def test_resolved_needs_a_unit_in_error(juju: Juju):
+    app = deploy_mycharm(juju)
+    juju.settle()
+    with pytest.raises(JujuError, match='not in an error state'):
+        juju.resolved(app.leader)

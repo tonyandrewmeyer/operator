@@ -16,6 +16,7 @@ import contextlib
 import dataclasses
 import hashlib
 import re
+import traceback
 import types
 import unittest.mock
 from collections import deque
@@ -27,11 +28,12 @@ from ops import JujuVersion
 from . import state as _state_module
 from ._juju_errors import JujuError
 from .context import _DEFAULT_JUJU_VERSION, Context
-from .errors import MetadataNotFoundError
+from .errors import MetadataNotFoundError, UncaughtCharmError
 from .state import (
     CharmType,
     CloudSpec,
     Container,
+    ErrorStatus,
     Event,
     Model,
     PeerRelation,
@@ -74,6 +76,28 @@ _NO_LEADER_SETTINGS_JUJU_VERSION = '4.0.0'
 # endpoint.
 _COALESCED_EVENT = 'config_changed'
 _COALESCED_SUFFIX = '_relation_changed'
+
+# Juju's uniter checks for leadership hooks, then config-changed, before it
+# looks at relation hooks, so these run ahead of relation hooks that are
+# already waiting.
+_LEADERSHIP_EVENTS = ('leader_elected', 'leader_settings_changed')
+_WAITING_RELATION_SUFFIXES = (
+    '_relation_joined',
+    '_relation_changed',
+    '_relation_departed',
+    '_relation_broken',
+)
+
+# Hooks that Juju names without the endpoint, container or storage that the
+# event name starts with, as in 'hook failed: "pebble-ready"'.
+_UNPREFIXED_HOOKS = (
+    'pebble_ready',
+    'pebble_custom_notice',
+    'pebble_check_failed',
+    'pebble_check_recovered',
+    'storage_attached',
+    'storage_detaching',
+)
 
 # State fields that describe a unit's place in the model. Juju sets these
 # itself, so a state_template may not.
@@ -166,7 +190,14 @@ class Dispatch:
     """
 
     state_out: State
-    """The :class:`State` the charm produced."""
+    """The :class:`State` the charm produced.
+
+    If the charm raised, it's :attr:`state_in` in error status, as the unit
+    is left.
+    """
+
+    error: str | None = None
+    """The charm's traceback, if it raised, and ``None`` if it didn't."""
 
     _: dataclasses.KW_ONLY
 
@@ -248,6 +279,15 @@ class Unit:
         # How many events this unit has handled; it seeds the IDs of the
         # secrets the next one creates.
         self._dispatches = 0
+        self._installed = False
+        self._started = False
+        # Set once remove_unit() has started tearing the unit down.
+        self._dying = False
+        # The hook that failed, as Juju names it, while the unit is in error.
+        # The failed event stays at the head of the unit's queue.
+        self._failed_hook: str | None = None
+        # Whether the next settle() may retry the failed hook.
+        self._retry = False
 
     @property
     def app(self) -> App:
@@ -275,8 +315,16 @@ class Unit:
 
         Reading this never runs charm code. Call :meth:`Juju.settle` first to
         run whatever the operations so far have caused, then assert.
+
+        While the unit is in error, the unit status is
+        ``ErrorStatus('hook failed: "<hook>"')``, as ``juju status`` shows it.
+        The charm itself still sees the status it last set.
         """
-        return self._state
+        if self._failed_hook is None:
+            return self._state
+        return dataclasses.replace(
+            self._state, unit_status=ErrorStatus(f'hook failed: "{self._failed_hook}"')
+        )
 
     def to_context(self) -> Context[CharmBase]:
         """A new :class:`~ops.testing.Context` for this unit's charm.
@@ -374,6 +422,11 @@ class App:
         return self._units[self._leader_id]
 
     @property
+    def _live_units(self) -> list[Unit]:
+        """The units that aren't being removed."""
+        return [u for u in self._units.values() if not u._dying]
+
+    @property
     def _peer_endpoints(self) -> tuple[str, ...]:
         return tuple(self._charm.metadata.get('peers') or {})
 
@@ -468,6 +521,7 @@ class Juju:
         *,
         uuid: str | None = None,
         cloud_spec: CloudSpec | None = None,
+        automatically_retry_hooks: bool = True,
     ):
         """Create a simulated Juju model, as ``juju add-model`` would.
 
@@ -479,6 +533,10 @@ class Juju:
                 model type: ``kubernetes`` for a Kubernetes model, and a
                 machine model otherwise. Defaults to a Kubernetes cloud
                 named ``localhost``.
+            automatically_retry_hooks: Whether :meth:`settle` retries a hook
+                that failed, as the model config of the same name decides in
+                Juju. If ``False``, a unit in error stays in error until
+                :meth:`resolved`.
         """
         if cloud_spec is None:
             cloud_spec = _DEFAULT_CLOUD_SPEC
@@ -489,6 +547,7 @@ class Juju:
             type=model_type,
             cloud_spec=cloud_spec,
         )
+        self._retry_hooks = automatically_retry_hooks
         self._apps: dict[str, App] = {}
         # Each unit's own events, in the order they were caused, by
         # application name and unit ID.
@@ -664,7 +723,102 @@ class Juju:
         app._config = {**_default_config(app._charm.config), **settings}
         for unit in app._units.values():
             unit._state = dataclasses.replace(unit._state, config=dict(app._config))
+            # A unit being removed has its remove queued already, and nothing
+            # after that runs.
             self._enqueue(app, unit.id, Event('config_changed'))
+
+    def remove_unit(self, *app_or_unit: App | Unit, num_units: int = 0) -> None:
+        """Remove units, as ``juju remove-unit`` would.
+
+        As in Juju, a Kubernetes application is scaled down by count, and the
+        highest-numbered units go::
+
+            juju.remove_unit(web, num_units=2)
+
+        and a machine unit is removed by name::
+
+            juju.remove_unit(web.units[1], web.units[2])
+
+        :meth:`settle` runs each removed unit's teardown: ``relation-departed``
+        for each peer it has seen join, then ``relation-broken``, for each of
+        its relations, then ``stop`` and ``remove``. Once it has left a
+        relation, each unit that saw it join gets ``relation-departed`` for it.
+        A unit doesn't run anything else that was pending, and a unit that
+        hasn't run ``install`` yet is removed without running anything.
+
+        If the leader is removed, the lowest-numbered remaining unit gets
+        leadership once the old leader is gone, and runs ``leader-elected``.
+
+        Raises:
+            JujuError: if the arguments don't fit the model type, a unit is
+                already being removed, or an application would be left with
+                no units.
+        """
+        self._check_open()
+        is_k8s = self._model.type == 'kubernetes'
+        if is_k8s and not (
+            num_units > 0 and app_or_unit and all(isinstance(a, App) for a in app_or_unit)
+        ):
+            raise JujuError(
+                'A Kubernetes application is scaled down by count: '
+                'remove_unit(app, num_units=n) with a positive n.'
+            )
+        if not is_k8s and not (
+            num_units == 0 and app_or_unit and all(isinstance(u, Unit) for u in app_or_unit)
+        ):
+            raise JujuError(
+                'A machine unit is removed by name: remove_unit(unit, ...), with no num_units.'
+            )
+        doomed: dict[str, list[Unit]] = {}
+        for item in app_or_unit:
+            app = item if isinstance(item, App) else item.app
+            self._check_deployed(app)
+            if isinstance(item, App):
+                live = sorted(app._live_units, key=lambda u: u.id)
+                doomed[app.name] = live[len(live) - num_units :] if num_units < len(live) else live
+            else:
+                if item._dying or app._units.get(item.id) is not item:
+                    raise JujuError(f'{item.name} is already being removed.')
+                doomed.setdefault(app.name, []).append(item)
+        for app_name, units in doomed.items():
+            if len(set(units)) >= len(self._apps[app_name]._live_units):
+                raise JujuError(f'Cannot remove every unit of {app_name}.')
+        for app_name, units in doomed.items():
+            app = self._apps[app_name]
+            for unit in units:
+                unit._dying = True
+            self._set_planned_units(app)
+            for unit in sorted(set(units), key=lambda u: u.id):
+                self._tear_down(app, unit)
+
+    def resolved(self, unit: Unit, *, retry: bool = True) -> None:
+        """Mark a unit's failed hook resolved, as ``juju resolved`` would.
+
+        With ``retry=True``, the next :meth:`settle` runs the failed hook
+        again, even with ``automatically_retry_hooks=False``. With
+        ``retry=False``, as ``juju resolved --no-retry``, the hook is dropped
+        and the unit carries on with its next event.
+
+        Raises:
+            JujuError: if the unit isn't in error.
+        """
+        self._check_open()
+        self._check_deployed(unit.app)
+        if unit.app._units.get(unit.id) is not unit:
+            raise JujuError(f'{unit.name} has been removed.')
+        if unit._failed_hook is None:
+            raise JujuError(f'Unit {unit.name!r} is not in an error state.')
+        if retry:
+            unit._retry = True
+            return
+        app = unit.app
+        unit._failed_hook = None
+        unit._retry = False
+        event = self._bind(app, unit, self._queues[app.name, unit.id].popleft())
+        # Juju commits a skipped hook as if it had run, so the unit still
+        # enters or leaves the relation, or goes.
+        if event is not None:
+            self._commit(app, unit, event)
 
     def settle(self) -> Sequence[Dispatch]:
         """Run events until the model converges.
@@ -676,7 +830,23 @@ class Juju:
         The order is fixed, so the same operations on the same starting states
         settle the same way on every run, as long as the charms themselves are
         deterministic. Each unit runs its own events in the order they were
-        caused, and the units take turns, one event each.
+        caused, and the units take turns, one event each. As in Juju, a
+        unit's ``leader-elected``, ``leader-settings-changed`` and
+        ``config-changed`` run ahead of its relation hooks that are already
+        waiting.
+
+        If a charm raises, its unit goes into error, as with a failed hook in
+        Juju: nothing the charm did in that hook is kept, the unit status
+        shows the failed hook, and the unit's other events wait behind it.
+        The rest of the model carries on. Juju retries a failed hook with a
+        back-off; here, each ``settle()`` retries it once, before the unit
+        runs anything else, unless the model was created with
+        ``automatically_retry_hooks=False``. A hook that fails because of
+        something a later operation changes recovers on the next
+        ``settle()``, and one that fails every time leaves the unit in error.
+        Each attempt is a :class:`Dispatch` of its own, with the traceback in
+        :attr:`Dispatch.error`. Use :meth:`resolved` as with ``juju
+        resolved``.
 
         The loop check looks at one unit at a time, not the whole model. A
         deterministic charm given the same event and ``State`` again writes
@@ -697,7 +867,7 @@ class Juju:
                 and is reported as soon as it happens; otherwise, the limit
                 grows with the number of units in the model, and with the
                 number of pairs of peers. The message ends with the last
-                events dispatched.
+                events dispatched. A unit in error isn't a reason to raise.
         """
         return self._settle()
 
@@ -723,6 +893,10 @@ class Juju:
         # sees a loop. Stepping that needs those checks has to keep its own
         # count and history across calls.
         self._trace = []
+        for app in self._apps.values():
+            for unit in app._units.values():
+                if unit._failed_hook is not None and self._retry_hooks:
+                    unit._retry = True
         seen: dict[tuple[str, int, str], list[tuple[Event, State]]] = {}
         while budget is None or len(self._trace) < budget:
             candidates = self._candidates()
@@ -737,8 +911,13 @@ class Juju:
             chosen = self._scheduler.choose(candidates)
             app = self._apps[candidates[chosen].app_name]
             unit = app._units[candidates[chosen].unit_id]
-            queued = self._queues[app.name, unit.id].popleft()
+            queue = self._queues[app.name, unit.id]
+            index = _next_index(queue, in_error=unit._failed_hook is not None)
+            queued = queue[index]
+            del queue[index]
             self._turn = (app._order, unit.id)
+            # A retry is this settle's one attempt at the failed hook.
+            unit._retry = False
             event = self._bind(app, unit, queued)
             if event is None:
                 continue
@@ -751,16 +930,22 @@ class Juju:
                     f'never end.{self._trace_tail()}'
                 )
             earlier_dispatches.append(compared)
-            self._dispatch(app, unit, event, tuple(candidates), chosen)
+            if not self._dispatch(app, unit, event, tuple(candidates), chosen):
+                queue.appendleft(queued)
         return list(self._trace)
 
     def _candidates(self) -> list[_Candidate]:
         """The first pending event of each unit, starting from the unit after the last turn."""
-        pending = sorted(
-            ((self._apps[app_name]._order, unit_id), app_name, unit_id, queue[0].event)
-            for (app_name, unit_id), queue in self._queues.items()
-            if queue
-        )
+        pending: list[tuple[tuple[int, int], str, int, Event]] = []
+        for (app_name, unit_id), queue in self._queues.items():
+            app = self._apps[app_name]
+            unit = app._units[unit_id]
+            in_error = unit._failed_hook is not None
+            if not queue or (in_error and not unit._retry):
+                continue
+            event = queue[_next_index(queue, in_error=in_error)].event
+            pending.append(((app._order, unit_id), app_name, unit_id, event))
+        pending.sort()
         after = [
             _Candidate(app_name, unit_id, event)
             for position, app_name, unit_id, event in pending
@@ -798,20 +983,37 @@ class Juju:
 
         Returns whether the event should still be dispatched. A unit has the
         relation in its ``State`` from its ``relation-created``, and each peer
-        is in its view from that peer's ``relation-joined``.
+        is in its view from that peer's ``relation-joined`` to its
+        ``relation-departed``.
         """
         view = _relation_by_id(unit._state, relation_id)
         if event.name.endswith('_relation_created'):
             endpoint = next(e for e, i in app._peer_ids.items() if i == relation_id)
             unit._state = _with_relation(unit._state, self._peer_view(app, endpoint))
             return True
-        # A unit only has peer events queued once it's in the relation, until
-        # units can leave it.
+        # A unit only has peer events queued once it's in the relation, and
+        # once it has left (after its relation-broken) nothing more is queued.
         if not isinstance(view, PeerRelation):
             return False
         peer_id = event._relation_remote_unit_id
+        if event.name.endswith('_relation_departed'):
+            if peer_id not in view.peers_data:
+                # The unit never saw that peer join.
+                return False
+            peers_data = {k: v for k, v in view.peers_data.items() if k != peer_id}
+            unit._state = _with_relation(
+                unit._state, dataclasses.replace(view, peers_data=peers_data)
+            )
+            return True
+        if event.name.endswith('_relation_broken'):
+            unit._state = _with_relation(unit._state, dataclasses.replace(view, peers_data={}))
+            return True
         if event.name.endswith('_relation_joined'):
             assert peer_id is not None
+            if (app.name, peer_id, relation_id) not in self._in_scope:
+                # The peer left before this unit saw it join, so Juju has
+                # nothing to tell it.
+                return False
             peer_view = _relation_by_id(app._units[peer_id]._state, relation_id)
             data = dict(peer_view.local_unit_data) if peer_view is not None else {}
             peers_data = dict(sorted({**view.peers_data, peer_id: data}.items()))
@@ -819,9 +1021,9 @@ class Juju:
                 unit._state, dataclasses.replace(view, peers_data=peers_data)
             )
             return True
-        # A peer's relation-changed can outlive its place in the unit's view
-        # once units can depart; until then it's always queued after the
-        # peer's relation-joined.
+        # A peer's relation-changed can outlive its place in the unit's view:
+        # the peer may have departed, or have left before this unit saw it
+        # join.
         return peer_id is None or peer_id in view.peers_data
 
     def _dispatch(
@@ -831,28 +1033,56 @@ class Juju:
         event: Event,
         candidates: tuple[_Candidate, ...],
         chosen: int,
-    ) -> None:
+    ) -> bool:
+        """Run an event on a unit, and return whether the charm succeeded."""
         state_in = unit._state
         # Seeded by the unit's own history, so that a secret's ID doesn't
         # depend on what other units ran before it.
         seed = f'{self._model.uuid}/{unit.name}/{unit._dispatches}'
         unit._dispatches += 1
-        unit._state = app._run(unit.id, event, state_in, seed)
+        error = None
+        try:
+            unit._state = app._run(unit.id, event, state_in, seed)
+            unit._failed_hook = None
+        except UncaughtCharmError as e:
+            # As with a failed hook in Juju, nothing the charm did is kept.
+            cause = e.__cause__ or e
+            error = ''.join(traceback.format_exception(type(cause), cause, cause.__traceback__))
+            unit._failed_hook = _hook_name(event)
         self._trace.append(
             Dispatch(
                 event,
                 app.name,
                 unit.id,
                 state_in,
-                unit._state,
+                unit.state,
+                error,
                 _charm=app._charm,
                 _candidates=candidates,
                 _chosen=chosen,
             )
         )
+        if error is not None:
+            return False
+        self._commit(app, unit, event)
+        return True
+
+    def _commit(self, app: App, unit: Unit, event: Event) -> None:
+        """What follows from a unit having run an event, or having it skipped by ``resolved()``."""
+        if event.name == 'install':
+            unit._installed = True
+        elif event.name == 'start':
+            unit._started = True
+        elif event.name == 'remove':
+            self._remove(app, unit)
+            return
         self._propagate_peers(app, unit)
-        if event.name.endswith('_relation_created') and isinstance(event._relation, PeerRelation):
+        if not isinstance(event._relation, PeerRelation):
+            return
+        if event.name.endswith('_relation_created'):
             self._enter_peer_scope(app, unit, event._relation.endpoint)
+        elif event.name.endswith('_relation_broken'):
+            self._leave_peer_scope(app, unit, event._relation.endpoint)
 
     def _enter_peer_scope(self, app: App, unit: Unit, endpoint: str) -> None:
         """Put a unit in its peer relation's scope, once its ``relation-created`` has run.
@@ -867,6 +1097,107 @@ class Juju:
                 continue
             self._enqueue_peer_joined(app, unit, endpoint, peer.id)
             self._enqueue_peer_joined(app, peer, endpoint, unit.id)
+
+    def _leave_peer_scope(self, app: App, unit: Unit, endpoint: str) -> None:
+        """Take a unit out of its peer relation once its ``relation-broken`` has run.
+
+        Each unit that saw it join gets ``relation-departed`` for it. In Juju,
+        that's what the unit leaving scope causes.
+        """
+        relation_id = app._peer_ids[endpoint]
+        self._in_scope.discard((app.name, unit.id, relation_id))
+        unit._state = dataclasses.replace(
+            unit._state,
+            relations=frozenset(r for r in unit._state.relations if r.id != relation_id),
+        )
+        for peer in app._units.values():
+            view = _relation_by_id(peer._state, relation_id)
+            if peer is unit or not isinstance(view, PeerRelation) or peer._dying:
+                continue
+            if unit.id in view.peers_data:
+                self._enqueue(
+                    app,
+                    peer.id,
+                    Event(
+                        f'{endpoint}_relation_departed',
+                        _relation=view,
+                        _relation_remote_unit_id=unit.id,
+                        _relation_departed_unit_id=unit.id,
+                    ),
+                    _Rebind('relation', relation_id),
+                )
+
+    def _tear_down(self, app: App, unit: Unit) -> None:
+        """Queue a removed unit's teardown, in place of whatever it had pending.
+
+        Juju decides what a dying unit runs from what it has run so far, and
+        that's decided here, when ``remove_unit()`` is called. That's right
+        while operations only happen between settles.
+        """
+        queue = self._queues[app.name, unit.id]
+        # A failed hook still has to be resolved first, as in Juju.
+        kept = [queue[0]] if unit._failed_hook is not None else []
+        queue.clear()
+        queue.extend(kept)
+        if not unit._installed and not kept:
+            self._remove(app, unit)
+            return
+        for relation in sorted(unit._state.relations, key=lambda r: r.id):
+            assert isinstance(relation, PeerRelation)
+            rebind = _Rebind('relation', relation.id)
+            for peer_id in sorted(relation.peers_data):
+                departed = Event(
+                    f'{relation.endpoint}_relation_departed',
+                    _relation=relation,
+                    _relation_remote_unit_id=peer_id,
+                    _relation_departed_unit_id=unit.id,
+                )
+                queue.append(_Queued(departed, rebind))
+            broken = Event(f'{relation.endpoint}_relation_broken', _relation=relation)
+            queue.append(_Queued(broken, rebind))
+        # The failed hook counts as run, as it will have once it's resolved.
+        if unit._started or (kept and kept[0].event.name == 'start'):
+            queue.append(_Queued(Event('stop')))
+        queue.append(_Queued(Event('remove')))
+
+    def _remove(self, app: App, unit: Unit) -> None:
+        """Take a unit out of the model, once its ``remove`` has run."""
+        del app._units[unit.id]
+        del self._queues[app.name, unit.id]
+        app._contexts.pop(unit.id, None)
+        self._in_scope = {k for k in self._in_scope if k[:2] != (app.name, unit.id)}
+        # Juju revokes leadership once the unit is dead, and a new leader is
+        # elected after that.
+        if unit.id == app._leader_id:
+            self._elect_leader(app)
+
+    def _elect_leader(self, app: App) -> None:
+        """Give leadership to the lowest-numbered unit left, which runs ``leader-elected``.
+
+        In Juju any unit could win; the lowest-numbered is the same on every
+        run. If it hasn't run its ``leader-settings-changed`` from startup
+        yet, it runs ``leader-elected`` in its place, as Juju only runs
+        ``leader-settings-changed`` on a unit that isn't the leader.
+        """
+        leader = min(app._live_units, key=lambda u: u.id)
+        app._leader_id = leader.id
+        leader._state = dataclasses.replace(leader._state, leader=True)
+        queue = self._queues[app.name, leader.id]
+        for index, queued in enumerate(queue):
+            if queued.event.name == 'leader_settings_changed':
+                queue[index] = _Queued(Event('leader_elected'))
+                return
+        self._enqueue(app, leader.id, Event('leader_elected'))
+
+    def _set_planned_units(self, app: App) -> None:
+        """Tell every unit how many units the application is meant to have.
+
+        Juju doesn't count a unit that's being removed, from the moment it's
+        told to remove it.
+        """
+        planned = len(app._live_units)
+        for unit in app._units.values():
+            unit._state = dataclasses.replace(unit._state, planned_units=planned)
 
     def _enqueue_peer_joined(self, app: App, unit: Unit, endpoint: str, peer_id: int) -> None:
         relation_id = app._peer_ids[endpoint]
@@ -947,8 +1278,7 @@ class Juju:
         )
         unit = Unit(app, unit_id, state)
         app._units[unit_id] = unit
-        for other in app._units.values():
-            other._state = dataclasses.replace(other._state, planned_units=len(app._units))
+        self._set_planned_units(app)
         self._queues[app.name, unit_id] = deque()
         startup = [_Queued(Event('install'))]
         startup.extend(
@@ -1064,6 +1394,41 @@ class Juju:
     def _trace_tail(self) -> str:
         lines = [f'  {d.event.name} on {d.unit_name}' for d in self._trace[-_TRACE_TAIL:]]
         return '\nLast events dispatched:\n' + '\n'.join(lines) if lines else ''
+
+
+def _next_index(queue: deque[_Queued], *, in_error: bool) -> int:
+    """Which of a unit's queued events it runs next.
+
+    Usually the first, but Juju's uniter looks for leadership hooks, and then
+    config-changed, before relation hooks, so one of those waiting behind
+    relation hooks runs first. A unit in error only ever retries its failed
+    hook, at the head of the queue.
+    """
+    if in_error:
+        return 0
+    config_changed = None
+    for index, queued in enumerate(queue):
+        name = queued.event.name
+        if name in _LEADERSHIP_EVENTS:
+            return index
+        if name == 'config_changed':
+            if config_changed is None:
+                config_changed = index
+        elif not name.endswith(_WAITING_RELATION_SUFFIXES):
+            break
+    return config_changed if config_changed is not None else 0
+
+
+def _hook_name(event: Event) -> str:
+    """The hook's name as Juju shows it in a unit's error status."""
+    relation = event._relation
+    if relation is not None:
+        prefix = relation.endpoint.replace('-', '_') + '_'
+        return relation.endpoint + '-' + event.name[len(prefix) :].replace('_', '-')
+    for suffix in _UNPREFIXED_HOOKS:
+        if event.name.endswith('_' + suffix):
+            return suffix.replace('_', '-')
+    return event.name.replace('_', '-')
 
 
 def _dispatch_key(

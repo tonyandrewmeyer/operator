@@ -10,7 +10,7 @@ team = [
 [low-risk]  # Team PRs that only touch these paths. `*` matches across `/`.
 allow = [
     "test/*", "testing/tests/*", "tracing/test/*", "examples/*", "docs/*",
-    "CONTRIBUTING.md", "HACKING.md", "README.md", "*/README.md", "testing/UPGRADING.md",
+    "CONTRIBUTING.md", "README.md", "*/README.md",
 ]
 except = [
     "docs/conf.py", "*requirements*.txt", "*uv.lock", "*pyproject.toml", "examples/*/tox.ini",

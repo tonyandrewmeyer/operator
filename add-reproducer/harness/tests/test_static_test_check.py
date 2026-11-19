@@ -47,7 +47,8 @@ EXPECTED = {
     ),
     ("before", 2): (False, False, ["inside the charm", "`str` and a `pathlib.Path`"]),
     ("before", 3): (False, False, ["no module-level `def test_", "inside the charm", "`str` and a `pathlib.Path`"]),
-    ("before", 4): (False, True, []),
+    # Passed until §41: the cwd compared with a path built from `ops.__file__`.
+    ("before", 4): (False, False, ["compares the working directory with"]),
     ("before", 5): (False, False, ["no module-level `def test_", "read-only `CharmBase` property", "at module level"]),
     ("before", 6): (False, False, ["read-only `CharmBase` property"]),
     ("before", 7): (

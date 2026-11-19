@@ -382,6 +382,11 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _invalid_shell_fake(tree)
     reasons += _missing_charm_meta_attribute(tree)
     reasons += _from_yaml_non_string(tree)
+    # A backstop for `#2045`-like cwd claims: it only speaks when no other
+    # rule has, so an answer another rule already rejects gets that rule's
+    # (more specific) feedback alone.
+    if not reasons:
+        reasons += _cwd_compared_with_unsourced_value(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -1480,6 +1485,233 @@ def _charm_name_as_path_without_charm_root(tree: ast.Module) -> list[str]:
                 "handler as `self.framework.charm_dir` and compare with that (or pass a "
                 f"`Context(..., charm_root=...)` named `{name}` if the test needs that name)"
             )
+    return list(dict.fromkeys(reasons))
+
+
+_CWD_CALLS = {"os.getcwd", "getcwd", "os.getcwdb", "Path.cwd", "pathlib.Path.cwd", "PosixPath.cwd"}
+_PATH_CALLS = {"Path", "pathlib.Path", "PurePath", "pathlib.PurePath", "PosixPath"}
+_CWD_MARKERS = {"'.'", "''", "os.curdir"}
+
+
+def _is_cwd_source(node: ast.AST) -> bool:
+    """`os.getcwd()`, `Path.cwd()`, `Path('.').resolve()` / `.absolute()`
+    (or of `Path()`), and `os.path.abspath('.')` / `realpath('.')`."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = ast.unparse(node.func)
+    if func in _CWD_CALLS and not node.args:
+        return True
+    if func in {"os.path.abspath", "os.path.realpath", "abspath", "realpath"} and len(node.args) == 1:
+        return ast.unparse(node.args[0]) in _CWD_MARKERS
+    if (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"resolve", "absolute"}
+        and isinstance(node.func.value, ast.Call)
+        and ast.unparse(node.func.value.func) in _PATH_CALLS
+    ):
+        args = node.func.value.args
+        return not args or (len(args) == 1 and ast.unparse(args[0]) in _CWD_MARKERS)
+    return False
+
+
+def _enclosing_functions(tree: ast.Module) -> dict[int, ast.AST | None]:
+    """{id(node): the innermost function (or class) it is in, or `None`}."""
+    owner: dict[int, ast.AST | None] = {}
+
+    def visit(node: ast.AST, current: ast.AST | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            owner[id(child)] = current
+            nxt = child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else current
+            visit(child, nxt)
+
+    visit(tree, None)
+    return owner
+
+
+def _is_test_scope(func: ast.AST | None, classes: dict[int, ast.ClassDef]) -> bool:
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    if func.name.startswith("test"):
+        return True
+    cls = classes.get(id(func))
+    return cls is not None and cls.name.startswith("Test")
+
+
+class _CwdFlow:
+    """Where a test file's cwd values and handler-read charm directories go:
+    each assignment target (`captured['cwd']`, `self.charm_dir`, `cwd`), with
+    a dict literal or `.update({...})` split into its keys, mapped to the
+    values assigned to it and the function each assignment is in."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.owner = _enclosing_functions(tree)
+        self.classes: dict[int, ast.ClassDef] = {}
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef):
+                for item in cls.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        self.classes[id(item)] = cls
+        self.assigned: dict[str, list[tuple[ast.AST, ast.AST | None]]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, (ast.Name, ast.Attribute, ast.Subscript)):
+                        self._add(ast.unparse(target), node.value, node)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "update"
+                and isinstance(node.func.value, (ast.Name, ast.Attribute, ast.Subscript))
+            ):
+                base = ast.unparse(node.func.value)
+                for arg in node.args:
+                    if isinstance(arg, ast.Dict):
+                        self._split(base, arg, node)
+                for k in node.keywords:
+                    if k.arg:
+                        self._add(f"{base}[{k.arg!r}]", k.value, node)
+
+    def _add(self, key: str, value: ast.AST, at: ast.AST) -> None:
+        self.assigned.setdefault(key, []).append((value, self.owner.get(id(at))))
+        if isinstance(value, ast.Dict):
+            self._split(key, value, at)
+
+    def _split(self, base: str, d: ast.Dict, at: ast.AST) -> None:
+        for k, v in zip(d.keys, d.values):
+            if isinstance(k, ast.Constant):
+                self._add(f"{base}[{ast.unparse(k)}]", v, at)
+
+    def _values(self, ref: ast.AST) -> list[tuple[ast.AST, ast.AST | None]]:
+        text = ast.unparse(ref)
+        if text in self.assigned:
+            return self.assigned[text]
+        if isinstance(ref, ast.Attribute) and not text.startswith("self."):
+            return self.assigned.get(f"self.{ref.attr}", [])
+        return []
+
+    def _handler_charm_dir(self, node: ast.AST, scope: ast.AST | None) -> bool:
+        """`self.framework.charm_dir` / `self.charm_dir` / `framework.charm_dir`
+        read in the charm (not in a test), or `<mgr>.charm.charm_dir` /
+        `<mgr>.charm.framework.charm_dir` (the charm instance)."""
+        if not (isinstance(node, ast.Attribute) and node.attr == "charm_dir"):
+            return False
+        base = ast.unparse(node.value)
+        if base in {"self", "self.framework", "framework", "self._framework"}:
+            return not _is_test_scope(scope, self.classes)
+        return base.endswith(".charm") or base.endswith(".charm.framework")
+
+    def kinds(self, node: ast.AST, scope: ast.AST | None, _depth: int = 0) -> set[str]:
+        """`'cwd'` when `node` is (or is built from) the working directory,
+        `'handler'` when it is (or is built from) the charm directory the
+        handler reads."""
+        if _depth > 6:
+            return set()
+        if _is_cwd_source(node):
+            return {"cwd"}
+        if self._handler_charm_dir(node, scope) and not self._values(node):
+            return {"handler"}
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+            values = self._values(node)
+            if values:
+                out: set[str] = set()
+                for value, where in values:
+                    out |= self.kinds(value, where, _depth + 1)
+                return out
+        out = set()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.expr_context):
+                continue
+            out |= self.kinds(child, scope, _depth + 1)
+        return out
+
+
+def _cwd_compared_with_unsourced_value(tree: ast.Module) -> list[str]:
+    """A claim about the working directory whose other side does not come
+    from the handler.
+
+    `#2045` is about the cwd a charm runs in: `ops.testing` did not make it
+    the charm directory. A test of it is only as good as the value it
+    compares the cwd with. Four saved answers compared it with a guess
+    (`spike-step-5/static-retry/RESULT.md` §38 to §41): pytest's `tmp_path`,
+    a path ending in the charm's name, and the literal `'/path/to/charm'`
+    (once in a plain class with no `ops` at all). Each fails on every
+    version, whether or not the bug is fixed. Every valid answer compared
+    the cwd with the charm directory read where the charm runs:
+    `self.framework.charm_dir` / `self.charm_dir` in a handler (stored on a
+    module-level holder, a closure or the instance), or
+    `mgr.charm.framework.charm_dir` inside `with ctx(...) as mgr`.
+
+    A cwd claim is a comparison in a test function (`==`, `!=`, `is`,
+    `in`, `.startswith()` / `.endswith()`, `os.path.samefile()`) where one
+    side is the cwd (`os.getcwd()`, `Path.cwd()`, `Path('.').resolve()`, ...)
+    or a value assigned from it (`captured['cwd']`, an instance attribute,
+    a local), including one built from it (`os.path.basename(cwd)`). It is
+    rejected when the other side is neither the cwd too nor traceable to
+    the handler's charm directory (a side that mixes the two, a slot
+    assigned both, is left alone). Left alone: tests that compare no cwd,
+    any test whose `Context(...)` is given `charm_root=` or `**` arguments
+    (the test then chose the charm root and may name it), a comparison with
+    a `charm_root` read (`_unset_charm_root()` covers the unset one), and a
+    cwd compared with a path the file itself `chdir`s to. `check()` only
+    runs this when no other rule has fired.
+    """
+    flow: _CwdFlow | None = None
+    chdirs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args and ast.unparse(node.func).endswith("chdir"):
+            chdirs.add(ast.unparse(node.args[0]))
+    reasons = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or not func.name.startswith("test"):
+            continue
+        contexts = [n for n in ast.walk(func) if _is_context_call(n)]
+        if any(k.arg in {"charm_root", None} for c in contexts for k in c.keywords):
+            continue
+        if any(isinstance(a, ast.Starred) for c in contexts for a in c.args):
+            continue
+        if flow is None:
+            flow = _CwdFlow(tree)
+        for node in ast.walk(func):
+            pairs: list[tuple[ast.AST, ast.AST]] = []
+            if isinstance(node, ast.Compare) and len(node.ops) == 1:
+                if isinstance(node.ops[0], (ast.Eq, ast.NotEq, ast.Is, ast.IsNot, ast.In, ast.NotIn)):
+                    pairs.append((node.left, node.comparators[0]))
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in {"startswith", "endswith", "samefile"} and len(node.args) == 1:
+                    pairs.append((node.func.value, node.args[0]))
+            if isinstance(node, ast.Call) and ast.unparse(node.func) in {"os.path.samefile", "samefile"}:
+                if len(node.args) == 2:
+                    pairs.append((node.args[0], node.args[1]))
+            for left, right in pairs:
+                scope = flow.owner.get(id(node))
+                lk, rk = flow.kinds(left, scope), flow.kinds(right, scope)
+                if "cwd" in lk and "cwd" in rk:
+                    continue
+                if "cwd" in lk:
+                    other = right
+                    ok = rk
+                elif "cwd" in rk:
+                    other = left
+                    ok = lk
+                else:
+                    continue
+                if "handler" in lk or "handler" in rk or ast.unparse(other) in chdirs:
+                    continue
+                if "charm_root" in ast.unparse(other):
+                    # A charm root the test chose (or `_unset_charm_root()`'s
+                    # case, when it chose none).
+                    continue
+                if isinstance(other, ast.Constant) and other.value is None:
+                    continue
+                reasons.append(
+                    f"line {node.lineno}: `{ast.unparse(node)}` compares the working directory with "
+                    f"`{ast.unparse(other)}`, which does not come from the charm: a literal, a pytest "
+                    "fixture or a path the test builds is not where `ops` runs the charm, so the "
+                    "comparison comes out the same whether or not the bug is real; read the charm's "
+                    "directory in a handler as `self.framework.charm_dir` (store it, as the cwd is "
+                    "stored) and compare the cwd with that"
+                )
     return list(dict.fromkeys(reasons))
 
 

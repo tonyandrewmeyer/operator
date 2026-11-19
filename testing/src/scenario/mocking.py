@@ -848,6 +848,9 @@ class _MockPebbleClient(_TestingPebbleClient):
         # How many times each check has been read, which is what advances a
         # CheckBehaviour's declared statuses.
         self._check_reads: dict[str, int] = {}
+        # Set when an on-check-failure action shuts Pebble down partway through
+        # a call; the call finishes, and then the container becomes unreachable.
+        self._shutdown_pending = False
 
         # load any existing notices and check information from the state
         self._notices: dict[tuple[str, str], pebble.Notice] = {}
@@ -949,17 +952,33 @@ class _MockPebbleClient(_TestingPebbleClient):
         Only services that are currently running are restarted; what Pebble
         does for a service that is stopped when its check fails has not been
         established, so this leaves them alone.
+
+        ``shutdown`` and ``success-shutdown`` make Pebble shut itself down,
+        for a service that is running, or has exited or is in backoff (the
+        states Pebble acts on). The read that saw the check go down still
+        returns, and then the container is unreachable for the rest of the
+        run: see :meth:`_shut_down`.
         """
         for name, service in self._render_services().items():
             action = service.on_check_failure.get(check_name)
             if action is None or action == 'ignore':
                 continue
+            status = self._service_status.get(name)
+            # Pebble doesn't accept failure-shutdown for on-check-failure.
+            if action in ('shutdown', 'success-shutdown'):
+                if status in (
+                    pebble.ServiceStatus.ACTIVE,
+                    pebble.ServiceStatus.ERROR,
+                    'backoff',
+                ):
+                    self._shutdown_pending = True
+                continue
             if action != 'restart':
                 raise NotImplementedError(
-                    f'on-check-failure: {action!r} is not modelled yet; only '
-                    "'restart' and 'ignore' are."
+                    f'on-check-failure: {action!r} is not modelled; only '
+                    "'restart', 'ignore', 'shutdown' and 'success-shutdown' are."
                 )
-            if self._service_status.get(name) is not pebble.ServiceStatus.ACTIVE:
+            if status is not pebble.ServiceStatus.ACTIVE:
                 continue
             self._service_status[name] = pebble.ServiceStatus.ACTIVE
             self._record_service_op('restart', (name,), caused_by=check_name)
@@ -1191,7 +1210,7 @@ class _MockPebbleClient(_TestingPebbleClient):
         # Each call gets its own CheckInfo objects, as a real client does. The
         # mock updates its own in place, and a charm that holds on to one from
         # an earlier read should not see it move.
-        return [
+        infos = [
             pebble.CheckInfo(
                 name=info.name,
                 level=info.level,
@@ -1204,6 +1223,22 @@ class _MockPebbleClient(_TestingPebbleClient):
             )
             for info in super().get_checks(level=level, names=names)
         ]
+        if self._shutdown_pending:
+            self._shut_down()
+        return infos
+
+    def _shut_down(self) -> None:
+        """Make the container unreachable for the rest of the run.
+
+        When a service's ``on-check-failure`` action is a shutdown, Pebble
+        shuts itself down. The charm may get one more call in before the
+        daemon is gone; this models the usual outcome, where it doesn't: every
+        later Pebble call raises :class:`ops.pebble.ConnectionError`, and the
+        output state's container has ``can_connect=False``. Restarting the
+        container happens between hooks, so it isn't modelled.
+        """
+        self._shutdown_pending = False
+        object.__setattr__(self._container, 'can_connect', False)
 
     @property
     def _container(self) -> ContainerSpec:

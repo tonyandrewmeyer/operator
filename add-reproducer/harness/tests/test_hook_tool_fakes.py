@@ -326,12 +326,12 @@ def test_template_carries_the_caveat_under_the_prefix():
     assert body.startswith(f"{AUTOMATION_PREFIX}\n>\n{_CAVEAT}\n\n")
 
 
-def test_llm_path_carries_the_caveat_under_the_prefix():
+def test_composer_carries_the_caveat_under_the_prefix():
     hyp, issue, run = _fake_tool_case()
-    block = "\n".join(f"$ {c.command}" for c in run.commands)
-    llm = _StaticLLM({"comment_body": f"Reproduced.\n\n```shell\n{block}\n```\n"})
+    llm = _StaticLLM({"comment_body": "unused"})
     body = Composer(llm).compose(hyp, issue, run, Outcome.REPRODUCED_WEAKER, "r", run_id="r1", timestamp="t")
-    assert body.startswith(f"{AUTOMATION_PREFIX}\n>\n{_CAVEAT}\n\nReproduced.")
+    assert body.startswith(f"{AUTOMATION_PREFIX}\n>\n{_CAVEAT}\n\nVersions: ")
+    assert llm.calls == []
 
 
 def test_no_caveat_without_fakes():

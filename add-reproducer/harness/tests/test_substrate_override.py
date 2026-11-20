@@ -203,7 +203,7 @@ def test_a_fake_tool_test_runs_as_none(tmp_path, substrate):
     # The record still says what the extraction answered.
     assert result.extraction_record["first_pass"]["substrate"] == substrate
     # Composed as `none`, not as the field's substrate.
-    assert "/none at" in result.comment
+    assert "with Scenario (no Juju) at" in result.comment
     assert f"/{substrate} at" not in result.comment
     assert "are fakes that print what the issue reports" in result.comment
 

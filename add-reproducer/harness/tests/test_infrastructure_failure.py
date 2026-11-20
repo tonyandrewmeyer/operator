@@ -427,7 +427,7 @@ def test_a_broken_heredoc_test_would_have_composed_a_false_reproduction():
     from `commands[]` the hypothesis carries no model-written test file by
     either measure, which is exactly what rung 1c used to see on every one
     of these runs -- and the ladder falls through to rung 6, whose outcome
-    composes a comment opening "Reproduced"."""
+    composes a comment that says "Reproduced"."""
     from composer import compose_template
     from models import Issue
 
@@ -441,7 +441,7 @@ def test_a_broken_heredoc_test_would_have_composed_a_false_reproduction():
     )
     body = compose_template(hyp, issue, _heredoc_run(_FROZEN_STATE_FAILURE), outcome, "r", run_id="r1", timestamp="t")
     assert body is not None
-    assert "**Reproduced**" in body
+    assert "\n\nReproduced with Scenario (no Juju) at t.\n\n" in body
 
 
 def test_a_broken_heredoc_test_is_now_caught():

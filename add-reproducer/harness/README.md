@@ -103,10 +103,11 @@ does.
    ("DID NOT RAISE") is kept silent, ahead of `reproduced`.
 9. **comment composition** (`composer.py`) - only some of those outcomes
    compose anything at all; the rest are silent by design. A composed
-   comment always opens with the automation disclaimer and ends with an
-   idempotency marker, both appended by this module's own code rather than
-   asked of the model, so that "have we already commented here?" is a
-   reliable check.
+   comment is rendered by this module's own code from the run record, with
+   no model call: the automation disclaimer, a versions line, the commands
+   that ran and their output, a closing "Reproduced ... at ..." line and an
+   idempotency marker, so the wrapper is the same on every comment and
+   "have we already commented here?" is a reliable check.
 
 `pipeline.py` never posts. It writes what it composed to
 `<out-dir>/<issue>.md`; delivering it is `../run.py`'s job, and only when

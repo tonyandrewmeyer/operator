@@ -1,42 +1,38 @@
 """Comment composition (PLAN.md Approach §6).
 
-Two paths, mirroring the seam pattern `extraction.py`/`surface_inference.py`
-already use for their own LLM calls:
+Every comment is rendered by this module's own code from the run record:
+the automation banner, the versions line, the commands that ran (with the
+test file they write), their output, any captured log records or control
+run, the closing "Reproduced ... at ..." line and the idempotency marker.
 
-- `compose_template()` -- the original deterministic renderer (module
-  docstring used to call this a "minimal stub"). Fixed shape, no LLM. Kept
-  as-is so the existing fixture-driven suite keeps passing unchanged, and
-  reused below as `Composer`'s own fallback.
-- `Composer` -- Approach §6's actual design: "one final LLM call to turn the
-  run log into a short, readable steps-to-reproduce comment." Behind an
-  `LLMSeam`, exactly like `Extractor`/`SurfaceInferrer`. Any failure of that
-  call (no key, transport error, invalid JSON, malformed response) falls
-  back to `compose_template()` rather than raising or leaving the issue
-  silent -- a comment-worthy outcome always gets *a* comment.
+Until `spike-step-5/static-retry/RESULT.md` §42 an LLM wrote the middle of
+the comment (`Composer`, behind an `LLMSeam`), with `compose_template()` as
+its fallback. But every part it wrote was a copy of something in the run
+record that the prompt told it to copy verbatim, and `_validate()` rejected
+a response whose commands were not exactly the ones that ran; the only
+freedom left to the model was the wrapper, and that is where the composed
+comments differed. A human read of eleven composed `#2045` comments found
+one (`composed-41/2045-prbar2045d-14.md`) whose wrapper alone differed from
+the other ten: an unlabelled fence, a reworded opening sentence, and a
+closing `Reproduced on unpinned/unpinned` that contradicted its own
+`substrate=none`. With nothing left for the model to supply, the comment is
+rendered here and no LLM call is made. `Composer` keeps its constructor so
+the pipeline's wiring is unchanged.
 
-`COMMENT_OUTCOMES` gates both paths identically and first: a silent outcome
-returns `None` before either path ever builds a prompt, so a live key is
-never billed for an issue the pipeline was always going to stay quiet on
+`COMMENT_OUTCOMES` gates rendering first: a silent outcome returns `None`
 (PLAN.md Goal §4: "Nothing useful produced -> stay silent").
 
-The trailing `<!-- add-reproducer:issue=<n>:run=<uuid> -->` idempotency
-marker (Approach §7) is always appended by this module's own code, in both
-paths, never left to the model to reproduce -- Approach §7's "skip if a
-comment carrying the same marker exists" check depends on that exact,
-literal shape, and an LLM asked to emit it verbatim is a needless place to
-risk a paraphrase.
-
-The leading `AUTOMATION_PREFIX` disclaimer is prepended the same way, and
-for the same reason turned up one notch: it is the mitigation criterion 2
-rests on (`spike-step-5/EXIT-CRITERIA.md`, criterion 2), so it must be
-present on every composed comment whatever the model returns. Both the
-prefix and the marker are therefore structural, not instructed -- the
-prompt tells the model to omit both.
+The leading `AUTOMATION_PREFIX` disclaimer is the mitigation criterion 2
+rests on (`spike-step-5/EXIT-CRITERIA.md`, criterion 2), and the trailing
+`<!-- add-reproducer:issue=<n>:run=<uuid> -->` marker is what Approach §7's
+"skip if a comment carrying the same marker exists" check matches, so both
+are on every comment.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 import static_test_check
 from models import (
@@ -48,7 +44,7 @@ from models import (
     TestFile,
     embedded_test_file,
 )
-from seams.llm import LLMError, LLMSeam
+from seams.llm import LLMSeam
 
 _TRIM_CHARS = 1500
 
@@ -96,40 +92,74 @@ def _trim(text: str, limit: int = _TRIM_CHARS) -> str:
 
 
 def _versions_line(hypothesis: Hypothesis, run_result: RunResult) -> str:
+    """What the reproduction ran on, in words.
+
+    Before `spike-step-5/static-retry/RESULT.md` §42 this was
+    `repo=unpinned, juju=unpinned, base=unpinned, substrate=none`: four
+    pinned-or-not fields, two of them meaningless for a Scenario-only run,
+    which has no Juju and no base. A reader wants what was used, so this
+    leads with what the run record measured and leaves out what does not
+    apply.
+
+    - `ops`: `run_result.observed_ops_version`, the `ops` the run resolved
+      (`seams/runner.py:_resolved_ops_version()` on the `none` branch, the
+      packed one on the scratch-charm branches). The extraction's
+      `repo_version` pin is added only when there is one.
+    - With `substrate: none`, "Scenario only (no Juju)" and nothing about
+      Juju or a base.
+    - Otherwise Juju (`run_result.observed_juju_version`, which is what
+      produced the verdict, and the pin when it says something else), the
+      substrate and the base, each only when known: an unknown value is
+      left out rather than printed as `unpinned`.
+    """
     mp = hypothesis.moving_parts
-    parts = [
-        f"repo={mp.repo_version or 'unpinned'}",
-        f"juju={mp.juju_version or 'unpinned'}",
-        f"base={mp.base or 'unpinned'}",
-        f"substrate={mp.substrate or 'unknown'}",
-    ]
-    # `mp.juju_version` is only ever what the extraction *pinned* -- often
-    # nothing at all. `run_result.observed_juju_version` is what actually
-    # produced this verdict (`RunResult.observed_juju_version`'s docstring:
-    # `#2639` reproduces on juju 4.0.5 and returns `DID_NOT_REPRODUCE` on
-    # 3.6.27), and a reader trusting a "Reproduced" comment needs to be able
-    # to tell the two apart rather than assume the pinned value describes
-    # what actually ran. Omitted, not "observed_juju=unknown", when the
-    # runner seam couldn't determine it (e.g. the `none` branch, which never
-    # touches a juju substrate) -- unlike the fields above, this one has no
-    # pinned/unpinned distinction to fall back on.
-    if run_result.observed_juju_version:
-        parts.append(f"observed_juju={run_result.observed_juju_version}")
-    # The same disclosure, for the library the issue is actually about.
-    # `spike-step-5/first-dispatch/RESULT.md` §6.1: the scratch charm is
-    # packed against released `ops` from PyPI (`ops~=3.8`, resolved inside
-    # charmcraft's own managed LXD instance), never the checked-out tree --
-    # and the `none` branch resolves a released `ops` of its own, also from
-    # PyPI, also never the checked-out tree. So on every branch that resolves
-    # anything, a reader cannot infer which `ops` produced this verdict from the repo,
-    # from the workflow's checkout ref, or from `repo=` above -- that last
-    # one is what the *extraction* pinned, which is usually nothing. Omitted
-    # rather than rendered as "observed_ops=unknown" for the same reason as
-    # `observed_juju` above: it has no pinned/unpinned distinction to fall
-    # back on, so silence is the honest form of "not measured".
+    parts = []
     if run_result.observed_ops_version:
-        parts.append(f"observed_ops={run_result.observed_ops_version}")
-    return ", ".join(parts)
+        parts.append(f"ops {run_result.observed_ops_version}")
+    if mp.repo_version:
+        parts.append(f"operator repository at {mp.repo_version}")
+    if _scenario_only(hypothesis):
+        parts.append("Scenario only (no Juju)")
+    else:
+        juju = run_result.observed_juju_version or mp.juju_version
+        if juju:
+            pinned = (
+                f" (asked for {mp.juju_version})"
+                if run_result.observed_juju_version and mp.juju_version and mp.juju_version != juju
+                else ""
+            )
+            parts.append(f"Juju {juju}{pinned}")
+        if mp.substrate:
+            parts.append(f"{mp.substrate} substrate")
+        if mp.base:
+            parts.append(f"base {mp.base}")
+    return ", ".join(parts) if parts else "not recorded"
+
+
+def _scenario_only(hypothesis: Hypothesis) -> bool:
+    return (hypothesis.moving_parts.substrate or "").strip().lower() == "none"
+
+
+def _when(timestamp: str) -> str:
+    """`2026-11-19T12:46:00.843074+00:00` as `2026-11-19 12:46 UTC`: a
+    reader needs the minute, not the microsecond. A timestamp that does not
+    parse is shown as given."""
+    try:
+        moment = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return timestamp
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc)
+    return f"{moment:%Y-%m-%d %H:%M} UTC"
+
+
+def _fence(text: str, info: str = "") -> str:
+    """`text` in a fenced code block whose fence no line of `text` can close
+    (output that prints a markdown fence of its own would otherwise end the
+    block early)."""
+    longest = max((len(m) for m in re.findall(r"`{3,}", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{info}\n{text}\n{fence}"
 
 
 def _observed_output(run_result: RunResult) -> str:
@@ -256,21 +286,22 @@ def _control_output(run_result: RunResult) -> str | None:
 
 
 def _reproduced_line(hypothesis: Hypothesis, outcome: Outcome, timestamp: str) -> str:
-    # PLAN.md Approach §6 literally specifies "a one-line 'reproduced on
+    # PLAN.md Approach §6 specifies "a one-line 'reproduced on
     # <base>/<substrate> at <timestamp>'" for both `reproduced` and
-    # `partial` outcomes. Composing a live `partial` comment during this
-    # task's own dry run (see spike-step-5/composer-live/RESULT.md) showed
-    # why that's a false-comment risk worth not shipping literally: the
-    # opening line correctly says "got partway, then diverged", but an
-    # unconditional trailing "Reproduced on ..." line contradicts it --
-    # exactly the kind of overclaiming PLAN.md's own Open Questions section
-    # warns costs a maintainer a skipped verification. Verb is outcome-aware;
-    # the base/substrate/timestamp payload PLAN.md asks for is unchanged.
+    # `partial` outcomes. The verb is outcome-aware
+    # (`spike-step-5/composer-live/RESULT.md`): a `partial` attempt did not
+    # reproduce the bug, so its line says "Attempted". Where it ran is said
+    # in words (§42): a Scenario-only run names no base or substrate, and an
+    # unknown one is left out rather than shown as `unpinned/unpinned`, the
+    # form a model once wrote under its own `substrate=none`.
     verb = "Attempted" if outcome == Outcome.PARTIAL else "Reproduced"
-    return (
-        f"{verb} on {hypothesis.moving_parts.base or 'unknown base'}/"
-        f"{hypothesis.moving_parts.substrate or 'unknown substrate'} at {timestamp}."
-    )
+    mp = hypothesis.moving_parts
+    if _scenario_only(hypothesis):
+        where = " with Scenario (no Juju)"
+    else:
+        on = ", ".join(x for x in (f"{mp.substrate} substrate" if mp.substrate else "", mp.base or "") if x)
+        where = f" on {on}" if on else ""
+    return f"{verb}{where} at {_when(timestamp)}."
 
 
 def _marker(issue: Issue, run_id: str) -> str:
@@ -287,401 +318,70 @@ def compose_template(
     run_id: str,
     timestamp: str,
 ) -> str | None:
-    """Deterministic renderer -- Approach §6's fallback path. Behaviour is
-    unchanged from before this module grew an LLM path."""
+    """The comment for a comment-worthy outcome, or `None`.
+
+    Only the commands, the output, the test file, the log records and the
+    control run vary, and each comes from `run_result` (or the hypothesis's
+    test file) unchanged. Everything around them is fixed text: the banner,
+    a `partial` caveat, the versions line, the closing line and the marker.
+    There is no opening "the bug reproduced, please verify" sentence: the
+    banner says that already (§42), and the closing line says what
+    reproduced and where. `reason` (the classifier's) is not rendered; it
+    is kept in the signature for the pipeline's call.
+    """
     if outcome not in COMMENT_OUTCOMES:
         return None
 
-    lines = [_prefix(hypothesis), ""]
+    blocks = [_prefix(hypothesis)]
     if outcome == Outcome.PARTIAL:
-        lines.append("**Partial reproduction attempt** -- got partway, then diverged.")
-    else:
-        lines.append("**Reproduced** -- automated attempt, please verify before relying on it.")
-    lines.append("")
-    lines.append(f"Versions: {_versions_line(hypothesis, run_result)}")
-    lines.append(f"Outcome: `{outcome.value}` -- {reason}")
-    lines.append("")
+        blocks.append("**Partial reproduction attempt**: it got partway, then diverged.")
+    blocks.append(f"Versions: {_versions_line(hypothesis, run_result)}")
     test_file = _test_file_to_render(hypothesis, run_result)
     if test_file is not None:
-        # Collapsed <details> block, not a bare fenced code block --
-        # `maintainer-review/RESULT.md` §7's cross-cutting note: these bodies
-        # are long enough that inlining one uncollapsed pushes the rest of
-        # the comment below the fold. GFM only renders markdown inside
-        # <details> when there's a blank line straight after <summary>, so
-        # that blank line isn't cosmetic.
-        lines.append("<details>")
-        lines.append(f"<summary>{_test_file_heading(hypothesis, test_file)}</summary>")
-        lines.append("")
-        lines.append("```python")
-        lines.append(test_file.body)
-        lines.append("```")
-        lines.append("")
-        lines.append("</details>")
-        lines.append("")
-    lines.append("Commands run:")
-    lines.append("```shell")
-    for c in run_result.commands:
-        lines.append(f"$ {c.command}")
-    lines.append("```")
-    lines.append("")
-    lines.append("Observed output:")
-    lines.append("```")
-    lines.append(_observed_output(run_result))
-    lines.append("```")
-    lines.append("")
+        # Collapsed: `maintainer-review/RESULT.md` §7, these bodies are long
+        # enough that an uncollapsed one pushes the rest below the fold. GFM
+        # only renders markdown inside <details> when there's a blank line
+        # straight after <summary>, so that blank line isn't cosmetic.
+        blocks.append(
+            f"<details>\n<summary>{_test_file_heading(hypothesis, test_file)}</summary>\n\n"
+            f"{_fence(test_file.body, 'python')}\n\n</details>"
+        )
+    commands = "\n".join(f"$ {c.command}" for c in run_result.commands)
+    blocks.append(f"Commands run:\n{_fence(commands, 'shell')}")
+    blocks.append(f"Output:\n{_fence(_observed_output(run_result))}")
     log_output = _log_output(run_result)
     if log_output is not None:
-        lines.append("Captured log records (not part of stdout/stderr above):")
-        lines.append("```")
-        lines.append(log_output)
-        lines.append("```")
-        lines.append("")
+        blocks.append(f"Captured log records (not part of the output above):\n{_fence(log_output)}")
     control_output = _control_output(run_result)
     if control_output is not None:
-        lines.append(
+        blocks.append(
             "Control (re-run to confirm the observer itself works: this rules out a "
             "broken check that would never have detected anything, not a reproduction "
-            "of the bug):"
+            f"of the bug):\n{_fence(control_output)}"
         )
-        lines.append("```")
-        lines.append(control_output)
-        lines.append("```")
-        lines.append("")
-    lines.append(_reproduced_line(hypothesis, outcome, timestamp))
-    lines.append("")
-    lines.append(_marker(issue, run_id))
-    return "\n".join(lines)
+    blocks.append(_reproduced_line(hypothesis, outcome, timestamp))
+    blocks.append(_marker(issue, run_id))
+    return "\n\n".join(blocks)
 
 
-# Backward-compatible alias: `pipeline.py` (and this module's own former
-# docstring) referred to the template renderer as plain `compose`. Keep the
-# name usable for anyone who wants the fixed template with no LLM involved.
+#: The renderer under its other names: `pipeline.py` once called it plain
+#: `compose`, and `render` is what it does.
 compose = compose_template
-
-
-class ComposerInvalid(ValueError):
-    """Raised when the LLM's composition output doesn't match the expected
-    shape. `Composer.compose()` catches this itself and falls back to
-    `compose_template()` -- it never propagates to a caller."""
-
-
-_SCHEMA_INSTRUCTIONS_HEAD = """\
-Given the reproduction run below, write a short, readable GitHub issue
-comment as JSON matching exactly this shape (PLAN.md Approach §6):
-
-{
-  "comment_body": str
-}
-
-comment_body is markdown. It MUST include, in this order:
-
-1. One line stating the outcome plainly: for `partial`, say the attempt got
-   partway and diverged, do NOT say the bug reproduced; for anything else,
-   say it reproduced and that this is an automated attempt the reader
-   should verify.
-2. A "Versions:" line, exactly as given below -- copy it verbatim, do not
-   reformat or guess at any value it doesn't contain.
-3. The exact commands that were run, in a fenced shell code block, in the
-   given order, verbatim -- do not add, remove, reorder, or "clean up" any
-   command.
-4. The observed output, trimmed if long, in a fenced code block, taken only
-   from the "Observed output (actual run)" text below -- never invent or
-   embellish output that isn't there.
-5. One line: "Reproduced on <base>/<substrate> at <timestamp>." using
-   exactly the base/substrate/timestamp values given below -- EXCEPT when
-   the outcome is `partial`, where this line must instead read "Attempted
-   on <base>/<substrate> at <timestamp>.": a partial attempt did not
-   reproduce the bug, and saying "Reproduced" on that trailing line would
-   contradict line 1's own "diverged" wording and overclaim what happened.
-"""
-
-#: Emitted only when `_test_file_to_render()` actually supplied a test-file
-#: section. Unchanged text, moved out of the standing instructions so that
-#: its precondition is enforced by the prompt builder rather than asserted
-#: inside a paragraph the model reads either way.
-_TEST_FILE_INSTRUCTIONS_GIVEN = """\
-A "Synthesized test file" or "Test file" section is given below (exactly
-one of the two, matching its own heading verbatim). The commands section
-alone does not show it -- either it was written directly to disk rather than
-run as a shell command, or it was embedded in the extraction's own commands
-but is not part of the commands this run actually executed -- so a reader
-copy-pasting only the commands below would hit FileNotFoundError. Include it
-verbatim, positioned BEFORE the commands section (the reader needs the file
-to exist before the commands that reference it make sense), as a collapsed
-section so it doesn't push the rest of the comment down: an HTML `<details>`
-block whose `<summary>` is the given heading text verbatim, with a blank
-line after the `<summary>` line, then the file's contents in their own
-fenced python code block, then `</details>`. Do not paraphrase, summarise,
-or truncate the file's contents.
-"""
-
-#: Emitted in place of the paragraph above when `_test_file_to_render()`
-#: returned `None`.
-#:
-#: `spike-step-5/fourth-dispatch/RESULT.md` §3.3: on both of that round's
-#: live runs the prompt carried no test-file section -- verified by exact
-#: reconstruction -- and `deepseek/deepseek-chat` rendered one anyway, both
-#: times, with different damage each time (a commands block missing the
-#: heredoc that writes the file, exit 4 when pasted; and the file body
-#: printed twice under a malformed `<Synthesized test file>` tag). Omitting
-#: the paragraph is evidently not the same as forbidding the section: the
-#: standing text described at length how to render one and then left the
-#: model to notice that its own precondition was absent. This says the
-#: quiet part out loud instead.
-_TEST_FILE_INSTRUCTIONS_WITHHELD = """\
-No "Synthesized test file" or "Test file" section is given below, and that
-is deliberate -- either this reproduction has no separate test file at all,
-or the commands section already shows the file in full, because the
-`cat > ... << 'PYEOF'` heredoc that writes it is itself one of the commands
-you are copying verbatim. Either way there is nothing a separate section
-could add.
-
-So do NOT write one. No `<details>` block and no `<summary>` anywhere in the
-comment; no "Synthesized test file" heading, no "Test file" heading, and no
-heading of your own invention that serves the same purpose; and no second
-copy of any file's contents. Do not reconstruct a file from the heredoc in
-the commands and show it above them. If you want the reader to see the test
-file, you show it by reproducing the commands below verbatim, which is the
-only place it belongs.
-
-A section here would be wrong twice over. It would repeat lines the reader
-meets again a few lines later, which is the duplication this comment format
-was changed to remove; and it would label them with a provenance
-("synthesized") that is not what happened, since nothing synthesised this
-file. Worse, inventing the section has in practice gone together with
-quietly dropping the heredoc from the commands block to avoid the
-repetition -- which leaves a reader pasting commands that reference a file
-nothing creates. The commands block is not yours to adjust for any reason.
-"""
-
-_SCHEMA_INSTRUCTIONS_TAIL = """\
-If a "Captured log records" section is given below, include it too,
-immediately after the "Observed output" block, under its own "Captured log
-records (not part of stdout/stderr):" heading, in a fenced code block,
-verbatim. For a `reproduced_log_only` outcome this is the *only* evidence
-of the bug -- the commands above may show a clean pass (exit 0, no
-stdout/stderr output worth reading) with nothing wrong-looking about it on
-its own, and the log records are what actually grounds the "reproduced"
-claim. Never say the bug reproduced without showing this section when it is
-given; a reader who sees only a clean-looking stdout/stderr block under a
-"reproduced" claim has no way to tell the claim is true.
-
-If a "Control run" section is given below, include it too, between steps 4
-and 5, under its own "Control (re-run to confirm the observer itself works:
-this rules out a broken check that would never have detected anything, not
-a reproduction of the bug):" heading, in a fenced code block, verbatim. This
-outcome's whole claim rests on that control (the signal was absent in the
-main run but present here, which is what rules out a broken observer rather
-than a reproduced bug) -- never state or imply that a control confirmed
-anything without showing it, and never fabricate one if this section is
-absent.
-
-Do not include a trailing HTML comment marker, and do not open the comment
-with an "automated"/"generated by a bot"/"please verify" disclaimer line --
-both are added separately, after your response, and are not part of
-comment_body. Line 1 above is the outcome statement, nothing before it.
-
-This comment will be posted on a real bug report and a maintainer will act
-on it without re-running anything themselves. Do not state or imply
-anything the commands/output below don't actually show: do not claim a fix
-works, do not claim a root cause beyond what the hypothesis's own
-`expected`/`observed` text says, and do not soften or omit a `partial` or
-weaker outcome's caveats. A confidently wrong comment is worse than no
-comment at all, because the reader trusts it and skips verifying.
-"""
-
-
-def _schema_instructions(*, test_file_given: bool) -> str:
-    """The composition instructions, with the test-file paragraph chosen to
-    match what the prompt below it actually supplies.
-
-    Before `fifth-dispatch`, the two branches were one standing paragraph
-    opening "If a ... section is given below", emitted whether or not one
-    was -- so on the withheld path the model read a detailed description of a
-    section it had not been given, and its only cue not to render one was the
-    absence it had to notice for itself. It did not notice, twice out of two
-    (`fourth-dispatch/RESULT.md` §3.3).
-    """
-    test_file_instructions = (
-        _TEST_FILE_INSTRUCTIONS_GIVEN if test_file_given else _TEST_FILE_INSTRUCTIONS_WITHHELD
-    )
-    return f"{_SCHEMA_INSTRUCTIONS_HEAD}\n{test_file_instructions}\n{_SCHEMA_INSTRUCTIONS_TAIL}"
-
-
-#: Fenced code block, tolerant of either fence character and of any info
-#: string (the prompt asks for ```shell; `fourth-dispatch`'s run 1 used it,
-#: but nothing makes a model do so and a block tagged `sh`, `bash`, `console`
-#: or nothing at all is the same block to a reader).
-_FENCE = re.compile(
-    r"^(?P<fence>```+|~~~+)[^\n]*\n(?P<content>.*?)^(?P=fence)[ \t]*$", re.MULTILINE | re.DOTALL
-)
-
-
-def _commands_in_block(content: str) -> list[str]:
-    """The `$ `-prefixed command sequence inside one fenced block.
-
-    A command is everything from its `$ ` line up to the next one, because
-    the heredoc that writes a test file is a single command spanning twenty
-    lines and `CommandResult.command` holds it that way. Splitting on lines
-    instead would make every heredoc look like a mismatch.
-    """
-    commands: list[str] = []
-    for line in content.split("\n"):
-        if line.startswith("$ "):
-            commands.append(line[2:])
-        elif commands:
-            commands[-1] += f"\n{line}"
-    return [c.rstrip("\n") for c in commands]
-
-
-def _rendered_command_sequences(body: str) -> list[list[str]]:
-    """Every fenced block in `body` that renders commands, as command lists.
-
-    More than one block can qualify: `_control_output()`'s section renders
-    its own `$ ` line, so "the commands block" is not simply "the block with
-    dollar signs in it". The caller asks whether *any* of them is the
-    sequence that ran rather than guessing which one was meant.
-    """
-    sequences = []
-    for match in _FENCE.finditer(body):
-        commands = _commands_in_block(match.group("content"))
-        if commands:
-            sequences.append(commands)
-    return sequences
-
-
-_DISCLAIMER_LINE = re.compile(r"^\s*>?\s*\**\s*(automated|generated)\b.*", re.IGNORECASE)
-
-
-def _strip_leading_disclaimer(body: str) -> str:
-    """Drop a disclaimer the model opened with anyway.
-
-    `AUTOMATION_PREFIX` is prepended structurally, so a model that ignores
-    the prompt's "do not open with a disclaimer" line would give the reader
-    the same sentence twice. That is cosmetic, not misleading, so it is
-    repaired here rather than rejected in `_validate()` -- falling back to
-    the template would throw away a good comment over a duplicated line.
-    """
-    lines = body.split("\n")
-    if lines and _DISCLAIMER_LINE.match(lines[0]):
-        lines = lines[1:]
-        while lines and not lines[0].strip():
-            lines = lines[1:]
-    return "\n".join(lines)
-
-
-def _validate(
-    raw: dict,
-    *,
-    control_output: str | None,
-    test_file_path: str | None,
-    log_output: str | None,
-    commands: list[str],
-    withheld_test_file: TestFile | None,
-) -> None:
-    if not isinstance(raw, dict) or "comment_body" not in raw:
-        raise ComposerInvalid(f"missing 'comment_body' key, got {raw!r}")
-    body = raw["comment_body"]
-    if not isinstance(body, str) or not body.strip():
-        raise ComposerInvalid(f"'comment_body' must be a non-empty string, got {body!r}")
-    if log_output is not None and "log record" not in body.lower():
-        # `_log_output()`'s docstring: for `reproduced_log_only`, the log
-        # records ARE the evidence -- stdout/stderr alone can read as a
-        # clean pass. Same shape as the control check below: a response
-        # that drops this isn't incomplete, it's a "reproduced" claim with
-        # no visible support, indistinguishable from "did not reproduce" to
-        # a reader who only looks at the commands/output blocks.
-        raise ComposerInvalid("comment_body omits the log records this outcome's claim depends on")
-    if control_output is not None and "control" not in body.lower():
-        # This outcome's entire claim rests on the control run (see
-        # `_control_output()`'s docstring) -- a response that drops it isn't
-        # just incomplete, it's the exact "confidently wrong" shape PLAN.md's
-        # Open Questions section warns about. Falling back to
-        # `compose_template()`, which always renders the control section,
-        # is safer than posting a comment that asserts a signal was absent
-        # "but present in the control run" with no control shown.
-        raise ComposerInvalid("comment_body omits the control run this outcome's claim depends on")
-    if test_file_path is not None and test_file_path not in body:
-        # Same shape as the control check above, for Finding 4
-        # (`spike-step-5/composer-live/RESULT.md`) and its
-        # `spike-step-5/maintainer-review/FOLLOWUPS.md` §1 extension to a
-        # heredoc-embedded file: a response that drops the file leaves the
-        # commands section referencing one the reader was never shown -- not
-        # incomplete, actively misleading, since "Commands run" reads as
-        # self-contained when it isn't.
-        raise ComposerInvalid(
-            f"comment_body omits the test file {test_file_path!r} its commands reference"
-        )
-    if commands and not any(seq == commands for seq in _rendered_command_sequences(body)):
-        # `fourth-dispatch/RESULT.md` §3.4, measured: run 1's comment printed
-        # three of the four commands that ran, dropping the `cat > test_cwd.py
-        # << 'PYEOF'` heredoc, and the three it printed give "ERROR: file or
-        # directory not found: test_cwd.py", exit 4, when pasted into a clean
-        # directory. Nothing else in `_validate()` could see that, because the
-        # dropped command is not a test-file *path* and the outcome, versions
-        # and observed output were all faithfully rendered.
-        #
-        # Equality of the whole sequence, not set membership and not
-        # subsequence. Subsequence is ruled out by the artefact that motivated
-        # the check: run 1's three commands ARE a subsequence of the four that
-        # ran, in order, so a subsequence test accepts the one comment this
-        # check exists to reject. Set equality does reject run 1, but accepts a
-        # reordering -- and "install, then write the file, then run it",
-        # reordered, fails for a reader exactly as an omission does, with the
-        # same "but the bot said it worked" cost. The prompt has always asked
-        # for the stronger thing in so many words ("do not add, remove,
-        # reorder, or 'clean up' any command"), so equality enforces the
-        # instruction that was already given rather than inventing a weaker
-        # one to be satisfiable.
-        raise ComposerInvalid(
-            f"comment_body's commands block is not the {len(commands)} commands that ran"
-        )
-    if withheld_test_file is not None:
-        # The path `fourth-dispatch` §3 found: `_test_file_to_render()`
-        # returned `None` because the commands already show the file, so the
-        # prompt supplied no test-file section -- and the model rendered one
-        # regardless, on both runs. `test_file_path` is `None` here by
-        # construction, which is why the check above it cannot see this.
-        #
-        # Two signals, because the two observed failures are not the same
-        # failure. Run 2 repeated the body verbatim, so counting it catches
-        # that one; run 1 dropped the heredoc, so its body appears once and
-        # only the structural signal catches it.
-        if body.count(withheld_test_file.body) > 1:
-            raise ComposerInvalid(
-                f"comment_body renders the body of {withheld_test_file.path!r} more than once"
-            )
-        if "<details>" in body.lower():
-            # The only `<details>` block either render path has ever emitted,
-            # and the only one `_schema_instructions()` ever asks for, is the
-            # test-file section -- so on the path where that section was
-            # withheld, a collapsed block is by construction one the prompt
-            # did not ask for. This does reject a model that collapsed
-            # something else of its own accord (a long observed-output block,
-            # say); that costs a fallback to a correct template comment,
-            # which is the side to be wrong on.
-            raise ComposerInvalid(
-                "comment_body renders a collapsed section where none was supplied "
-                f"(the commands already show {withheld_test_file.path!r})"
-            )
+render = compose_template
 
 
 class Composer:
-    """Approach §6's LLM composition path.
+    """The pipeline's composer: `compose_template()` behind the interface the
+    pipeline already calls.
 
-    `compose_template()` is this class's own fallback on any failure (no
-    key, transport error, invalid JSON, malformed response) -- a
-    comment-worthy outcome always yields *a* comment, never an exception and
-    never a silently dropped one.
+    It takes an `LLMSeam` because it used to make one call to it; since §42
+    it makes none (see the module docstring), and the seam is kept only so
+    `Pipeline` and its tests construct it as before.
     """
 
     def __init__(self, llm: LLMSeam):
         self.llm = llm
 
-    # `_validate()` rejects a response whose commands block is not the
-    # commands that ran, which means every stub response a test hands this
-    # class has to carry one. `tests/test_composer.py::_commands_block()` is
-    # the test-side counterpart of this renderer.
     def compose(
         self,
         hypothesis: Hypothesis,
@@ -693,81 +393,6 @@ class Composer:
         run_id: str,
         timestamp: str,
     ) -> str | None:
-        if outcome not in COMMENT_OUTCOMES:
-            return None
-        test_file = _test_file_to_render(hypothesis, run_result)
-        try:
-            prompt = self._build_prompt(hypothesis, issue, run_result, outcome, reason, timestamp)
-            raw = self.llm.complete_json(
-                purpose="composition", prompt=prompt, context={"issue_number": issue.number}
-            )
-            _validate(
-                raw,
-                control_output=_control_output(run_result),
-                test_file_path=test_file.path if test_file is not None else None,
-                log_output=_log_output(run_result),
-                commands=[c.command for c in run_result.commands],
-                # Only when there *is* a test file and this comment
-                # deliberately declines to render it separately. With no test
-                # file anywhere, a `<details>` block is odd but not the
-                # duplication-and-false-provenance defect this guards, and
-                # rejecting it would be a scope this round has not measured.
-                withheld_test_file=(
-                    _resolved_test_file(hypothesis) if test_file is None else None
-                ),
-            )
-        except (LLMError, ComposerInvalid):
-            # compose_template() already appends the marker -- return
-            # directly rather than falling through to the shared
-            # marker-append below, which would otherwise double it up.
-            return compose_template(
-                hypothesis, issue, run_result, outcome, reason, run_id=run_id, timestamp=timestamp
-            )
-        body = _strip_leading_disclaimer(raw["comment_body"].rstrip())
-        # Prepended here, not asked for in the prompt, for the same reason
-        # the marker is: criterion 2's accepted-risk mitigation is only
-        # worth anything if it cannot be dropped by a model that decided
-        # the comment read better without it.
-        return f"{_prefix(hypothesis)}\n\n{body}\n\n{_marker(issue, run_id)}"
-
-    @staticmethod
-    def _build_prompt(
-        hypothesis: Hypothesis,
-        issue: Issue,
-        run_result: RunResult,
-        outcome: Outcome,
-        reason: str,
-        timestamp: str,
-    ) -> str:
-        commands_block = "\n".join(f"$ {c.command}" for c in run_result.commands)
-        control_output = _control_output(run_result)
-        control_section = f"Control run (must appear in your comment, verbatim):\n{control_output}\n" if control_output is not None else ""
-        log_output = _log_output(run_result)
-        log_section = (
-            f"Captured log records (must appear in your comment, verbatim, immediately after "
-            f"Observed output -- this outcome's evidence is NOT in stdout/stderr):\n{log_output}\n"
-            if log_output is not None
-            else ""
-        )
-        test_file = _test_file_to_render(hypothesis, run_result)
-        test_file_prompt_section = (
-            f"{_test_file_heading(hypothesis, test_file)} (heading must appear verbatim as an "
-            f"HTML <details> <summary>, BEFORE the commands section -- see the instructions "
-            f"above):\n{test_file.path}:\n{test_file.body}\n"
-            if test_file is not None
-            else ""
-        )
-        return (
-            f"{_schema_instructions(test_file_given=test_file is not None)}\n"
-            f"Issue #{issue.number}: {issue.title}\n"
-            f"Outcome: {outcome.value} -- {reason}\n"
-            f"Versions: {_versions_line(hypothesis, run_result)}\n"
-            f"Timestamp: {timestamp}\n"
-            f"Hypothesis expected: {hypothesis.expected}\n"
-            f"Hypothesis observed (from the issue): {hypothesis.observed}\n"
-            f"{test_file_prompt_section}"
-            f"Commands run, in order:\n{commands_block}\n"
-            f"Observed output (actual run):\n{_observed_output(run_result)}\n"
-            f"{log_section}"
-            f"{control_section}"
+        return compose_template(
+            hypothesis, issue, run_result, outcome, reason, run_id=run_id, timestamp=timestamp
         )

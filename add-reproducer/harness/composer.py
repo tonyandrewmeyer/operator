@@ -163,8 +163,19 @@ def _fence(text: str, info: str = "") -> str:
 
 
 def _observed_output(run_result: RunResult) -> str:
-    combined = "\n".join(f"{c.stdout}{c.stderr}" for c in run_result.commands)
-    return _trim(combined) or "(no output captured)"
+    """The output of the last command that ran, which is the one the outcome
+    rests on: the runner stops at the first failing command, so this is
+    either that command or the reproduction itself.
+
+    The setup commands stay in "Commands run", but their output is left out.
+    It is `uv`'s install chatter, and its first lines name the scratch
+    workspace the runner isolates each issue in, which a reader running the
+    same commands would never see.
+    """
+    if not run_result.commands:
+        return "(no output captured)"
+    last = run_result.commands[-1]
+    return _trim(f"{last.stdout}{last.stderr}") or "(no output captured)"
 
 
 def _log_output(run_result: RunResult) -> str | None:

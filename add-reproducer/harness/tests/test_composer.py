@@ -19,6 +19,7 @@ from composer import (
     Composer,
     _resolved_test_file,
     _test_file_to_render,
+    _trim,
     _when,
     compose_template,
 )
@@ -667,8 +668,52 @@ def test_the_commands_and_output_are_the_records():
     body = _cwd_case()
     commands = "\n".join(f"$ {c.command}" for c in run.commands)
     assert f"```shell\n{commands}\n```" in body
-    output = "\n".join(f"{c.stdout}{c.stderr}" for c in run.commands)
-    assert output[:200] in body
+    last = run.commands[-1]
+    output = f"{last.stdout}{last.stderr}"
+    assert f"Output:\n```\n{output[:200]}" in body
+
+
+def _real_workflow_case() -> tuple[RunResult, str]:
+    """A run record from a real workflow run on `#2045`, setup output and all."""
+    raw = json.loads((FIXTURES / "composed" / "2045-35442613976-run.json").read_text())
+    run = RunResult.from_dict(raw)
+    body = compose_template(
+        _load_hypothesis(2045),
+        _load_issue(2045),
+        run,
+        Outcome.REPRODUCED_WEAKER,
+        "r",
+        run_id="35442613976",
+        timestamp="2026-11-21T00:00:00Z",
+    )
+    assert body is not None
+    return run, body
+
+
+def test_output_is_the_last_command_only():
+    run, body = _real_workflow_case()
+    shown = body.split("Output:\n```\n", 1)[1].split("\n```", 1)[0]
+    last = run.commands[-1]
+    assert shown == _trim(f"{last.stdout}{last.stderr}")
+    assert shown.startswith("=" * 29 + " test session starts")
+
+
+def test_setup_output_is_not_shown():
+    run, body = _real_workflow_case()
+    # The setup commands are listed, but nothing they printed is.
+    for c in run.commands[:-1]:
+        assert f"$ {c.command.splitlines()[0]}" in body
+    assert "Adding `repro` as member of workspace" not in body
+    assert "Resolved 16 packages" not in body
+    assert " + ops-scenario==" not in body
+
+
+def test_a_run_with_no_commands_says_so():
+    run = RunResult(hypothesis_number=2045, branch="none", commands=[])
+    body = compose_template(
+        _dispatch_hypothesis(), _dispatch_issue(), run, Outcome.REPRODUCED_WEAKER, "r", run_id="r", timestamp="t"
+    )
+    assert body is None or "Output:\n```\n(no output captured)\n```" in body
 
 
 @pytest.mark.parametrize(

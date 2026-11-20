@@ -382,11 +382,14 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _invalid_shell_fake(tree)
     reasons += _missing_charm_meta_attribute(tree)
     reasons += _from_yaml_non_string(tree)
-    # A backstop for `#2045`-like cwd claims: it only speaks when no other
+    # Backstops for `#2045`-like cwd claims: they only speak when no other
     # rule has, so an answer another rule already rejects gets that rule's
     # (more specific) feedback alone.
     if not reasons:
         reasons += _cwd_compared_with_unsourced_value(tree)
+        # The same, from the cwd side: a value presented as the cwd must be
+        # read from the working directory.
+        reasons += _cwd_side_not_a_cwd_read(tree)
     # Several rules can name the same line for the same reason (a nested
     # scope sees its parent's bindings); the model only needs telling once.
     # Then in line order, file-wide reasons first, so the feedback reads
@@ -1712,6 +1715,246 @@ def _cwd_compared_with_unsourced_value(tree: ast.Module) -> list[str]:
                     "directory in a handler as `self.framework.charm_dir` (store it, as the cwd is "
                     "stored) and compare the cwd with that"
                 )
+    return list(dict.fromkeys(reasons))
+
+
+# `working_dir` is left out: it is Pebble's name for an exec's directory.
+_CWD_LABEL = re.compile(r"cwd|current_?dir|curdir", re.IGNORECASE)
+_NON_CWD_MODULES = frozenset({"ops", "os", "sys", "pathlib", "tempfile", "shutil", "importlib", "site", "sysconfig"})
+
+
+def _comparison_pairs(node: ast.AST) -> list[tuple[ast.AST, ast.AST]]:
+    """The two sides of each claim `node` makes, as
+    `_cwd_compared_with_unsourced_value()` counts claims: `==`, `!=`, `is`,
+    `is not`, `in`, `not in`, `.startswith()` / `.endswith()` /
+    `.samefile()`, and `os.path.samefile()`."""
+    pairs: list[tuple[ast.AST, ast.AST]] = []
+    if isinstance(node, ast.Compare) and len(node.ops) == 1:
+        if isinstance(node.ops[0], (ast.Eq, ast.NotEq, ast.Is, ast.IsNot, ast.In, ast.NotIn)):
+            pairs.append((node.left, node.comparators[0]))
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if node.func.attr in {"startswith", "endswith", "samefile"} and len(node.args) == 1:
+            pairs.append((node.func.value, node.args[0]))
+    if isinstance(node, ast.Call) and ast.unparse(node.func) in {"os.path.samefile", "samefile"}:
+        if len(node.args) == 2:
+            pairs.append((node.args[0], node.args[1]))
+    return pairs
+
+
+class _CwdSideFlow(_CwdFlow):
+    """`_CwdFlow`, plus where a value presented as the cwd comes from:
+    `'cwd'` when it is (or is built from) a cwd read, `'other'` when it is
+    built from something that is not (a literal, a module attribute such
+    as `ops.__path__`, `__file__`, `os.environ`, the charm directory), and
+    neither when the file does not say (a fixture argument, an attribute
+    nothing assigns)."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        super().__init__(tree)
+        self.defs: dict[str, list[ast.AST]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.defs.setdefault(node.name, []).append(node)
+
+    def _values(self, ref: ast.AST) -> list[tuple[ast.AST, ast.AST | None]]:
+        found = super()._values(ref)
+        if found or not isinstance(ref, ast.Attribute):
+            return found
+        # `ctx.charm.framework.current_dir` for `self.framework.current_dir`.
+        text = ast.unparse(ref)
+        out: list[tuple[ast.AST, ast.AST | None]] = []
+        for key, values in self.assigned.items():
+            if key.startswith("self.") and key.count(".") > 1 and text.endswith(key[len("self"):]):
+                out += values
+        return out
+
+    def _returns(self, name: str) -> list[tuple[ast.AST, ast.AST]]:
+        out = []
+        for d in self.defs.get(name, []):
+            for node in ast.walk(d):
+                if isinstance(node, ast.Return) and node.value is not None:
+                    out.append((node.value, d))
+        return out
+
+    def labelled(self, node: ast.AST, _depth: int = 0) -> bool:
+        """Whether `node` is presented as the working directory: a name, an
+        attribute or a string subscript key that says so (`cwd`,
+        `captured['cwd']`, `self.working_dir`, `charm.current_dir`), or a
+        value built from one, or a local assigned from one."""
+        if _depth > 6:
+            return False
+        if isinstance(node, ast.Name) and _CWD_LABEL.search(node.id):
+            return True
+        if isinstance(node, ast.Attribute) and _CWD_LABEL.search(node.attr):
+            return True
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+            and _CWD_LABEL.search(node.slice.value)
+        ):
+            return True
+        if isinstance(node, ast.Name):
+            return any(self.labelled(v, _depth + 1) for v, _ in self._values(node))
+        if isinstance(node, ast.Call):
+            # `str(captured['cwd'])`, `Path(cwd).resolve()`; not the callee.
+            parts = list(node.args) + [k.value for k in node.keywords]
+            if isinstance(node.func, ast.Attribute):
+                parts.append(node.func.value)
+            return any(self.labelled(p, _depth + 1) for p in parts)
+        return False
+
+    def source(self, node: ast.AST, scope: ast.AST | None, _depth: int = 0) -> set[str]:
+        if _depth > 8:
+            return set()
+        if _is_cwd_source(node):
+            return {"cwd"}
+        if isinstance(node, ast.Constant):
+            return set() if node.value is None else {"other"}
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+            values = self._values(node)
+            if values:
+                out: set[str] = set()
+                for value, where in values:
+                    out |= self.source(value, where, _depth + 1)
+                return out
+            if self._handler_charm_dir(node, scope) or (
+                isinstance(node, ast.Attribute) and node.attr == "charm_dir"
+            ):
+                return {"other"}
+            if isinstance(node, ast.Attribute):
+                # A property or method the file defines (`charm.cwd` with
+                # `def cwd(self): return os.getcwd()`).
+                returns = self._returns(node.attr)
+                if returns:
+                    out = set()
+                    for value, where in returns:
+                        out |= self.source(value, where, _depth + 1)
+                    return out
+                root = node
+                while isinstance(root, (ast.Attribute, ast.Subscript)):
+                    root = root.value
+                if isinstance(root, ast.Name) and root.id in _NON_CWD_MODULES:
+                    return {"other"}
+                # `Path(__file__).parent`, `p.parent` with `p` assigned.
+                return self.source(node.value, scope, _depth + 1)
+            if isinstance(node, ast.Subscript):
+                return self.source(node.value, scope, _depth + 1)
+            if node.id == "__file__":
+                return {"other"}
+            return set()
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in self.defs:
+                out = set()
+                for value, where in self._returns(node.func.id):
+                    out |= self.source(value, where, _depth + 1)
+                return out
+            # What is passed in, and the receiver of a method call; not a
+            # module a function is called from (`os.path` in
+            # `os.path.realpath(cwd)`).
+            parts = list(node.args) + [k.value for k in node.keywords]
+            if isinstance(node.func, ast.Attribute):
+                root = node.func.value
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if not (isinstance(root, ast.Name) and root.id in _NON_CWD_MODULES):
+                    parts.append(node.func.value)
+            out = set()
+            for p in parts:
+                out |= self.source(p, scope, _depth + 1)
+            return out
+        out = set()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.expr_context):
+                continue
+            out |= self.source(child, scope, _depth + 1)
+        return out
+
+
+def _cwd_side_not_a_cwd_read(tree: ast.Module) -> list[str]:
+    """A claim about the working directory whose cwd side is not the cwd.
+
+    `_cwd_compared_with_unsourced_value()` checks the side a cwd is compared
+    *with*; it finds the cwd by its value (`os.getcwd()` and the like).
+    §41's false `#2045` final (`spike-step-5/static-retry/RESULT.md` §41)
+    kept `self.charm_dir` from the handler on one side and stored
+    `str(ops.__path__[0])` under the key `'cwd'` on the other, so the file
+    read no cwd at all, failed on every version, and was out of that rule's
+    scope. This rule finds the cwd side by how the test presents it.
+
+    In a test function, a side of a claim (the comparisons that rule counts)
+    is presented as the working directory when it is, or is built from, or
+    is a local assigned from, a name, an attribute or a string subscript key
+    that says so (`cwd`, `current_dir`, `curdir`, any case, as part of a
+    longer name too, but not `working_dir`, which Pebble uses for an exec's
+    directory: `captured['cwd']`,
+    `captured_cwd`, `self._cwd`, `charm.current_dir`); or, in a test whose
+    name says so, when the other side is the charm directory the handler
+    reads (`captured['charm_dir'] == captured['x']` in
+    `test_charm_dir_matches_cwd`). That side must come from a cwd read made
+    during the run: `os.getcwd()`, `os.getcwdb()`, `Path.cwd()`,
+    `Path('.').resolve()`, `os.path.abspath('.')` / `realpath('.')`, or a
+    value derived from one, traced through assignments (locals, instance
+    attributes, holder keys, `dict.update()`), the return values of the
+    file's own functions and properties, and calls that wrap it (`str()`,
+    `Path()`, `.resolve()`). It is rejected when it traces only to something
+    else: a literal, a module's attribute (`ops.__path__`,
+    `os.path.dirname(ops.__file__)`, `os.environ['PWD']`), `__file__`, or the
+    charm directory itself. Left alone: a side whose source the file does
+    not say (a fixture argument, an attribute nothing assigns), a side that
+    traces to both a cwd read and something else, a side the file `chdir`s
+    to, a comparison with `None`, and a comparison whose other side reads
+    the cwd (that side is then the claim's cwd, and a value labelled
+    `expected_cwd` on the other side is what it is compared with, which
+    `_cwd_compared_with_unsourced_value()` judges). `check()` only runs this
+    when no other rule has fired, as it does
+    `_cwd_compared_with_unsourced_value()`.
+    """
+    flow: _CwdSideFlow | None = None
+    chdirs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args and ast.unparse(node.func).endswith("chdir"):
+            chdirs.add(ast.unparse(node.args[0]))
+    reasons = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or not func.name.startswith("test"):
+            continue
+        named = bool(_CWD_LABEL.search(func.name))
+        for node in ast.walk(func):
+            pairs = _comparison_pairs(node)
+            if not pairs:
+                continue
+            if flow is None:
+                flow = _CwdSideFlow(tree)
+            scope = flow.owner.get(id(node))
+            for left, right in pairs:
+                if any(isinstance(s, ast.Constant) and s.value is None for s in (left, right)):
+                    continue
+                sides = [s for s in (left, right) if flow.labelled(s)]
+                if not sides and named:
+                    lk, rk = flow.kinds(left, scope), flow.kinds(right, scope)
+                    if "handler" in lk and "handler" not in rk:
+                        sides = [right]
+                    elif "handler" in rk and "handler" not in lk:
+                        sides = [left]
+                if not sides or any("cwd" in flow.source(s, scope) for s in (left, right)):
+                    # A side that reads the cwd is the claim's cwd; what it is
+                    # compared with (`expected_cwd = ...` included) is
+                    # `_cwd_compared_with_unsourced_value()`'s to judge.
+                    continue
+                for side in sides:
+                    if ast.unparse(side) in chdirs or "charm_root" in ast.unparse(side):
+                        continue
+                    found = flow.source(side, scope)
+                    if "cwd" in found or "other" not in found:
+                        continue
+                    reasons.append(
+                        f"line {node.lineno}: `{ast.unparse(node)}` presents `{ast.unparse(side)}` as "
+                        "the working directory, but nothing in the file reads the working directory "
+                        "for it, so the comparison comes out the same whether or not the bug is real; "
+                        "read the working directory with `os.getcwd()` in a handler (store it, as the "
+                        "charm directory is stored) and compare it with `self.charm_dir`"
+                    )
     return list(dict.fromkeys(reasons))
 
 

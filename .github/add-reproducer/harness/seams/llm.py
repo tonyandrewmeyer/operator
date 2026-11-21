@@ -2,11 +2,11 @@
 
 Two implementations:
 
-- `LiveOpenRouterLLM` — calls OpenRouter with a key from `OPENROUTER_API_KEY`
+- `LiveOpenRouterLLM` -- calls OpenRouter with a key from `OPENROUTER_API_KEY`
   or `~/.config/ai-reproducer.key`. Not exercised by the test suite (no
   network, no key there); it is the code path the workflow and live local
   runs use.
-- `FixtureLLM` — replays recorded extraction / surface-inference outputs
+- `FixtureLLM` -- replays recorded extraction / surface-inference outputs
   from `fixtures/`. What the pipeline actually runs against here.
 """
 

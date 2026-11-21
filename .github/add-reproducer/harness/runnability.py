@@ -3,13 +3,13 @@
 The extraction schema says `"commands": [str]` and nothing about what a
 command *is*, so a live model can emit prose ("Run a charm test that checks
 the default relation settings"), bare Python expressions
-(`relation = self.model.get_relation(...)`), or pytest test names — none of
+(`relation = self.model.get_relation(...)`), or pytest test names -- none of
 which are shell.
 
 Handing those to a shell is not merely useless, it is actively harmful.
 `bash -c 'Run a charm test ...'` exits **127** (`Run: command not found`),
 and the classifier's rung 6 turns any non-zero last command into
-`reproduced (weaker)`, which is in `COMMENT_OUTCOMES` — so prose becomes a
+`reproduced (weaker)`, which is in `COMMENT_OUTCOMES` -- so prose becomes a
 maintainer-visible comment claiming the bug reproduced (live extractions
 for #2185/#2341/#2327 had exactly this shape). That is the false-comment
 mode the tool's "nothing useful produced → stay silent" rule and its
@@ -17,7 +17,7 @@ bias toward false drops exist to prevent.
 
 So this module answers one question, conservatively: would these strings
 survive contact with a shell at all? It deliberately does not judge
-whether they reproduce the bug — that's the classifier's job, downstream,
+whether they reproduce the bug -- that's the classifier's job, downstream,
 and it only gets to run if the answer here is yes.
 
 The check is a property, not a vibe: a command is shell-shaped when it
@@ -37,7 +37,7 @@ import subprocess
 # `substrate: none` plus the multipass VM's
 # concierge/juju/charmcraft for `lxd|k8s`. Kept as an explicit allowlist
 # rather than probing PATH, so the verdict is identical on this box, in the
-# VM, and on a GHA runner — a `which`-only check would call `juju` prose
+# VM, and on a GHA runner -- a `which`-only check would call `juju` prose
 # when run locally.
 RUNNER_TOOLS = frozenset(
     {

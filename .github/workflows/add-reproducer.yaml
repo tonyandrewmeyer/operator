@@ -34,7 +34,7 @@
 # write access beyond `issues: write`, and the only secret it can see is the
 # OpenRouter key in the `llm` environment.
 #
-# **Known limitation — CI-run-only bug reports produce no comment.**
+# **Known limitation: CI-run-only bug reports produce no comment.**
 #
 # An issue that links a GitHub Actions run and gives no local reproduction
 # steps (no commands, no self-contained snippet) is routed to the
@@ -47,7 +47,7 @@
 #
 # This is a deliberate limitation, not an oversight. Building a
 # reproduction from a CI run would mean re-reading CI output the reporter
-# has already seen — a triage summariser rather than a reproducer — and the
+# has already seen - a triage summariser rather than a reproducer - and the
 # alternative, guessing the failing invocation and handing it to a shell,
 # is the shape this pipeline's runnability gate exists to stop.
 #

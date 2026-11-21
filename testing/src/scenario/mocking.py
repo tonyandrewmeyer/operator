@@ -142,6 +142,11 @@ class _MockExecProcess:
 
 _NOT_GIVEN = object()  # non-None default value sentinel
 
+# The on-failure actions that make Pebble shut itself down rather than act on
+# the service. Which kind of shutdown each one is (success or failure) makes
+# no difference to a charm: either way the daemon goes away.
+_SHUTDOWN_ACTIONS = frozenset({'shutdown', 'success-shutdown'})
+
 _F = TypeVar('_F', bound=Callable[..., Any])
 
 
@@ -1047,7 +1052,12 @@ class _MockPebbleClient(_TestingPebbleClient):
         ``kind`` is the change kind Pebble uses for whichever entry point got
         us here (``start``/``restart``/``autostart``/``replan``), and the
         change summary's verb follows it.
+
+        If a failing service's ``on-failure`` action is a shutdown, Pebble
+        shuts itself down after the change: the charm still gets the
+        ``ChangeError``, and then the container is unreachable.
         """
+        self._check_connection()
         if not services:
             raise self._api_error(400, 'must specify services for start action')
         known_services = self._render_services()
@@ -1070,6 +1080,7 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         tasks: list[pebble.Task] = []
         bullets: list[str] = []
+        shuts_down = False
         spawn_time = datetime.datetime.now(tz=datetime.timezone.utc)
         ready_time = spawn_time + datetime.timedelta(milliseconds=10)
 
@@ -1105,6 +1116,8 @@ class _MockPebbleClient(_TestingPebbleClient):
                 continue
             reason, status, log = self._service_failure_detail(known_services[name], behaviour)
             self._service_status[name] = status
+            if self._triggers_shutdown(known_services[name], behaviour):
+                shuts_down = True
             bullets.append(f'- Start service "{name}" ({reason})')
             tasks.append(_task(name, 'start', 'Error', log))
 
@@ -1132,6 +1145,10 @@ class _MockPebbleClient(_TestingPebbleClient):
             spawn_time=spawn_time,
             ready_time=ready_time,
         )
+        if shuts_down:
+            # The charm still gets the error for the start, and then finds
+            # Pebble gone on its next call.
+            self._shut_down()
         raise pebble.ChangeError(err, change)
 
     def _service_failure_detail(
@@ -1148,8 +1165,10 @@ class _MockPebbleClient(_TestingPebbleClient):
 
         verb = self._on_failure_verb(service.on_failure)
         reason = f'service start attempt: exited quickly with code 1, will {verb}'
+        # Pebble leaves the service exited (ERROR) for ignore and for the
+        # shutdown actions, and in backoff for restart.
         status: pebble.ServiceStatus | str = (
-            pebble.ServiceStatus.ERROR if verb == 'ignore' else 'backoff'
+            'backoff' if verb == 'restart' else pebble.ServiceStatus.ERROR
         )
         log = [
             f'{_rfc3339_now()} INFO Most recent service output:',
@@ -1161,12 +1180,38 @@ class _MockPebbleClient(_TestingPebbleClient):
     def _on_failure_verb(on_failure: str) -> str:
         if on_failure in ('', 'restart'):
             return 'restart'
-        if on_failure == 'ignore':
-            return 'ignore'
+        # Pebble doesn't accept failure-shutdown for on-failure.
+        if on_failure in ('ignore', 'shutdown', 'success-shutdown'):
+            return on_failure
         raise NotImplementedError(
-            f'ServiceStart.FAILS does not model on-failure: {on_failure!r} yet; only '
-            "'' (Pebble's default, equivalent to 'restart') and 'ignore'."
+            f'on-failure: {on_failure!r} is not modelled; only '
+            "'' (Pebble's default, equivalent to 'restart'), 'restart', 'ignore', "
+            "'shutdown' and 'success-shutdown' are."
         )
+
+    @staticmethod
+    def _triggers_shutdown(service: pebble.Service, behaviour: ServiceBehaviour) -> bool:
+        """Whether a ``FAILS`` service's exit makes Pebble shut itself down.
+
+        Pebble applies the ``on-failure`` action to a service that exits while
+        it is starting. A command that can't be exec'd at all never exits, so
+        its policy never applies.
+        """
+        if behaviour.failure_mode is ServiceFailureMode.EXEC_ERROR:
+            return False
+        return service.on_failure in _SHUTDOWN_ACTIONS
+
+    def _shut_down(self) -> None:
+        """Make the container unreachable for the rest of the run.
+
+        When a service's ``on-failure`` action is a shutdown, Pebble shuts
+        itself down. The charm may get one more call in before the daemon is
+        gone; this models the usual outcome, where it doesn't: every later
+        Pebble call raises :class:`ops.pebble.ConnectionError`, and the output
+        state's container has ``can_connect=False``. Restarting the container
+        happens between hooks, so it isn't modelled.
+        """
+        object.__setattr__(self._container, 'can_connect', False)
 
     def add_layer(
         self,

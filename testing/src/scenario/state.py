@@ -1221,10 +1221,14 @@ class ServiceFailureMode(Enum):
     or the raw string ``'backoff'`` for ``on-failure: restart`` (Pebble's
     default). ``'backoff'`` has no :class:`ops.pebble.ServiceStatus` member,
     so ``ServiceInfo.current`` is a plain :class:`str` in that
-    case, exactly as with real Pebble. Only the ``ignore`` and ``restart``
-    (including unset, which defaults to ``restart``) policies are supported;
-    a service configured with any other ``on-failure`` value raises
-    ``NotImplementedError``."""
+    case, exactly as with real Pebble.
+
+    With ``on-failure: shutdown`` or ``on-failure: success-shutdown``, the
+    status is :attr:`ops.pebble.ServiceStatus.ERROR`, the start still raises
+    :class:`ops.pebble.ChangeError` (its text names the action), and then
+    Pebble shuts itself down: every later Pebble call in the run raises
+    :class:`ops.pebble.ConnectionError`, and the output state's container has
+    ``can_connect=False``."""
 
     EXEC_ERROR = 'exec-error'
     """The configured command can't be exec'd at all (for example, the

@@ -1342,7 +1342,8 @@ def test_service_fails_mixed_batch_leaves_other_service_active():
 
 
 def test_service_fails_unsupported_on_failure_policy_raises():
-    layer = _crash_layer(on_failure='shutdown')
+    # Pebble doesn't accept failure-shutdown for on-failure.
+    layer = _crash_layer(on_failure='failure-shutdown')
     container = Container(
         'foo',
         can_connect=True,
@@ -1607,3 +1608,116 @@ def test_service_fails_autostart_multiple_failures():
         assert workload.get_service('bravo').current == ops.pebble.ServiceStatus.ERROR
         assert workload.get_service('charlie').current == ops.pebble.ServiceStatus.ACTIVE
         assert workload.get_service('delta').current == ops.pebble.ServiceStatus.ERROR
+
+
+def _start_via(workload: ops.Container, op: str) -> None:
+    if op == 'start':
+        workload.start('svc')
+    elif op == 'restart':
+        workload.restart('svc')
+    elif op == 'replan':
+        workload.replan()
+    else:
+        workload.autostart()
+
+
+@pytest.mark.parametrize('op', ['start', 'restart', 'replan', 'autostart'])
+@pytest.mark.parametrize('on_failure', ['shutdown', 'success-shutdown'])
+def test_service_fails_with_shutdown_policy_makes_container_unreachable(op: str, on_failure: str):
+    """The start fails as usual, and then Pebble is gone for the rest of the run."""
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _crash_layer(on_failure=on_failure)},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError) as exc_info:
+            _start_via(workload, op)
+        assert (
+            f'service start attempt: exited quickly with code 1, will {on_failure}'
+            in exc_info.value.err
+        )
+        assert not workload.can_connect()
+        with pytest.raises(ops.pebble.ConnectionError):
+            workload.get_services()
+        state_out = mgr.run()
+    container_out = state_out.get_container('foo')
+    assert not container_out.can_connect
+    # Pebble leaves the service exited, not in backoff.
+    assert container_out.service_statuses['svc'] == ops.pebble.ServiceStatus.ERROR
+
+
+def test_service_fails_exec_error_with_shutdown_policy_leaves_container_reachable():
+    """A command that can't be exec'd never exits, so the policy never applies."""
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _crash_layer(on_failure='shutdown')},
+        service_behaviours={
+            ServiceBehaviour(
+                'svc',
+                start=ServiceStart.FAILS,
+                failure_mode=ServiceFailureMode.EXEC_ERROR,
+            )
+        },
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError):
+            workload.start('svc')
+        assert workload.get_service('svc').current == ops.pebble.ServiceStatus.INACTIVE
+        state_out = mgr.run()
+    assert state_out.get_container('foo').can_connect
+
+
+class CatchesChangeErrorCharm(ops.CharmBase):
+    def __init__(self, framework: ops.Framework):
+        super().__init__(framework)
+        framework.observe(self.on['foo'].pebble_ready, self._on_pebble_ready)
+        self.errors: list[type[Exception]] = []
+
+    def _on_pebble_ready(self, event: ops.PebbleReadyEvent):
+        try:
+            event.workload.start('svc')
+        except ops.pebble.ChangeError as e:
+            self.errors.append(type(e))
+        try:
+            event.workload.get_services()
+        except ops.pebble.ConnectionError as e:
+            self.errors.append(type(e))
+
+
+def test_service_shutdown_charm_catches_change_error_then_gets_connection_error():
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _crash_layer(on_failure='shutdown')},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(CatchesChangeErrorCharm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.pebble_ready(container), State(containers={container})) as mgr:
+        state_out = mgr.run()
+        assert mgr.charm.errors == [ops.pebble.ChangeError, ops.pebble.ConnectionError]
+    assert not state_out.get_container('foo').can_connect
+
+
+def test_service_shutdown_further_starts_raise_connection_error():
+    """A start that would itself fail reports the lost connection instead."""
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _crash_layer(on_failure='shutdown')},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ChangeError):
+            workload.start('svc')
+        with pytest.raises(ops.pebble.ConnectionError):
+            workload.start('svc')
+

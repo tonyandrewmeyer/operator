@@ -53,13 +53,11 @@
 #
 # The practical effect: **a bug report whose only evidence is "this CI run
 # failed" gets silence.** If you want a reproducer comment on such an
-# issue, add local reproduction steps to the issue body. On record
-# (2026-09-10) this shape has never occurred on production traffic —
-# 0 of 77 open issues across two production-configuration runs — and has
-# only ever been produced by one in-scope issue in this project's corpora,
-# `canonical/operator#1329`. (`#2484` had the same shape, but it is a
-# failure of operator's own test suite, which the extraction treats as out
-# of scope since 2026-10-01.)
+# issue, add local reproduction steps to the issue body. The shape is rare:
+# none of 77 open operator issues had it, and the only in-scope example
+# known is `canonical/operator#1329`. (`#2484` has the same shape, but it is
+# a failure of operator's own test suite, which the extraction treats as out
+# of scope.)
 name: add-reproducer
 
 on:
@@ -116,10 +114,9 @@ jobs:
       # (`uv run` below) and each issue's scratch project (`uv sync`, then the
       # extraction's `uv init` / `uv add` / `uv run`), whose environment
       # `seams/runner.py:scratch_command_env()` passes through unchanged.
-      # Unpinned, both took whatever `ubuntu-latest` provides (3.12 on 24.04),
-      # and the static check, the reproducer and the spike's measurement venvs
-      # agreed only by that accident
-      # (`spike-step-5/static-retry/RESULT.md` §40 point 2, §41).
+      # Unpinned, both would take whatever `ubuntu-latest` provides (3.12 on
+      # 24.04), and the static check and the reproducer would agree only by
+      # that accident.
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           python-version: '3.12'
@@ -129,11 +126,9 @@ jobs:
       # used only by the scratch-charm branches' first command, so the runner
       # seam installs it there (`seams/runner.py`'s
       # `INSTALL_CONCIERGE_COMMAND`) and prepares with the juju channel the
-      # issue's own version pin selects. Installing it here instead cost
-      # 14-21s on every one of thirty dispatches, on well under a tenth of
-      # which anything used it, and failed the whole job once on a snap store
-      # 408 before any harness code ran
-      # (`spike-step-5/seventh-dispatch/RESULT.md` §2.2, §5).
+      # issue's own version pin selects. Installing it here instead would
+      # cost 14-21s on every run, well under a tenth of which use it, and a
+      # snap store error would fail the whole job before any harness code ran.
       - name: Try to reproduce the issue
         working-directory: .github/add-reproducer/harness
         env:

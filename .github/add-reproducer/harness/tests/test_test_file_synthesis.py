@@ -1,17 +1,14 @@
-"""PLAN.md Approach §3/§4 delta (spike-step-5/2045/RESULT.md "PLAN deltas
-surfaced" §1): substrate:none extractions with no runnable pytest
+"""Test-file synthesis: substrate:none extractions with no runnable pytest
 invocation in commands[] get a synthesised test file instead of staying
 un-runnable.
 
-2026-07-30: synthesis itself became LLM-driven, behind the same seam
-`Extractor`/`SurfaceInferrer`/`Composer` already use, closing
-spike-step-5/composer-live/RESULT.md's Finding 6 -- the previous
-deterministic template had no real assertion (`ctx.run(...)` followed by a
+Synthesis is LLM-driven, behind the same seam
+`Extractor`/`SurfaceInferrer`/`Composer` already use. A deterministic
+template would have no real assertion (`ctx.run(...)` followed by a
 `# TODO`) and so could never fail regardless of whether the reported bug was
-real. `TestFileSynthesizer` now asks the model for a body encoding the
-specific `expected`/`observed` claim, validates it structurally, and falls
-back to a loud-failing stub (never the old always-passing one) on any
-failure.
+real. `TestFileSynthesizer` asks the model for a body encoding the specific
+`expected`/`observed` claim, validates it structurally, and falls back to a
+loud-failing stub (never an always-passing one) on any failure.
 """
 
 import json
@@ -117,9 +114,7 @@ def test_needs_test_file_true_when_pytest_target_never_written():
     # #2045's REAL extraction shape (fixtures/extractions/2045.json):
     # commands[] is non-empty and even names a pytest target, but the file
     # is only ever mentioned in a `#`-comment, never actually created by a
-    # heredoc -- discovered only once this session got real spike-step-5
-    # data; an earlier version of needs_test_file() only checked for an
-    # empty commands[] and would have missed this.
+    # heredoc. Checking only for an empty commands[] would miss this.
     hyp = _hypothesis(
         commands=[
             "uv init /tmp/repro-2045-cwd",
@@ -159,7 +154,7 @@ def test_is_pytest_invocation_false_for_setup_commands_mentioning_pytest(command
     assert not is_pytest_invocation(command)
 
 
-# --- _validate_synthesized_body: the Finding-6 gate -------------------------
+# --- _validate_synthesized_body: the no-assertion gate ----------------------
 
 
 def test_validate_accepts_a_real_assertion_body():
@@ -200,7 +195,7 @@ def test_validate_rejects_body_with_no_test_function():
 
 
 def test_validate_rejects_body_with_no_assertion():
-    # The exact Finding 6 shape: imports ops, defines a test, runs something,
+    # The always-passing shape: imports ops, defines a test, runs something,
     # but never actually asserts anything -- would pass regardless of
     # whether the reported bug is real.
     body = "import ops\nfrom ops import testing\n\n\ndef test_x():\n    ctx = testing.Context\n"
@@ -275,7 +270,7 @@ def test_fixture_llm_no_recording_falls_back():
         {"wrong_key": "x"},
         {"body": "def test_x(:\n"},  # syntax error
         {"body": "def test_x():\n    assert False\n"},  # no ops import
-        {"body": "import ops\n\n\ndef test_x():\n    pass\n"},  # no assertion -- Finding 6's exact shape
+        {"body": "import ops\n\n\ndef test_x():\n    pass\n"},  # no assertion -- the always-passing shape
         {"body": "import ops\n\n\ndef test_x():\n    assert True  # TODO\n"},
         "not even a dict",
         None,
@@ -344,10 +339,9 @@ def test_write_synthesized_test_file_if_needed_writes_file_and_appends_command(t
 
 
 def test_write_synthesized_test_file_if_needed_carries_test_file_onto_hypothesis(tmp_path):
-    # spike-step-5/composer-live/RESULT.md Finding 4: the composer needs the
-    # synthesized file's body, not just its path in commands[]. Synthesis
-    # must attach the actual `TestFile` object to the returned hypothesis,
-    # not just write it to disk and forget it.
+    # The composer needs the synthesized file's body, not just its path in
+    # commands[]. Synthesis must attach the actual `TestFile` object to the
+    # returned hypothesis, not just write it to disk and forget it.
     hyp = _hypothesis(commands=[])
     context = {"workdir": str(tmp_path)}
     updated = write_synthesized_test_file_if_needed(hyp, _issue(), FixtureLLM(FIXTURES), context)
@@ -370,13 +364,11 @@ def test_write_synthesized_test_file_if_needed_noop_when_not_needed_never_calls_
 
 
 def test_write_synthesized_test_file_if_needed_keeps_uv_add_pytest_setup_line(tmp_path):
-    # spike-step-5/synthesis-live/RESULT.md: a real live end-to-end run found
-    # the old `"pytest" not in c` filter dropped `uv add 'ops[testing]'
+    # A plain `"pytest" not in c` filter would drop `uv add 'ops[testing]'
     # pytest` -- a legitimate setup command, not the broken invocation this
     # filter exists to remove -- silently stripping pytest out of the venv.
-    # `uv add 'ops[testing]' pytest` is the corpus-v2-standard modern
-    # extraction shape (uv init -> uv add -> heredoc -> pytest) and must
-    # survive this filter.
+    # `uv add 'ops[testing]' pytest` is the standard modern extraction shape
+    # (uv init -> uv add -> heredoc -> pytest) and must survive this filter.
     hyp = _hypothesis(commands=["uv init --bare .", "uv add 'ops[testing]' pytest"])
     context = {"workdir": str(tmp_path)}
     updated = write_synthesized_test_file_if_needed(hyp, _issue(), FixtureLLM(FIXTURES), context)
@@ -422,9 +414,8 @@ def test_write_synthesized_test_file_if_needed_falls_back_when_llm_unusable(tmp_
 def test_run_hypothesis_2045_writes_file_before_dispatching_to_seam(tmp_path):
     # End-to-end through run_hypothesis(): #2045's real extraction shape
     # (fixtures/extractions/2045.json, fixtures/issues/2045.json,
-    # fixtures/runs/2045.json -- see spike-step-5/2045/RESULT.md, the real
-    # 2026-07-24 hand-walk this delta is drawn from) has commands[] that
-    # names a pytest target but never writes it (see
+    # fixtures/runs/2045.json, from a real hand-walk of the issue) has
+    # commands[] that names a pytest target but never writes it (see
     # test_needs_test_file_true_when_pytest_target_never_written above),
     # so the "none" branch must still synthesise and write a test file
     # before FixtureRunnerSeam.run() replays the recorded output. Confirms
@@ -433,7 +424,7 @@ def test_run_hypothesis_2045_writes_file_before_dispatching_to_seam(tmp_path):
 
     issue = Issue.from_dict(json.loads((FIXTURES / "issues" / "2045.json").read_text()))
     hyp = Hypothesis.from_dict(2045, json.loads((FIXTURES / "extractions" / "2045.json").read_text()))
-    assert needs_test_file(hyp)  # the delta this test exists to cover
+    assert needs_test_file(hyp)  # the case this test exists to cover
     context = {"workdir": str(tmp_path)}
     result = runner_stage.run_hypothesis(hyp, issue, None, FixtureRunnerSeam(FIXTURES), FixtureLLM(FIXTURES), context)
     assert not result.skipped_stale
@@ -443,12 +434,11 @@ def test_run_hypothesis_2045_writes_file_before_dispatching_to_seam(tmp_path):
 
 
 def test_synthesis_builds_an_environment_when_the_extraction_supplied_none(tmp_path):
-    """A live extraction can return `commands: []` (the real 2026-08-18
-    #2639 case). This stage assumed the `uv init` -> `uv add` prologue was
-    already there -- true of the corpus-v2 shape, not of that one. Without
-    it, `uv run pytest` finds no project in the scratch dir, walks up to the
-    harness's own pyproject, and the synthesised test dies with
-    ModuleNotFoundError: No module named 'ops'."""
+    """A live extraction can return `commands: []` (a real #2639 case). The
+    `uv init` -> `uv add` prologue is not always there, so this stage adds
+    it. Without it, `uv run pytest` finds no project in the scratch dir,
+    walks up to the harness's own pyproject, and the synthesised test dies
+    with ModuleNotFoundError: No module named 'ops'."""
     updated = write_synthesized_test_file_if_needed(
         _hypothesis(commands=[]), _issue(), FixtureLLM(FIXTURES), {"workdir": str(tmp_path)}
     )
@@ -460,7 +450,7 @@ def test_synthesis_builds_an_environment_when_the_extraction_supplied_none(tmp_p
 
 
 def test_synthesis_does_not_duplicate_an_environment_the_extraction_already_built(tmp_path):
-    """The corpus-v2 shape already carries its own prologue -- adding a
+    """The usual extraction shape already carries its own prologue -- adding a
     second one would be noise, and `uv init` in an initialised project
     fails."""
     hyp = _hypothesis(commands=["uv init", "uv add 'ops[testing]' pytest"])

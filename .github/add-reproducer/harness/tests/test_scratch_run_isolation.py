@@ -1,14 +1,14 @@
 """Scratch runs must not collide with, or read, a previous run's application.
 
-Every `k8s-scratch`/`lxd-scratch` run used to deploy under the fixed name
-`repro` into the same juju model, with no teardown. On a reused substrate the
-second run to reach `deploy` died with `ERROR cannot add application "repro":
-application already exists`, and the previous run's unit was left `active`
-with a signal-bearing status message that the `status` step would read as
-evidence about this run's bug. `spike-step-5/gate-substrate/RESULT.md` §6.
+If every `k8s-scratch`/`lxd-scratch` run deployed under the fixed name
+`repro` into the same juju model, with no teardown, then on a reused substrate
+the second run to reach `deploy` would die with `ERROR cannot add application
+"repro": application already exists`, and the previous run's unit would be
+left `active` with a signal-bearing status message that the `status` step
+would read as evidence about this run's bug.
 
-No fixture run could reach this: it needs two scratch runs to reach `deploy`
-on one substrate, which had never happened before 2026-08-21.
+No fixture run can reach this: it needs two scratch runs to reach `deploy`
+on one substrate.
 """
 
 from __future__ import annotations
@@ -57,7 +57,8 @@ def test_application_name_is_per_issue():
 
 def test_every_step_addresses_the_same_application():
     """A name used by `deploy` but not by `status` would read a *different*
-    application -- which is the failure this fix exists to prevent, inverted."""
+    application -- which is the failure the per-issue name exists to prevent,
+    inverted."""
     commands = " ".join(p.command for p in _plan(2639))
 
     assert "repro-i2639" in commands
@@ -69,10 +70,10 @@ def test_every_step_addresses_the_same_application():
 def test_no_step_hardcodes_a_unit_index():
     """juju continues an application's unit sequence across
     remove-and-redeploy, so `<app>/0` is only right on a first deploy. The
-    `cleanup` step above makes redeploy the normal case; on 2026-08-21 the
-    live unit was `repro-i2639/4` while `wait` sat on `/0` until it timed
-    out, and reported that as an infrastructure failure about a charm that
-    had deployed perfectly well."""
+    `cleanup` step above makes redeploy the normal case, so a hardcoded `/0`
+    can leave `wait` sitting on `/0` while the live unit is `repro-i2639/4`,
+    until it times out and reports an infrastructure failure about a charm
+    that had deployed perfectly well."""
     for planned in _plan(2639):
         assert "repro-i2639/0" not in planned.command, planned.step
 
@@ -89,9 +90,9 @@ def test_no_step_hardcodes_a_unit_index():
 def test_every_juju_command_names_its_controller_and_model():
     """`concierge prepare` switches the active controller. A run whose
     extraction came back `substrate: lxd` bootstraps `concierge-lxd` and makes
-    it current, so the next run -- however clearly `substrate: k8s` -- packed a
-    k8s charm and deployed it to LXD. Seen on 2026-08-21, where a `k8s-scratch`
-    run's `juju status` reported `Controller: concierge-lxd`."""
+    it current, so without an explicit `-m` the next run -- however clearly
+    `substrate: k8s` -- would pack a k8s charm and deploy it to LXD, with its
+    `juju status` reporting `Controller: concierge-lxd`."""
     for planned in _plan(2639):
         for fragment in planned.command.split(";"):
             if "juju " not in fragment:

@@ -1,10 +1,10 @@
-"""Two fake-hook-tool rules from §29's control answers, which the substrate
-override now runs (`spike-step-5/static-retry/RESULT.md` §31, §32):
+"""Two fake-hook-tool rules from live control answers, which the substrate
+override runs:
 
-- a fake hook tool written with no `#!` line (c-2: `path.write_text(script)`,
+- a fake hook tool written with no `#!` line (`path.write_text(script)`,
   `OSError: [Errno 8] Exec format error: 'relation-ids'`);
-- an attribute the installed `CharmMeta` does not have (c-7:
-  `CharmMeta.from_yaml_file`; §27's 6-6: `CharmMeta.from_dict`).
+- an attribute the installed `CharmMeta` does not have
+  (`CharmMeta.from_yaml_file`, `CharmMeta.from_dict`).
 """
 
 from __future__ import annotations

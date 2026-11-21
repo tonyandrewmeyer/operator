@@ -1,9 +1,8 @@
-"""Hypothesis extraction (PLAN.md Approach §3).
+"""Hypothesis extraction.
 
 One LLM call per in-scope issue, structured output validated against the
-`moving_parts` schema (extended with the `ci_run_url` / `symbol_anchor`
-delta from `spike-step-4/FINDINGS.md`). Invalid output falls back to
-stay-silent, per Approach §3.
+`moving_parts` schema (including `ci_run_url` and `symbol_anchor`).
+Invalid output falls back to stay-silent.
 """
 
 from __future__ import annotations
@@ -22,8 +21,7 @@ from seams.llm import LLMSeam
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
 SUBSTRATES = {"lxd", "k8s", "none"}
 
-# Bounds prompt size on long comment threads (PLAN.md Approach §3 delta,
-# `spike-step-5/2185/RESULT.md`). Configurable via
+# Bounds prompt size on long comment threads (`#2185`). Configurable via
 # `Extractor(max_comment_chars=...)`; this default comfortably fits a
 # handful of ordinary review-style comments (the real #2045 follow-up is
 # ~350 characters) while capping the pathological long-thread case.
@@ -31,7 +29,7 @@ DEFAULT_MAX_COMMENT_CHARS = 4000
 
 _SCHEMA_INSTRUCTIONS = """\
 Given the issue below, extract a reproduction hypothesis as JSON matching
-exactly this shape (PLAN.md Approach §3):
+exactly this shape:
 
 {
   "in_scope": bool,
@@ -314,8 +312,8 @@ rather than merely adding detail. When that happens, extract the current
 class ExtractionInvalid(ValueError):
     """Raised when the LLM's output doesn't match the extraction schema.
 
-    Approach §3: "Validate against the schema; on invalid output, fall
-    back to stay-silent."
+    Output is validated against the schema; invalid output falls back to
+    stay-silent.
     """
 
 
@@ -331,12 +329,11 @@ def validate(raw: dict) -> None:
     _require(raw, "moving_parts", (dict,))
     _require(raw, "commands", (list,))
     # `expected`/`observed` describe a defect, so they only mean anything for
-    # an in-scope extraction. Requiring them unconditionally turned two clean
-    # drops into `ExtractionInvalid` on the corpus-v2 run (#1449, #1492: the
-    # model returned null for both, reasonably, having just judged the issue
-    # not to be a bug). Same shape as the `substrate` defect in
-    # `spike-step-5/live-llm/RESULT.md` Finding 1: a field demanded of every
-    # extraction that is only defined for some of them. The outcome was
+    # an in-scope extraction. Requiring them unconditionally turns clean
+    # drops into `ExtractionInvalid` (#1449, #1492: the model returns null
+    # for both, reasonably, having just judged the issue not to be a bug).
+    # Same shape as `substrate` below: a field that is only defined for some
+    # extractions must not be demanded of every one. The outcome was
     # stay-silent either way, but a drop recorded as a validation failure
     # pollutes the metrics and would read as an error in production logs.
     if raw["in_scope"]:
@@ -357,15 +354,13 @@ def validate(raw: dict) -> None:
     if raw["in_scope"]:
         # Required, and never null, for anything that might reach a runner.
         # `choose_branch` dispatches the provisioning decision off this field,
-        # so an absent value used to fall through to the most expensive branch
-        # (`k8s-scratch`) by accident -- see `spike-step-5/live-llm/RESULT.md`
-        # Finding 1, where a live model returned null for three host-only
-        # hypotheses and for #2639, the one hypothesis that has ever
-        # reproduced. Guessing either way is wrong: "none" strands a k8s bug
-        # on the host and reports a false non-reproduction, while defaulting
-        # to k8s buys a cluster for a unit test. Approach §3's stay-silent
-        # fallback is the honest answer, and matches the project's
-        # bias-toward-false-drop (Steps §1).
+        # so an absent value would fall through to the most expensive branch
+        # (`k8s-scratch`) by accident. A model can return null for host-only
+        # hypotheses and for k8s ones like #2639 alike. Guessing either way is
+        # wrong: "none" strands a k8s bug on the host and reports a false
+        # non-reproduction, while defaulting to k8s buys a cluster for a unit
+        # test. The stay-silent fallback is the honest answer, and matches the
+        # project's bias toward a false drop over a false comment.
         if substrate not in SUBSTRATES:
             raise ExtractionInvalid(
                 f"moving_parts.substrate must be one of {sorted(SUBSTRATES)} when "
@@ -381,8 +376,7 @@ def _format_comments(issue: Issue, max_chars: int) -> str:
     """Render `issue.comments` for the extraction prompt.
 
     Chronological order, each attributed by author and flagged
-    reporter-vs-other (PLAN.md Approach §3 delta, `spike-step-5/2185/
-    RESULT.md`'s reporter-redirect case vs `spike-step-5/2045/RESULT.md`'s
+    reporter-vs-other (`#2185`'s reporter-redirect case vs `#2045`'s
     third-party-follow-up case -- both matter, differently, so the label is
     surfaced rather than left for the model to infer from prose alone).
 
@@ -454,7 +448,7 @@ class Extractor:
         The broken shapes that check catches would otherwise reach the runner
         and be kept silent by the classifier's rung 1a or 1c, so the re-ask
         costs nothing in false comments; it is the one chance that issue has
-        of a test that runs (`spike-step-5/static-retry/RESULT.md`). Bounded
+        of a test that runs. Bounded
         at one, like `SurfaceInferrer.infer()`'s re-ask, and the second
         answer is kept whatever its check says: a third attempt is a
         sampling loop, and the rungs already keep a broken test silent.
@@ -485,7 +479,7 @@ class Extractor:
         raw = self.llm.complete_json(purpose="extraction", prompt=prompt, context=context)
         validate(raw)
         hypothesis = Hypothesis.from_dict(issue.number, raw)
-        # Deterministic pre-extraction (Approach §3 delta): ci_run_url is
+        # Deterministic pre-extraction: ci_run_url is
         # regex-extractable at filter time, not an LLM output.
         hypothesis.moving_parts.ci_run_url = extract_ci_run_url(issue.body)
         return hypothesis

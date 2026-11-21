@@ -1,12 +1,11 @@
-"""A claim about the working directory whose cwd side is not the cwd
-(`spike-step-5/static-retry/RESULT.md` §42).
+"""A claim about the working directory whose cwd side is not the cwd.
 
-§38 to §41 each added a rule for the previous round's false `#2045` final, and
-§41's checks the side a cwd is compared *with*. §41's own false final
-(2045d-4) got through because the side presented as the cwd was not one: the
-handler stored `str(ops.__path__[0])` under the key `'cwd'`, so the file read
-no working directory at all and failed on 3.8.3, `main` and the fix branch
-alike. `_cwd_side_not_a_cwd_read()` closes that from the cwd side: a value
+The other cwd rules each catch a shape of false `#2045` final answer, and
+`_cwd_compared_with_unsourced_value()` checks the side a cwd is compared
+*with*. A final can get past that when the side presented as the cwd is not
+one: the handler below stores `str(ops.__path__[0])` under the key `'cwd'`,
+so the file reads no working directory at all and fails on 3.8.3, `main` and
+the fix branch alike. `_cwd_side_not_a_cwd_read()` closes that from the cwd side: a value
 presented as the working directory (by its name, or by the test's name when
 the other side is the handler's charm directory) must come from a cwd read
 made during the run.
@@ -42,7 +41,7 @@ def _rule(source: str) -> list[str]:
     return _cwd_side_not_a_cwd_read(ast.parse(source))
 
 
-# §41 2045d-4: `captured['cwd'] = str(ops.__path__[0])`; saved final, a false comment.
+# `captured['cwd'] = str(ops.__path__[0])`; a saved `#2045` final, a false comment.
 _FALSE_D04 = '''\
 import ops
 from ops import testing
@@ -64,7 +63,7 @@ def test_charm_dir_matches_cwd():
     assert captured['charm_dir'] == captured['cwd']
 '''
 
-# §41 2045d-0: a valid final.
+# A valid `#2045` final.
 _VALID_D00 = '''\
 import os
 import ops
@@ -87,7 +86,7 @@ def test_charm_root_is_cwd():
     assert captured["cwd"] == captured["charm_dir"]
 '''
 
-# §41 2045d-1: a valid final.
+# A valid `#2045` final.
 _VALID_D01 = '''\
 import os
 
@@ -111,7 +110,7 @@ def test_charm_dir_is_cwd():
     assert captured['cwd'] == captured['charm_dir'], f"Expected {captured['charm_dir']}, got {captured['cwd']}"
 '''
 
-# §41 2045d-2: a valid final.
+# A valid `#2045` final.
 _VALID_D02 = '''\
 import os
 import pytest
@@ -132,7 +131,7 @@ def test_cwd_is_charm_root(ctx):
         assert os.getcwd() == str(mgr.charm.charm_dir)
 '''
 
-# §41 2045d-6: a valid final.
+# A valid `#2045` final.
 _VALID_D06 = '''\
 import os
 import ops
@@ -147,7 +146,7 @@ def test_cwd_is_charm_dir():
         assert os.getcwd() == str(mgr.charm.charm_dir)
 '''
 
-# §41 2045d-7: a valid final.
+# A valid `#2045` final.
 _VALID_D07 = '''\
 import os
 import ops
@@ -170,7 +169,7 @@ def test_getcwd_is_charm_root():
     assert captured['cwd'] == captured['charm_dir']
 '''
 
-# §41 2045d-10: a valid final.
+# A valid `#2045` final.
 _VALID_D10 = '''\
 import os
 import ops
@@ -193,7 +192,7 @@ def test_cwd_is_charm_dir():
     assert captured['cwd'] == captured['charm_dir']
 '''
 
-# §41 2045d-11: a valid final.
+# A valid `#2045` final.
 _VALID_D11 = '''\
 import os
 import ops
@@ -218,7 +217,7 @@ def test_cwd_is_charm_root():
     assert captured['cwd'] == captured['charm_dir'], f"Expected {captured['charm_dir']}, got {captured['cwd']}"
 '''
 
-# §41 2045d-12: a valid final.
+# A valid `#2045` final.
 _VALID_D12 = '''\
 import os
 import pytest
@@ -242,7 +241,7 @@ def test_charm_dir_is_cwd():
     assert captured['charm_dir'] == captured['cwd']
 '''
 
-# §41 2045d-13: a valid final.
+# A valid `#2045` final.
 _VALID_D13 = '''\
 import os
 import ops
@@ -266,7 +265,7 @@ def test_cwd_is_charm_dir():
     assert captured['cwd'] == captured['charm_dir']
 '''
 
-# §41 2045d-14: a valid final.
+# A valid `#2045` final.
 _VALID_D14 = '''\
 import os
 import ops
@@ -335,8 +334,8 @@ def test_five_false_finals_rejected(source: str, rejected_by: str):
 
 
 def test_41_false_final_under_this_rule():
-    # Only this rule sees it: the file reads no cwd, so §41's rule (which
-    # finds the cwd by its value) has nothing to check.
+    # Only this rule sees it: the file reads no cwd, so the other-side rule
+    # (which finds the cwd by its value) has nothing to check.
     assert _cwd_compared_with_unsourced_value(ast.parse(_FALSE_D04)) == []
     (reason,) = _rule(_FALSE_D04)
     assert check(_FALSE_D04).reasons == [reason]
@@ -561,7 +560,7 @@ def test_cwd_is_charm_dir():
 
 def test_expected_cwd_on_the_other_side_left_to_the_other_rule():
     # One side reads the cwd, so it is the claim's cwd; `expected_cwd` is
-    # what it is compared with, which §41's rule judges.
+    # what it is compared with, which the other-side rule judges.
     source = """\
 import os
 import ops

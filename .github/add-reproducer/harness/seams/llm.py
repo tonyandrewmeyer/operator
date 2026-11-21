@@ -1,14 +1,13 @@
-"""The LLM seam (PLAN.md Approach §3 extraction call + surface-inference pass).
+"""The LLM seam (the extraction call, surface inference and the other passes).
 
 Two implementations:
 
 - `LiveOpenRouterLLM` — calls OpenRouter with a key from `OPENROUTER_API_KEY`
-  or `~/.config/explain-my-model.key` (PLAN.md Approach §8). Not exercised by
-  the test suite (no network, no key there), but no longer untested overall:
-  first live calls landed 2026-07-27, see `spike-step-5/live-llm/RESULT.md`.
-  Real code path for the VM dry-run (Steps §5) and GHA rollout (Steps §6).
-- `FixtureLLM` — replays recorded step-2 extraction / surface-inference
-  outputs from `fixtures/`. What the pipeline actually runs against here.
+  or `~/.config/ai-reproducer.key`. Not exercised by the test suite (no
+  network, no key there); it is the code path the workflow and live local
+  runs use.
+- `FixtureLLM` — replays recorded extraction / surface-inference outputs
+  from `fixtures/`. What the pipeline actually runs against here.
 """
 
 from __future__ import annotations
@@ -21,20 +20,17 @@ import urllib.request
 from pathlib import Path
 from typing import Protocol
 
-DEFAULT_MODEL = "deepseek/deepseek-chat"  # PLAN.md Approach §8: OPENROUTER_MODEL default
+DEFAULT_MODEL = "deepseek/deepseek-chat"  # used when OPENROUTER_MODEL is unset
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Transient statuses worth retrying, same set the explain-my-model CLI uses
-# against this provider. 401/402/404 are not here: a bad key or an exhausted
+# Transient statuses worth retrying. 401/402/404 are not here: a bad key or an exhausted
 # balance will not fix itself.
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 DEFAULT_MAX_ATTEMPTS = 5
 BACKOFF_BASE_S = 2.0
 
-# This project's own key. The env-then-keyfile resolution order follows the
-# explain-my-model CLI (`cli/explain_my_model_cli/llm.py`), but the key is
-# separate: that project's key is revoked, and a per-project key keeps this
-# one's spend attributable once Steps §6 starts calling OpenRouter from CI.
+# This project's own key, looked up after the env var. A per-project key
+# keeps this tool's spend attributable when it calls OpenRouter from CI.
 KEY_FILE = Path.home() / ".config" / "ai-reproducer.key"
 
 # purpose -> fixtures subdirectory
@@ -43,8 +39,8 @@ _FIXTURE_DIRS = {
     "surface_inference": "surface",
     "composition": "compositions",
     "test_file_synthesis": "test_file_synthesis",
-    # PLAN.md Approach §3 delta (`inscope_second_pass.py`): fires once per
-    # first-pass drop, keyed by the same issue_number as "extraction".
+    # `inscope_second_pass.py`: fires once per first-pass drop, keyed by the
+    # same issue_number as "extraction".
     "inscope_second_pass": "inscope_second_pass",
 }
 
@@ -85,9 +81,7 @@ def _resolve_api_key(explicit: str | None = None) -> str:
 class LiveOpenRouterLLM:
     """Real OpenRouter implementation.
 
-    Not covered by the test suite (which has neither network nor key), but
-    exercised for real against the step-5 corpus on 2026-07-27 — see
-    `spike-step-5/live-llm/RESULT.md`.
+    Not covered by the test suite (which has neither network nor key).
     """
 
     def __init__(
@@ -108,20 +102,16 @@ class LiveOpenRouterLLM:
         # that would identify a bad one are exactly the per-call ones:
         # OpenRouter serves `deepseek/deepseek-chat` from several providers,
         # routes per account, and reports which it used in the response's own
-        # `provider`/`model`. `spike-step-5/comments-check/RESULT.md` §4 could
-        # not separate provider variance from the Actions key precisely
-        # because no dispatch recorded either.
+        # `provider`/`model`. Without them, provider variance cannot be told
+        # apart from anything else that differs between two runs.
         self.calls: list[dict] = []
 
     def _post(self, body: bytes) -> dict:
         """POST with bounded retry on the transient codes.
 
-        Added after a 60-issue corpus run died on an unhandled `HTTP 429`
-        partway through (`spike-step-5/corpus-v2/RESULT.md`). Any run over
-        more than a handful of issues will hit rate limiting, so this matters
-        for Steps §6's GHA rollout, not just for local calibration. Mirrors
-        the retry policy the explain-my-model CLI already uses against the
-        same provider (`cli/explain_my_model_cli/llm.py`).
+        A corpus run over more than a handful of issues will hit rate
+        limiting (`HTTP 429`) partway through, and an unhandled one kills the
+        whole run; a CI run can hit it too.
         """
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
@@ -180,7 +170,7 @@ class LiveOpenRouterLLM:
         )
         content = payload["choices"][0]["message"]["content"]
         # Kept so calibration runs can record exactly what the model said,
-        # including when it fails to parse (`spike-step-5/live-llm/`). Both
+        # including when it fails to parse. Both
         # still describe the last call only; `self.calls` is the per-call
         # record.
         self.last_raw_content = content

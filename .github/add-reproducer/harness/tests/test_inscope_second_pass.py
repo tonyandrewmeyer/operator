@@ -1,5 +1,4 @@
-"""Tests for the second `in_scope` classification pass (PLAN.md Approach §3
-delta, `spike-step-5/inscope-instrument/RESULT.md`).
+"""Tests for the second `in_scope` classification pass.
 
 Fixture-driven, same pattern as `test_extraction.py`: no network, no key.
 `fixtures/issues/9002.json` and its paired `fixtures/extractions/9002.json` /

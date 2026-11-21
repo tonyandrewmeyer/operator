@@ -1,14 +1,13 @@
-"""Two small things that made a real run's failure hard to read.
+"""Two small things that keep a real run's failure readable.
 
-1. Rung 0's reason quoted the *first* line of a failed command's output. juju
-   writes progress to stderr alongside errors, so a collided `juju deploy`
-   reported `'deploy' failed: Located local charm "i2639-pebble-notice",
-   revision 0` -- which reads as though nothing went wrong -- while the actual
-   `ERROR cannot add application ...` sat three lines below.
-2. `CommandResult` carried no duration, so criterion 7's 418s warm run could
-   not be attributed across pack/deploy/wait.
-
-`spike-step-5/gate-substrate/RESULT.md` §6, §8.
+1. Rung 0's reason quotes the first line of a failed command's output that
+   looks like an error. juju writes progress to stderr alongside errors, so
+   quoting the *first* line of a collided `juju deploy` would report
+   `'deploy' failed: Located local charm "i2639-pebble-notice", revision 0`
+   -- which reads as though nothing went wrong -- while the actual
+   `ERROR cannot add application ...` sits three lines below.
+2. `CommandResult` carries a duration, so an end-to-end run time can be
+   attributed across pack/deploy/wait.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ def _hypothesis() -> Hypothesis:
     )
 
 
-# The exact stderr of the collided deploy, 2026-08-21.
+# The exact stderr of a collided deploy.
 _COLLIDED_DEPLOY_STDERR = (
     'Located local charm "i2639-pebble-notice", revision 0\n'
     'Deploying "repro" from local charm "i2639-pebble-notice", revision 0 on ubuntu@24.04/stable\n'
@@ -129,12 +128,12 @@ def test_replayed_fixtures_have_no_elapsed_time():
 
 
 def test_wait_gets_a_budget_longer_than_the_timeout_inside_its_own_command():
-    """`wait` polls for up to 15 minutes but had no entry in
-    `STEP_TIMEOUTS_S`, so the flat 5-minute default killed the subprocess at 5
-    and juju's own timeout was unreachable. A merely-slow unit came back as
-    `'wait' failed (timed out): timed out after 300s` on a real substrate
-    (2026-08-21). Any step whose command embeds a timeout needs an outer
-    budget larger than the inner one, or the inner one is dead code."""
+    """`wait` polls for up to 15 minutes, so it needs its own entry in
+    `STEP_TIMEOUTS_S`: under the flat 5-minute default the subprocess is
+    killed at 5 and juju's own timeout is unreachable, and a merely-slow unit
+    comes back as `'wait' failed (timed out): timed out after 300s`. Any step
+    whose command embeds a timeout needs an outer budget larger than the
+    inner one, or the inner one is dead code."""
     from seams.runner import STEP_TIMEOUTS_S, UNIT_READY_TIMEOUT_S, build_plan
 
     plan = build_plan(branch="k8s-scratch", hypothesis=_hypothesis(), surface=None, context={"charm_dir": "/w/c"})

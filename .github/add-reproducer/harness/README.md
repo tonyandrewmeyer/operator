@@ -136,7 +136,7 @@ workflow use.
 - `runs/` - captured command output, used to pin the classifier's rungs.
 - `symbols.json` - the lookup table the stale gate's symbol trigger uses.
 - `static_test_check/` - 33 saved `#2045` extractions (four prompt versions
-  of 8, plus one live dispatch), the calibration corpus for
+  of 8, plus one from a live workflow run), the calibration corpus for
   `static_test_check.py`; the expected verdicts are in
   `tests/test_static_test_check.py`. `2709.json` and `2709-hooktool.json`
   are the saved `#2709` tests (`ops.testing`, and fake hook tools), with
@@ -168,7 +168,7 @@ under `../scratch-charm/charm/examples/` are ignored there, because their three
 
 That reports 378 passed and 58 skipped here, and the skips are the expected
 result rather than a broken setup. Those tests assert against recorded output
-from the spike runs that produced the pipeline (the `in_scope` retunes, the
+from the runs that produced the pipeline (the `in_scope` retunes, the
 model comparison, the four live-LLM calibration runs, the comments A/B, the
 split-heredoc corpus), and the run directories live in a private staging tree
 rather than here. Every one of them names the directory it wanted in its skip
@@ -278,8 +278,6 @@ one version rather than a silent claim about all of them.
 >
 > The practical effect: **a bug report whose only evidence is "this CI run
 > failed" gets silence.** If you want a reproducer comment on such an
-> issue, add local reproduction steps to the issue body. On record
-> (2026-09-10) this shape has never occurred on production traffic —
-> 0 of 77 open issues across two production-configuration runs — and has
-> only ever been produced by two issues in this project's corpora,
+> issue, add local reproduction steps to the issue body. The shape is rare:
+> none of 77 open operator issues had it, and the only known examples are
 > `canonical/operator#1329` and `#2484`.

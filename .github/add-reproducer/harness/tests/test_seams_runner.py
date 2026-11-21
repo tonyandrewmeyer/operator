@@ -1,10 +1,9 @@
-"""Tests for the reproduction runner seam (PLAN.md Approach §4), focused on
-the `lxd-scratch` branch added to close a real pipeline crash: `choose_branch()`
-could return `"lxd-scratch"` (see the real #2107 corpus extraction,
-`substrate: "lxd"`, in fixtures/extractions/2107.json) while `SubprocessRunnerSeam.run()`
-only dispatched `"none"`/`"k8s-scratch"`/`"k8s-clone"`, so any substrate:lxd
-hypothesis hit `raise ValueError(f"unknown branch {branch!r}")` and crashed the
-pipeline.
+"""Tests for the reproduction runner seam, focused on the `lxd-scratch`
+branch: `choose_branch()` can return `"lxd-scratch"` (see the real #2107 corpus
+extraction, `substrate: "lxd"`, in fixtures/extractions/2107.json), and a
+`SubprocessRunnerSeam.run()` that only dispatched
+`"none"`/`"k8s-scratch"`/`"k8s-clone"` would send any substrate:lxd hypothesis
+to `raise ValueError(f"unknown branch {branch!r}")` and crash the pipeline.
 
 None of this exercises real juju/concierge/charmcraft -- `subprocess.run` is
 monkeypatched throughout. What's pinned here is the *decisions*: the exact
@@ -55,9 +54,9 @@ def _hypothesis(substrate: str, *, juju_version: str | None = None, **mp_kwargs)
 
 
 # The inline substitution every unit-taking step uses. Hardcoding `<app>/0`
-# held only for an application's first deploy -- juju continues the unit
-# sequence across remove-and-redeploy, so `wait` sat on `repro-i2639/0` while
-# the live unit was `repro-i2639/4` (2026-08-21).
+# holds only for an application's first deploy -- juju continues the unit
+# sequence across remove-and-redeploy, so `wait` can sit on `repro-i2639/0`
+# while the live unit is `repro-i2639/4`.
 _UNIT = (
     "$(juju status -m concierge-lxd:testing --format=json | python3 -c "
     "'import json,sys;u=json.load(sys.stdin)[\"applications\"][\"repro-i9999\"][\"units\"];"
@@ -66,12 +65,12 @@ _UNIT = (
 
 
 def _fake_run(calls: list[str], *, returncode: int = 0, stdout: str = "ok", stderr: str = ""):
-    """Records every `["bash", "-c", command]` call into `calls`, same as
-    before. `_run_scratch_branch` now also shells out to a bare `["juju",
-    "version"]` (`_observed_juju_version()`) after the sequence itself, which
-    doesn't match that shape -- answered here with a fixed version string
-    rather than appended to `calls`, so every existing exact-sequence
-    assertion in this file keeps meaning what it always meant."""
+    """Records every `["bash", "-c", command]` call into `calls`.
+    `_run_scratch_branch` also shells out to a bare `["juju", "version"]`
+    (`_observed_juju_version()`) after the sequence itself, which doesn't
+    match that shape -- answered here with a fixed version string rather than
+    appended to `calls`, so the exact-sequence assertions in this file see
+    only the sequence."""
 
     def fake(args, **kwargs):
         if args[:2] == ["bash", "-c"]:
@@ -92,7 +91,7 @@ def test_as_user_in_container_command_with_container_unchanged():
         unit="repro/0", container="workload", user="_daemon_", juju_track="4", pebble_command="pebble notify x"
     )
     # No `--` on the container path -- juju forwards it into the container's
-    # shell (measured live, 2026-08-18); see the dedicated test below.
+    # shell; see the dedicated test below.
     assert cmd.startswith('juju ssh --container workload repro/0 "')
     assert "/charm/container/pebble.socket" in cmd
 
@@ -109,9 +108,8 @@ def test_as_user_in_container_command_without_container_for_machine_units():
 
 
 def test_as_user_in_container_command_juju_3_6_uses_new_socket_path():
-    """`spike-step-5/wallclock-substrate/RESULT.md` §6: juju 3.6.27 measured
-    using the same `/charm/container/` path as juju 4, not the legacy one
-    the old `{4: NEW}` map would have sent it to."""
+    """juju 3.6.27 uses the same `/charm/container/` path as juju 4, not the
+    legacy one a `{4: NEW}`-only map would send it to."""
     cmd = as_user_in_container_command(
         unit="repro/0", container="workload", user="_daemon_", juju_track="3.6", pebble_command="pebble notify x"
     )
@@ -121,7 +119,7 @@ def test_as_user_in_container_command_juju_3_6_uses_new_socket_path():
 
 def test_as_user_in_container_command_unmeasured_juju_falls_back_to_legacy():
     """`2.9` is the only track below 3.6 the juju snap still publishes, and
-    nothing has run this harness against it -- this pins today's fallback
+    nothing has run this harness against it -- this pins the existing fallback
     continued, not a claim that 2.9 is confirmed legacy."""
     cmd = as_user_in_container_command(
         unit="repro/0", container="workload", user="_daemon_", juju_track="2.9", pebble_command="pebble notify x"
@@ -142,8 +140,8 @@ def test_run_lxd_scratch_builds_prepare_pack_deploy_diagnostics_sequence(monkeyp
         branch="lxd-scratch", hypothesis=hyp, surface=surface, context={"charm_dir": "charm-9999"}
     )
 
-    # No pebble user/command in `surface` -> no stimulus step (Approach §4
-    # delta docstring: this seam does not invent an action from nothing).
+    # No pebble user/command in `surface` -> no stimulus step (this seam
+    # does not invent an action from nothing).
     assert calls == [
         # Installed by the branch that needs it, not by the workflow: only the
         # scratch branches ever run a concierge command
@@ -151,20 +149,19 @@ def test_run_lxd_scratch_builds_prepare_pack_deploy_diagnostics_sequence(monkeyp
         "which concierge >/dev/null 2>&1 || sudo snap install --classic concierge",
         "sudo concierge prepare --juju-channel 4.0/stable -p machine",  # concierge has no `lxd` preset
         # `-o` matters: without it charmcraft writes the .charm to cwd and
-        # the deploy glob below never matches (first successful pack,
-        # 2026-08-18).
+        # the deploy glob below never matches.
         "rm -f charm-9999/*.charm && charmcraft pack -p charm-9999 -o charm-9999",
-        # Per-issue application name plus a tolerant pre-deploy removal: the
-        # fixed "repro" collided with a previous run's application on any
-        # reused substrate, and left that run's unit `active` and
-        # signal-bearing for the `status` step to read (2026-08-21).
+        # Per-issue application name plus a tolerant pre-deploy removal: a
+        # fixed "repro" would collide with a previous run's application on any
+        # reused substrate, and leave that run's unit `active` and
+        # signal-bearing for the `status` step to read.
         "juju remove-application -m concierge-lxd:testing repro-i9999 --destroy-storage --no-prompt "
         ">/dev/null 2>&1; for _ in $(seq 1 60); do "
         "juju status -m concierge-lxd:testing --format=json 2>/dev/null | grep -q '\"repro-i9999\"' || break; "
         "sleep 5; done; true",
         # `-m <controller>:<model>` on every juju command: `concierge prepare`
-        # switches the active controller, so without this an lxd run silently
-        # retargeted the next k8s one (2026-08-21).
+        # switches the active controller, so without this an lxd run would
+        # silently retarget the next k8s one.
         "juju deploy -m concierge-lxd:testing charm-9999/*.charm repro-i9999",
         # `juju deploy` returns before the unit exists; stimulating or even
         # diagnosing before it settles reads an empty/allocating unit. Waits
@@ -188,7 +185,7 @@ def test_run_lxd_scratch_falls_back_without_charm_dir(monkeypatch):
 
     result = SubprocessRunnerSeam().run(branch="lxd-scratch", hypothesis=_hypothesis("lxd"), surface=None, context={})
 
-    # Indices shifted by one when `install-concierge` joined the sequence.
+    # `install-concierge` is calls[0] and `prepare` calls[1].
     assert calls[2] == "charmcraft pack"
     assert calls[3].startswith("juju remove-application -m concierge-lxd:testing repro-i9999 ")
     assert calls[4] == "juju deploy -m concierge-lxd:testing ./*.charm repro-i9999"
@@ -211,8 +208,6 @@ def test_run_lxd_scratch_includes_stimulus_when_pebble_info_present(monkeypatch)
         branch="lxd-scratch", hypothesis=_hypothesis("lxd"), surface=surface, context={"charm_dir": "charm-9999"}
     )
 
-    # cleanup joined the sequence in 2026-08-21's per-issue-app-name fix, and
-    # install-concierge on 2026-09-24.
     assert len(calls) == 9  # install-concierge, prepare, pack, cleanup, deploy, wait, stimulus, status, debug-log
     stimulus = calls[6]
     assert stimulus.startswith(f'juju ssh -m concierge-lxd:testing {_UNIT} -- "')  # no k8s --container on lxd
@@ -241,7 +236,7 @@ def test_run_lxd_scratch_runs_control_when_expected_signal_and_pebble_info_set(m
     assert "root" in result.control.command
     assert "_daemon_" not in result.control.command  # control reruns as root, not the suspect user
     # The notify, then a poll for its effect -- not the notify and a bare
-    # status read joined by `;`, which is what this was until 2026-09-16.
+    # status read joined by `;`.
     poll = _control_signal_command("concierge-lxd:testing", _UNIT, "observed notice:")
     assert result.control.command.endswith(f"; {poll}")
     assert result.control.command[: -len(f"; {poll}")] == as_user_in_container_command(
@@ -264,8 +259,8 @@ def test_run_lxd_scratch_runs_control_when_expected_signal_and_pebble_info_set(m
 def test_run_lxd_scratch_no_control_without_pebble_info(monkeypatch, surface):
     # expected_signal alone isn't enough to build a control: without a real
     # pebble command to rerun as a different user, there's nothing to
-    # control against (Approach §4 delta docstring's conservative-reading
-    # note) -- no control is invented from nothing.
+    # control against (the conservative reading in seams/runner.py's
+    # docstring) -- no control is invented from nothing.
     calls: list[str] = []
     monkeypatch.setattr(subprocess, "run", _fake_run(calls))
     result = SubprocessRunnerSeam().run(
@@ -275,10 +270,9 @@ def test_run_lxd_scratch_no_control_without_pebble_info(monkeypatch, surface):
 
 
 def test_run_lxd_scratch_juju_3_6_selects_new_pebble_socket(monkeypatch):
-    """`spike-step-5/wallclock-substrate/RESULT.md` §6: juju 3.6.27 measured
-    on `/charm/container/`, not the legacy path a `{4: NEW}`-only map used
-    to send every non-4 pin to (this exact hypothesis, `juju_version:
-    "3.6.1"`, used to assert legacy here -- that assertion was the bug)."""
+    """juju 3.6.27 uses `/charm/container/`, not the legacy path a
+    `{4: NEW}`-only map would send every non-4 pin to (so this hypothesis,
+    `juju_version: "3.6.1"`, must not get the legacy path)."""
     calls: list[str] = []
     monkeypatch.setattr(subprocess, "run", _fake_run(calls))
 
@@ -298,9 +292,9 @@ def test_run_lxd_scratch_juju_3_6_selects_new_pebble_socket(monkeypatch):
 
 def test_run_lxd_scratch_unmeasured_juju_falls_back_to_legacy_pebble_socket(monkeypatch):
     """`2.9` is the only sub-3.6 track the juju snap still publishes, and it
-    is unmeasured -- this is the map's existing fallback continued, not a
-    second confirmed data point. A `3.5` pin no longer reaches here at all:
-    it resolves to the `3` track (juju 3.6.28) and gets the new path."""
+    is untested -- this is the map's fallback continued, not a confirmed data
+    point. A `3.5` pin does not reach here at all: it resolves to the `3`
+    track (juju 3.6.28) and gets the new path."""
     calls: list[str] = []
     monkeypatch.setattr(subprocess, "run", _fake_run(calls))
 
@@ -321,9 +315,9 @@ def test_run_lxd_scratch_unmeasured_juju_falls_back_to_legacy_pebble_socket(monk
 def test_run_lxd_scratch_nonzero_exit_captured_not_raised(monkeypatch):
     """A failing command is captured rather than raised -- and, since
     `prepare` is a prerequisite, the run stops there instead of executing
-    the other four against a substrate that never came up (first real k8s
-    run, 2026-08-18: a failed `pack` was followed by a doomed `deploy` and
-    two diagnostics that exit 0 on an empty model)."""
+    the other four against a substrate that never came up (otherwise a
+    failed `pack` is followed by a doomed `deploy` and two diagnostics that
+    exit 0 on an empty model)."""
     calls: list[str] = []
     monkeypatch.setattr(subprocess, "run", _fake_run(calls, returncode=1, stderr="boom"))
 
@@ -332,7 +326,7 @@ def test_run_lxd_scratch_nonzero_exit_captured_not_raised(monkeypatch):
     assert len(result.commands) == 1
     assert result.commands[0].exit_code == 1
     assert result.commands[0].stderr == "boom"
-    # The first command is now the concierge install, so it is the first
+    # The first command is the concierge install, so it is the first
     # prerequisite a blanket-failing shell aborts at.
     assert result.commands[0].step == "install-concierge"
     assert result.aborted_at_step == "install-concierge"
@@ -354,9 +348,9 @@ def test_run_lxd_scratch_timeout_captured_not_raised(monkeypatch):
 
 
 def test_build_steps_get_a_longer_timeout_than_the_flat_default(monkeypatch):
-    """`concierge prepare` measured 13m20s cold and `charmcraft pack` blew
-    the flat 5-minute budget outright on the first real run, so both would
-    time out on every cold runner."""
+    """`concierge prepare` takes about 13m20s cold and `charmcraft pack` can
+    blow the flat 5-minute budget outright, so both would time out on every
+    cold runner."""
     timeouts: dict[str, int] = {}
 
     def record(args, **kwargs):
@@ -374,19 +368,19 @@ def test_build_steps_get_a_longer_timeout_than_the_flat_default(monkeypatch):
     # `$UNIT` prelude -- both of which also run `juju status`, and cleanup has
     # its own budget.
     status = next(v for k, v in timeouts.items() if k.startswith("juju status -m concierge-lxd:testing $("))
-    assert prepare > 13 * 60  # the measured cold-boot figure
+    assert prepare > 13 * 60  # the cold-boot figure
     assert pack > 5 * 60
     assert status == 5 * 60  # unchanged: a status call has no reason to be slow
 
 
-# --- dispatch completeness: the failure mode this branch fixes ---
+# --- dispatch completeness: every branch `choose_branch()` returns runs ---
 
 # Deliberately a manually-kept mirror of `choose_branch()`'s four possible
 # return values (its own docstring and `RunnerSeam.run()`'s Protocol
 # docstring both enumerate the same four) -- not derived from source, so a
 # fifth branch added to `choose_branch()` without a matching case here won't
 # be caught automatically, but any of the existing four silently losing
-# their dispatch (the bug this task fixes) will be.
+# their dispatch will be.
 _BRANCH_HYPOTHESES = {
     "none": lambda: _hypothesis("none"),
     "k8s-scratch": lambda: _hypothesis("k8s", **{}),
@@ -420,8 +414,7 @@ def test_pack_writes_the_charm_where_deploy_looks_for_it():
     """`charmcraft pack -p <dir>` writes to the *current working
     directory*, not `<dir>`. The deploy step globs `<dir>/*.charm`, so
     without `-o` pack exits 0, the artefact lands somewhere else entirely,
-    and deploy fails with "no charm was found" -- what happened on the
-    first run that ever got as far as a successful pack (2026-08-18)."""
+    and deploy fails with "no charm was found"."""
     plan = build_plan(branch="k8s-scratch", hypothesis=_hypothesis("k8s"), surface=None, context={"charm_dir": "/w/c"})
     pack = next(p.command for p in plan if p.step == "pack")
     deploy = next(p.command for p in plan if p.step == "deploy")
@@ -434,8 +427,7 @@ def test_k8s_deploy_supplies_the_oci_resource_render_declares():
     """`render.py` emits a `<container>-image` oci-image resource for every
     k8s scratch charm, and `juju deploy` refuses a local charm whose OCI
     resources aren't supplied ("ERROR local charm missing OCI images for:
-    workload-image") -- the failure on the first run that ever reached a
-    successful deploy attempt (2026-08-18)."""
+    workload-image")."""
     surface = SurfaceInference(
         charm_name="repro-i9999-x",
         pebble_service={"container": "workload", "service": "s", "command": "pebble notify x", "user": "_daemon_"},
@@ -456,9 +448,8 @@ def test_machine_deploy_supplies_no_oci_resource():
 
 def test_sequence_waits_for_the_unit_before_stimulating_it():
     """`juju deploy` returns once the deployment is *requested*; the unit is
-    still allocating for a minute or more. The first successful deploy
-    (2026-08-18) stimulated immediately and got `ERROR container for unit
-    "repro/0" is not ready yet`."""
+    still allocating for a minute or more. Stimulating it immediately gets
+    `ERROR container for unit "repro/0" is not ready yet`."""
     surface = SurfaceInference(
         charm_name="repro-i9999-x",
         pebble_service={"container": "workload", "service": "s", "command": "pebble notify x", "user": "_daemon_"},
@@ -505,8 +496,8 @@ def test_a_failed_stimulus_stops_the_run(monkeypatch):
 def test_k8s_container_form_omits_the_double_dash_separator():
     """`juju ssh --container c unit -- "cmd"` forwards the `--` into the
     container's shell, which dies with `sh: 0: Illegal option --` before
-    running anything. Measured against a live k8s unit (2026-08-18): the
-    same command without `--` runs and records the notice."""
+    running anything. Against a real k8s unit, the same command without `--`
+    runs and records the notice."""
     cmd = as_user_in_container_command(
         unit="repro/0", container="workload", user="_daemon_", juju_track="4", pebble_command="pebble notify x"
     )
@@ -526,7 +517,7 @@ def test_machine_form_keeps_the_double_dash_separator():
 def test_pack_clears_stale_charms_so_the_deploy_glob_stays_unambiguous():
     """The deploy step globs `<dir>/*.charm`. A second pack into the same
     work dir leaves two artefacts, the glob matches both, and juju fails
-    with `ERROR unrecognized args: ["repro"]` (2026-08-18)."""
+    with `ERROR unrecognized args: ["repro"]`."""
     plan = build_plan(branch="k8s-scratch", hypothesis=_hypothesis("k8s"), surface=None, context={"charm_dir": "/w/c"})
     pack = next(p.command for p in plan if p.step == "pack")
     assert pack.startswith("rm -f /w/c/*.charm &&")
@@ -534,10 +525,9 @@ def test_pack_clears_stale_charms_so_the_deploy_glob_stays_unambiguous():
 
 def test_lxd_branch_uses_a_concierge_preset_that_exists():
     """concierge 1.7.0 presets: crafts, dev, k8s, machine, microk8s. There
-    is no `lxd` preset, so this branch's prepare step failed with `unknown
-    preset 'lxd'` every time it ran -- undetected because the branch had
-    only ever been exercised with subprocess mocked, and a mock accepts any
-    preset name."""
+    is no `lxd` preset, so a prepare step asking for one fails with `unknown
+    preset 'lxd'` every time it runs -- and a test with subprocess mocked
+    never notices, because a mock accepts any preset name."""
     plan = build_plan(branch="lxd-scratch", hypothesis=_hypothesis("lxd"), surface=None, context={})
     prepare = next(p.command for p in plan if p.step == "prepare")
     assert prepare == "sudo concierge prepare --juju-channel 4.0/stable -p machine"
@@ -545,11 +535,10 @@ def test_lxd_branch_uses_a_concierge_preset_that_exists():
 
 # --- moving_parts.juju_version drives the substrate, not just a socket path ---
 #
-# `spike-step-5/wallclock-substrate/RESULT.md` §5: the extractor's pin used to
-# reach only `_pebble_socket_path()`, so `prepare` provisioned whatever
-# concierge defaulted to and `#2639` -- which reproduces on 4.0.5 and not on
-# 3.6.27 -- returned `DID_NOT_REPRODUCE` for a reason that was about the
-# substrate, not about the bug.
+# If the extractor's pin reached only `_pebble_socket_path()`, `prepare` would
+# provision whatever concierge defaulted to and `#2639` -- which reproduces on
+# 4.0.5 and not on 3.6.27 -- could return `DID_NOT_REPRODUCE` for a reason that
+# was about the substrate, not about the bug.
 #
 # The real `#2639` extraction pins nothing (`fixtures/extractions/2639.json`,
 # recorded LLM output -- not edited to suit this), so the corpus can only
@@ -568,10 +557,10 @@ def _prepare_command(juju_version: str | None) -> str:
 
 
 def test_prepare_channel_defaults_when_the_extraction_pins_nothing():
-    """The common case per Approach §3's step-2 finding. What matters is that
+    """The common case: most extractions pin nothing. What matters is that
     the default is the harness's own named constant rather than concierge's,
-    which is what silently changed a verdict when concierge 1.7.0 defaulted to
-    `3/stable`."""
+    which can silently change a verdict (concierge 1.7.0 defaults to
+    `3/stable`)."""
     assert _prepare_command(None) == "sudo concierge prepare --juju-channel 4.0/stable -p k8s"
 
 
@@ -583,7 +572,7 @@ def test_prepare_channel_uses_a_pinned_minor_track():
 
 def test_prepare_channel_narrows_a_full_version_to_its_track():
     """Extractions quote whole versions (`3.6.27` is what `juju version`
-    printed on the wallclock-substrate run); `3.6.27/stable` is not a channel."""
+    prints); `3.6.27/stable` is not a channel."""
     assert _prepare_command("3.6.27") == "sudo concierge prepare --juju-channel 3.6/stable -p k8s"
 
 
@@ -603,9 +592,8 @@ def test_prepare_channel_falls_back_to_the_default_for_an_unparseable_pin():
 
 def test_pinned_juju_version_reaches_both_the_channel_and_the_pebble_socket():
     """The two consumers of the pin agree: a `3.6` hypothesis provisions a 3.6
-    substrate *and* addresses the socket path measured on 3.6.27. Before the
-    channel existed these could disagree -- §6's latent defect was exactly a
-    pin routing the stimulus to a path the substrate did not have."""
+    substrate *and* addresses the socket path 3.6.27 uses. If these disagree,
+    a pin routes the stimulus to a path the substrate does not have."""
     hyp = _hypothesis("k8s", juju_version="3.6")
     plan = build_plan(branch="k8s-scratch", hypothesis=hyp, surface=None, context={})
     prepare = next(p.command for p in plan if p.step == "prepare")
@@ -623,9 +611,9 @@ def test_pinned_juju_version_reaches_both_the_channel_and_the_pebble_socket():
 
 
 def test_wait_also_waits_for_the_container_to_accept_exec():
-    """An active unit is not an exec-able container. The first run ever to get
-    past `wait` (2026-09-04, juju 4.0.14) went active after 20.5s and its
-    stimulus died 0.4s later on `ERROR container "workload" not running`.
+    """An active unit is not an exec-able container. On juju 4.0.14 a unit
+    can go active after 20.5s and a stimulus 0.4s later die on
+    `ERROR container "workload" not running`.
     Waiting on the charm's status cannot see that, so `wait` polls the
     operation the stimulus is about to perform."""
     surface = SurfaceInference(
@@ -653,10 +641,9 @@ def test_wait_without_a_container_stops_at_the_status_poll():
 def test_pin_on_a_retired_track_gets_the_socket_of_the_juju_it_actually_installs():
     """A `3.4` pin selects `3/stable`, which the juju snap now publishes as
     **3.6.28** -- there is no 3.0-3.5 track left. Keyed on the pin, the socket
-    lookup read "3.4", missed the "3.6" entry and sent the stimulus to the
-    legacy path, which on that substrate fails with `cannot communicate with
-    server: ... socket "/var/lib/pebble/default/.pebble.socket" not found`
-    (measured on 3.6.28, `spike-step-5/substrate-2026-09-04/RESULT.md`).
+    lookup would read "3.4", miss the "3.6" entry and send the stimulus to the
+    legacy path, which on 3.6.28 fails with `cannot communicate with
+    server: ... socket "/var/lib/pebble/default/.pebble.socket" not found`.
     Keyed on the resolved track, both halves say `3`."""
     hyp = _hypothesis("k8s", juju_version="3.4")
     plan = build_plan(branch="k8s-scratch", hypothesis=hyp, surface=None, context={})
@@ -679,8 +666,8 @@ def test_pin_on_a_retired_track_gets_the_socket_of_the_juju_it_actually_installs
 
 
 def test_run_lxd_scratch_records_the_observed_juju_version(monkeypatch):
-    """`spike-step-5/wallclock-substrate/RESULT.md` §5: nothing recorded
-    which juju actually produced a run's verdict. `_fake_run` answers the
+    """A run records which juju actually produced its verdict. `_fake_run`
+    answers the
     seam's own `juju version` call with a fixed string; this pins that the
     scratch branch actually captures it into `RunResult`."""
     calls: list[str] = []
@@ -739,14 +726,12 @@ def test_run_none_does_not_record_an_observed_juju_version(monkeypatch):
 
 # --- the control's status read: a poll, not a race ---
 #
-# `spike-step-5/first-dispatch/RESULT.md` §6.5. The control was
-# `pebble notify ...; juju status <unit>` -- one shell command, 0.960s for
-# both halves -- against a measured notify-to-visible latency of under a
-# second. Every other step in the sequence that needs the cluster to catch up
-# polls for it; this one read straight away. Nothing had ever lost the race,
-# and nothing could have: rung 5 reads the control only when
-# `expected_signal` is *absent* from the main run, and it was present on
-# every run to date. The path where it is load-bearing is a genuine
+# A control of `pebble notify ...; juju status <unit>` -- one shell command,
+# about a second for both halves -- races a notify-to-visible latency of
+# under a second. Every other step in the sequence that needs the cluster to
+# catch up polls for it, and so does this one. The race is easy to miss:
+# rung 5 reads the control only when `expected_signal` is *absent* from the
+# main run, which is rare. The path where it is load-bearing is a genuine
 # `REPRODUCED_POSITIVE_SIGNAL_ABSENT`, and there an early read turns a
 # comment-worthy outcome into a silent `DID_NOT_REPRODUCE` reported as "no
 # control confirmed the observer works at all".
@@ -798,8 +783,8 @@ def test_control_step_is_the_notify_then_the_poll(monkeypatch):
     assert control.command.endswith(
         "; " + _control_signal_command("concierge-k8s:testing", unit, "observed notice:")
     )
-    # The old shape, pinned as gone: the notify's own `;` used to be followed
-    # by nothing but a single status read.
+    # Not the racing shape: the notify's own `;` followed by nothing but a
+    # single status read.
     assert not control.command.endswith(f"; juju status -m concierge-k8s:testing {unit}")
 
 
@@ -865,7 +850,7 @@ def _run_poll_for_real(tmp_path, monkeypatch, *, appear_at: int, polls: int = 3)
 
 def test_control_poll_waits_for_a_signal_that_arrives_late(tmp_path, monkeypatch):
     """The whole point: a status read that would have missed the signal on
-    its first attempt now waits for it."""
+    its first attempt waits for it."""
     proc = _run_poll_for_real(tmp_path, monkeypatch, appear_at=3)
 
     assert proc.returncode == 0
@@ -944,13 +929,12 @@ def test_a_failed_control_is_recorded_and_aborts_nothing(monkeypatch):
 
 # --- RunResult.observed_ops_version: which ops was actually packed ---
 #
-# `spike-step-5/first-dispatch/RESULT.md` §6.1. The scratch charm pins
-# `ops~=3.8` and `charmcraft pack` resolves that from PyPI inside its own
-# managed LXD instance, so the `ops` in the checked-out tree is never under
-# test. The first dispatch packed `ops==3.8.2`; the fact survived only as one
-# line of charmcraft's stderr that no code read.
+# The scratch charm pins `ops~=3.8` and `charmcraft pack` resolves that from
+# PyPI inside its own managed LXD instance, so the `ops` in the checked-out
+# tree is never under test. Which `ops` was packed shows up only as one line
+# of charmcraft's stderr, so the seam has to read it from there.
 
-# The shape §6.1 quotes, in the surrounding noise a real pack log carries.
+# That line, in the surrounding noise a real pack log carries.
 _PACK_LOG = """\
 Packing charm
 :: Installed 34 packages in 96ms
@@ -1085,11 +1069,10 @@ def test_run_k8s_clone_does_not_record_a_packed_ops_version(monkeypatch):
 
 # --- _KNOWN_JUJU_TRACKS: every entry has to be buildable into a channel ---
 #
-# `spike-step-5/first-dispatch/RESULT.md` §3 measured the store and found that
-# `4.1`, alone of the five entries the tuple then carried, publishes no
-# `stable` risk -- so `_juju_channel()` built `4.1/stable` for any `4.1*` pin
-# and `prepare` failed on a channel that has never existed. The tuple's own
-# docstring claims the opposite property, and nothing asserted it.
+# A track that publishes no `stable` risk (`4.1` publishes only `beta` and
+# `edge`) must not be in the tuple: `_juju_channel()` would build `4.1/stable`
+# for any `4.1*` pin and `prepare` would fail on a channel that has never
+# existed. The tuple's own docstring claims that property; this asserts it.
 
 
 def test_every_known_juju_track_has_a_populated_stable_risk():
@@ -1104,7 +1087,7 @@ def test_every_known_juju_track_has_a_populated_stable_risk():
 @pytest.mark.parametrize("pin", ["4.1", "4.1.0", "4.1-beta1"])
 def test_prepare_channel_falls_back_for_a_track_with_no_stable_risk(pin):
     """`4.1` exists as a snap track and publishes `beta` and `edge` only
-    (store, 2026-09-17). Falling back to the default costs one version
+    in the snap store. Falling back to the default costs one version
     segment; `4.1/stable` costs the whole runner slot and says nothing about
     the bug -- `prepare` is `commands[0]`, so a non-zero exit lands on rung 0
     (`INFRASTRUCTURE_FAILED`), which composes nothing."""
@@ -1114,7 +1097,7 @@ def test_prepare_channel_falls_back_for_a_track_with_no_stable_risk(pin):
 def test_a_four_one_pin_gets_the_socket_of_the_juju_it_actually_installs():
     """The other half of `test_pin_on_a_retired_track_...`: dropping `4.1`
     from the tuple moves the *socket* lookup too, because it is keyed on the
-    resolved track rather than on the pin. Both halves now say `4.0`."""
+    resolved track rather than on the pin. Both halves say `4.0`."""
     hyp = _hypothesis("k8s", juju_version="4.1")
     assert _juju_track(hyp) == "4.0"
     assert (
@@ -1133,7 +1116,7 @@ def test_a_four_one_pin_gets_the_socket_of_the_juju_it_actually_installs():
 #
 # `runner_stage.is_stale()`'s second trigger skips a hypothesis outright and
 # composes nothing, with no downstream appeal, so a `False` here has to mean
-# "this API surface is gone". It used to also mean "nothing here imports",
+# "this API surface is gone". It must not also mean "nothing here imports",
 # which on a GHA runner is true of every `ops.*` anchor -- the workflow runs
 # the harness under `uv run` in a venv holding pyyaml and pytest and no `ops`.
 # These run the real probe in a real subprocess: the whole behaviour is an
@@ -1156,8 +1139,8 @@ def test_resolve_symbol_reports_a_symbol_that_is_gone():
 def test_resolve_symbol_abstains_when_no_prefix_imports_at_all():
     """Nothing importable means nothing was asked, not that the symbol has
     gone away. This is the GHA case: `ops` is not in the harness's venv, so
-    reported as absence it skipped every anchor-carrying hypothesis before it
-    could reach a runner."""
+    reported as absence it would skip every anchor-carrying hypothesis before
+    it could reach a runner."""
     assert SubprocessRunnerSeam().resolve_symbol("not_a_real_package_2f9c1a.mod.Thing", {})
 
 
@@ -1192,8 +1175,8 @@ def test_resolve_symbol_abstains_when_the_probe_cannot_run(monkeypatch):
 def test_resolve_symbol_reads_only_the_absent_exit_code():
     """`SystemExit(2)` from the probe is "could not tell", and the wrapper has
     to read the code rather than `returncode == 0`. Pinned separately from the
-    probe itself because the two halves are what got out of step: the old
-    probe collapsed both non-resolving cases onto exit 1."""
+    probe itself because the two halves can get out of step: a probe that
+    collapses both non-resolving cases onto exit 1 reads as "gone"."""
     seam = SubprocessRunnerSeam()
     codes = {seam._SYMBOL_RESOLVED, seam._SYMBOL_ABSENT, seam._SYMBOL_UNKNOWABLE}
     assert len(codes) == 3
@@ -1222,17 +1205,14 @@ def test_resolve_symbol_abstains_when_the_package_raises_on_import(tmp_path, mon
 
 # --- RunResult.observed_ops_version on the `none` branch ---
 #
-# `spike-step-5/second-dispatch/RESULT.md` §6.2, closed in
-# `fourth-dispatch/RESULT.md` §1. The field was scoped to the branches that
-# `charmcraft pack`, on the reasoning that only they resolve an `ops`. The
-# `none` branch resolves one too -- from PyPI, via the extraction's own `uv
-# add 'ops[testing]'` -- and prints the version into output the harness was
-# already capturing and already rendering into the composed comment. So a
-# comment quoted the answer four lines above a versions line that declined to
-# state it.
+# Not only the branches that `charmcraft pack` resolve an `ops`. The `none`
+# branch resolves one too -- from PyPI, via the extraction's own `uv add
+# 'ops[testing]'` -- and prints the version into output the harness already
+# captures and renders into the composed comment. Without this field, a
+# comment would quote the answer four lines above a versions line that
+# declined to state it.
 
-# Verbatim from run 35219949266's composed comment (`second-dispatch/
-# RESULT.md` §5.1), which is the only recording of this branch's real output.
+# Verbatim from a real composed comment for `#2045`.
 _UV_ADD_LOG = """\
 Resolved 16 packages in 2ms
 Installed 5 packages in 2ms
@@ -1252,10 +1232,9 @@ _2045_COMMANDS = [
 
 
 def test_the_pack_reader_cannot_see_the_none_branchs_ops_and_that_is_the_defect():
-    """The measured shape, through the reader that was wired up for it: the
-    `none` branch labels no steps at all, so `step == "pack"` matches nothing
-    and the version in the log two commands earlier is invisible. This is
-    `second-dispatch` §6.2's `null` reproduced, not described."""
+    """The real shape, through the pack reader: the `none` branch labels no
+    steps at all, so `step == "pack"` matches nothing and the version in the
+    log two commands earlier is invisible -- hence a reader of its own."""
     assert all(c.step is None for c in _2045_COMMANDS)
     assert _packed_ops_version(_2045_COMMANDS) is None
 

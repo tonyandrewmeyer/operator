@@ -27,8 +27,8 @@ def test_infer_2639_surface():
 
 
 def test_validate_rejects_digit_after_hyphen_charm_name():
-    # Steps §3 fix (2026-07-22): juju's local-charm URL parser rejects a
-    # numeric segment directly after a hyphen. Must never regress.
+    # juju's local-charm URL parser rejects a numeric segment directly after
+    # a hyphen. Must never regress.
     with pytest.raises(SurfaceInferenceInvalid, match="digit after a hyphen"):
         validate({"charm_name": "repro-2639-pebble-notice"})
 
@@ -44,12 +44,11 @@ def test_validate_rejects_bad_surface():
 
 # --- the stimulus half: pebble_service.command ---------------------------
 #
-# Live inference returned `pebble_service.command: null` on 3 of 3 calls
-# for #2639 (`spike-step-5/first-real-substrate/RESULT.md` finding 5) and
-# `validate()` never looked at it, so the run deployed a charm, poked
-# nothing, and still produced a verdict. The fixture had been hand-filled
-# from step 4's by-hand walk -- `fixtures/surface/2639.json`'s own
-# `_command_note` records that -- which is why no fixture run saw it.
+# Live inference can return `pebble_service.command: null` for #2639; if
+# `validate()` did not look at it, the run would deploy a charm, poke
+# nothing, and still produce a verdict. The fixture is hand-filled --
+# `fixtures/surface/2639.json`'s own `_command_note` records that -- so no
+# fixture run sees the null.
 
 
 def _valid(**overrides):
@@ -179,8 +178,8 @@ def test_infer_gives_up_after_one_re_ask():
 
 
 def test_validate_rejects_a_user_flag_pebble_does_not_have():
-    """A live call produced `pebble notify --user=_daemon_ ...`
-    (2026-08-18). `pebble notify` has no such flag -- it rejects it, so the
+    """Live calls can produce `pebble notify --user=_daemon_ ...`.
+    `pebble notify` has no such flag -- it rejects it, so the
     stimulus never fires. The user belongs in `pebble_service.user`, which
     the runner applies by executing the command as that account (which is
     the whole reason `as_user_in_container_command` exists)."""

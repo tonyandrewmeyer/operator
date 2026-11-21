@@ -1,8 +1,8 @@
-"""`relation-list` fakes (`spike-step-5/static-retry/RESULT.md` §24).
+"""`relation-list` fakes.
 
-Live on `#2709` (§23), the non-JSON `relation-list` reason's aside "if it prints
-`[]`, ops runs `relation-list --app` next" led three re-asks to fake `--app`
-separately (a file named `relation-list --app`, or a fourth argument to the
+For `#2709`, an earlier wording of the non-JSON `relation-list` reason, with
+the aside "if it prints `[]`, ops runs `relation-list --app` next", led live
+re-asks to fake `--app` separately (a file named `relation-list --app`, or a fourth argument to the
 fake helper), and two of them to a `relation-list` fake printing `[]`. That
 fake answers `--app` too, with `[]` again, and ops fails with `TypeError:
 unhashable type: 'list'` on 3.8.3 and `main`. These tests check by running
@@ -172,7 +172,7 @@ def test_a_model_over_another_meta_passes():
 
 
 def test_a_meta_through_a_name_assigned_once_is_followed():
-    """§23's 4-6 builds its meta from a name assigned a string."""
+    """A live answer builds its meta from a name assigned a string."""
     source = _shape("model.get_relation('db', 2)", _fakes())
     source = source.replace(f"ops.CharmMeta.from_yaml({_META!r})", "ops.CharmMeta.from_yaml(yaml)")
     source = source.replace("    meta = ops.CharmMeta", f"    yaml = {_META!r}\n    meta = ops.CharmMeta", 1)

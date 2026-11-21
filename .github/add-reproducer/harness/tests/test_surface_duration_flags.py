@@ -1,9 +1,8 @@
 """Surface inference emits pebble command lines pebble then rejects.
 
-`first-real-substrate/RESULT.md` Finding 13 caught an *invented* flag
-(`pebble notify --user=...`) and added a prompt paragraph plus a validation
-rule. A live run on 2026-08-21 produced the next variant along -- a real flag
-with a malformed value:
+An *invented* flag (`pebble notify --user=...`) is caught by a prompt
+paragraph plus a validation rule. The next variant along is a real flag with
+a malformed value:
 
     /charm/bin/pebble exec --timeout=1 ls
     error: invalid argument for flag `--timeout' (expected time.Duration):
@@ -12,7 +11,6 @@ with a malformed value:
 Same end state as the `--user` case: the stimulus never fires, and the run
 reaches a rung having done nothing to the charm. Prompt text alone had already
 failed once in this spot, which is why this is a validation rule.
-`spike-step-5/gate-substrate/RESULT.md` §7.
 """
 
 from __future__ import annotations

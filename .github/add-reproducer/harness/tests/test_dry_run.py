@@ -1,12 +1,12 @@
-"""Tests for the dry-run plan mode (PLAN.md Approach §4 delta): emit the
-exact command sequence a branch would execute, without executing it.
+"""Tests for the dry-run plan mode: emit the exact command sequence a branch
+would execute, without executing it.
 
 Two things get pinned here that the mocked-subprocess tests in
 `test_seams_runner.py` can't: that `build_plan()` (pure, no subprocess) and
 `SubprocessRunnerSeam._run_scratch_branch` (executes for real) agree on the
-sequence -- and that the committed `#2639` artefact
-(`../spike-step-5/2639-k8s-scratch-dry-run-plan.md`) is what the generator
-actually produces today, not a stale hand-edited snapshot.
+sequence -- and that the `#2639` dry-run artefact, when one is checked out
+alongside the harness, is what the generator actually produces today, not a
+stale hand-edited snapshot.
 """
 
 from __future__ import annotations
@@ -110,10 +110,8 @@ def test_build_plan_k8s_scratch_prepare_flag_is_k8s_not_lxd():
 
 
 def test_build_plan_lxd_scratch_prepare_flag_is_machine():
-    """Renamed from `..._is_lxd`, which asserted a preset concierge does not
-    have. Presets are crafts/dev/k8s/machine/microk8s; `-p lxd` failed with
-    `unknown preset 'lxd'` on the first live run that dispatched here
-    (2026-08-18). The old name and assertion encoded the bug."""
+    """concierge's presets are crafts/dev/k8s/machine/microk8s; there is no
+    `lxd` preset, and `-p lxd` fails with `unknown preset 'lxd'`."""
     hyp = _hypothesis("lxd", [])
     plan = build_plan(branch="lxd-scratch", hypothesis=hyp, surface=None, context={})
     assert plan[1].command == "sudo concierge prepare --juju-channel 4.0/stable -p machine"
@@ -153,7 +151,7 @@ def test_2639_plan_covers_the_whole_branch_including_control():
 def test_2639_plan_has_no_unfilled_placeholders():
     # #2639's own hand extraction (fixtures/extractions/2639.json) contains
     # literal `<k8s-charm-with-workload-running-as-_daemon_>` / `<unit>`
-    # placeholders -- the trap the task called out. The plan must not
+    # placeholders -- a trap for the plan builder. The plan must not
     # contain any of that raw text, since it's built from `surface`, not
     # `hypothesis.commands`.
     hypothesis = dry_run.load_hypothesis(2639, FIXTURES)
@@ -174,10 +172,9 @@ def test_2639_plan_is_runnable():
 
 def test_2639_plan_without_a_real_stimulus_omits_stimulus_and_control(tmp_path):
     # Guard against ever silently *inventing* a stimulus: when surface has no
-    # resolved pebble command (the state fixtures/surface/2639.json was in
-    # before this task -- command: null, per spike-step-3/FINDINGS.md's
-    # "left out" note), the plan must only cover prepare/pack/deploy/status/
-    # debug-log, not fabricate a stimulus/control from nothing.
+    # resolved pebble command (`command: null` in the surface fixture), the
+    # plan must only cover prepare/pack/deploy/status/debug-log, not
+    # fabricate a stimulus/control from nothing.
     fixtures_dir = tmp_path / "fixtures"
     (fixtures_dir / "extractions").mkdir(parents=True)
     (fixtures_dir / "surface").mkdir(parents=True)
@@ -209,8 +206,8 @@ def test_committed_2639_artefact_matches_generator():
     expected = dry_run.render_markdown(2639, branch, plan)
     assert ARTEFACT.exists(), f"expected a committed dry-run plan at {ARTEFACT}"
     assert ARTEFACT.read_text() == expected, (
-        "spike-step-5/2639-k8s-scratch-dry-run-plan.md is stale -- regenerate with "
-        "`uv run python dry_run.py --issue 2639 --out ../spike-step-5/2639-k8s-scratch-dry-run-plan.md`"
+        f"{ARTEFACT.name} is stale -- regenerate with "
+        f"`uv run python dry_run.py --issue 2639 --out {ARTEFACT}`"
     )
 
 

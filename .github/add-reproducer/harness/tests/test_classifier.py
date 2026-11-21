@@ -1,26 +1,22 @@
-"""Classifier rung tests (PLAN.md Approach §5).
+"""Classifier rung tests.
 
-Four tests load the *real* captured output from spike-step-4 (the
-`fixtures/runs/<n>.json` files, derived verbatim from
-`spike-step-4/<n>/RESULT.md`) through `classifier.classify()` directly --
-these are the task's stated acceptance cases: "the classifier must land
-each on the correct rung."
+Four tests load *real* captured output (the `fixtures/runs/<n>.json`
+files) through `classifier.classify()` directly -- the classifier must land
+each on the correct rung.
 
 Two of the four (#2341, #2327) are CLOSED issues with no `repo_version`,
-so in the full pipeline they never reach the classifier at all -- Approach
-§4's skip-when-stale gate intercepts them first (see test_runner_stage.py
+so in the full pipeline they never reach the classifier at all -- the
+skip-when-stale gate intercepts them first (see test_runner_stage.py
 and test_pipeline_e2e.py). Testing them here, bypassing the gate, is
-deliberate: it's exactly what spike-step-4 itself did ("all 4 in_scope:
-true extractions walked by hand", regardless of confidence or staleness)
-to calibrate the classifier ladder against real captured output, and it
-proves the log-only / did-not-reproduce distinction the ladder needs to
-get right even when the gate isn't the one doing the work.
+deliberate: it calibrates the classifier ladder against real captured
+output regardless of confidence or staleness, and it proves the log-only /
+did-not-reproduce distinction the ladder needs to get right even when the
+gate isn't the one doing the work.
 
 The remaining rungs the real corpus doesn't route through at the pipeline
 level (log-only *with a match*, API-shape-mismatch) are exercised with
-synthetic-but-realistic data lifted from the same RESULT.md files, since
-no hypothesis in this small corpus reaches them while also clearing the
-stale gate.
+synthetic-but-realistic data based on the same issues, since no hypothesis
+in this small corpus reaches them while also clearing the stale gate.
 """
 
 import json
@@ -54,14 +50,14 @@ def test_2639_reproduced_positive_signal_absent():
 
 def test_2341_did_not_reproduce_on_current_ops():
     # Real captured result: already fixed, pytest passes cleanly, no
-    # warning at any log level (spike-step-4/2341/RESULT.md).
+    # warning at any log level.
     outcome, reason = classify(_load_hypothesis(2341), None, _load_run(2341))
     assert outcome == Outcome.DID_NOT_REPRODUCE
 
 
 def test_2327_did_not_reproduce_on_current_ops():
     # Real captured result: partial fix landed, empty databag instead of
-    # the reported leak (spike-step-4/2327/RESULT.md).
+    # the reported leak.
     outcome, reason = classify(_load_hypothesis(2327), None, _load_run(2327))
     assert outcome == Outcome.DID_NOT_REPRODUCE
 
@@ -98,7 +94,7 @@ def test_reproduced_log_only_synthetic():
 
 
 def test_unrunnable_api_shape_mismatch_synthetic():
-    # spike-step-4/2327/RESULT.md's legacy-API attempt:
+    # #2327's legacy-API attempt:
     # `TypeError: Relation.__init__() got an unexpected keyword argument 'id'`.
     hypothesis = _load_hypothesis(2327)
     run = RunResult(
@@ -180,7 +176,7 @@ def test_partial_earlier_command_failed():
         branch="none",
         commands=[
             # Deliberately NOT an environment-build command: a failed
-            # `uv pip install` now lands on rung 0c (INFRASTRUCTURE_FAILED)
+            # `uv pip install` lands on rung 0c (INFRASTRUCTURE_FAILED)
             # instead, because a run whose environment was never built is
             # not evidence about the bug -- and `partial` composes a comment.
             # `partial` keeps its meaning for a non-environment step that
@@ -218,16 +214,15 @@ def test_did_not_reproduce_all_commands_succeed():
 def test_2107_lxd_did_not_reproduce_no_quotable_observed_substring():
     # The one real substrate:lxd extraction in the whole corpus (see
     # fixtures/extractions/2107.json's _provenance). Its `observed` field
-    # ("Traceback shows ValueError when parsing '0/lxd/4' as an integer")
-    # is prose with no double-quoted substring for `_quoted_snippets()` to
-    # match against -- PLAN.md's 2026-07-25 entry already documented this
-    # as common for hand-written-style `observed` text, not something this
-    # branch introduces. fixtures/runs/2107.json's (synthetic) captured
-    # `juju debug-log` output contains the real crash verbatim, but every
-    # command still exits 0 (juju CLI reads succeed regardless of what's in
-    # the log), so the ladder correctly lands on `did_not_reproduce` rather
-    # than fabricating a match. Pinned here so this stays a known, expected
-    # limitation rather than a silent surprise.
+    # ("Traceback shows ValueError when parsing '0/lxd/4' as an integer") is
+    # prose with no double-quoted substring for `_quoted_snippets()` to match
+    # against -- common for hand-written-style `observed` text.
+    # fixtures/runs/2107.json's (synthetic) captured `juju debug-log` output
+    # contains the real crash verbatim, but every command still exits 0 (juju
+    # CLI reads succeed regardless of what's in the log), so the ladder
+    # correctly lands on `did_not_reproduce` rather than fabricating a match.
+    # Pinned here so this stays a known, expected limitation rather than a
+    # silent surprise.
     outcome, reason = classify(_load_hypothesis(2107), None, _load_run(2107))
     assert outcome == Outcome.DID_NOT_REPRODUCE
 
@@ -269,7 +264,7 @@ def test_lxd_scratch_reproduced_positive_signal_absent_synthetic():
 
 
 def test_unrunnable_synthesis_incomplete_marker_beats_reproduced_weaker():
-    # spike-step-5/composer-live/RESULT.md Finding 6: a test-file-synthesis
+    # A test-file-synthesis
     # fallback stub (surface_inference._loud_failing_test_file) raises an
     # AssertionError carrying SYNTHESIS_INCOMPLETE_MARKER. Without this rung
     # checked ahead of rung 6, this exact shape (non-zero exit, no observed
@@ -321,8 +316,7 @@ def test_positive_signal_absent_no_control_stays_silent():
 
 # --- rung 5: a control that did not fire is not a control ---
 #
-# `spike-step-5/first-dispatch/RESULT.md` §6.5. The control's `juju status`
-# read now polls for the signal
+# The control's `juju status` read polls for the signal
 # (`seams/runner.py:_control_signal_command()`), so "the control exited
 # non-zero" means "the signal never appeared inside the budget". Rung 5's
 # whole job is telling a reproduced bug apart from a broken observer, and a

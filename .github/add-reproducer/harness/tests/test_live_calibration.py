@@ -1,10 +1,10 @@
 """Live-run calibration, pinned against the recorded runs.
 
-`spike-step-5/live-llm/` holds four real `deepseek/deepseek-chat` runs over
-the same seven `canonical/operator` issues, one per prompt/schema fix. All
-four are committed, so these tests document the progression of Findings 1,
-3 and 4 in code rather than only in `RESULT.md` prose -- and pin it, so a
-later prompt change that regresses one of them fails here.
+Four real `deepseek/deepseek-chat` runs over the same seven
+`canonical/operator` issues are recorded, one per prompt/schema fix. These
+tests document how substrate, `in_scope` and confidence agreement moved
+across those fixes -- and pin it, so a later prompt change that regresses
+one of them fails here.
 
 They assert against recorded JSON, not against a live model: no network, no
 key, deterministic.
@@ -27,8 +27,9 @@ RUNS = {
 REPEATS = sorted((_LIVE_LLM / "repeats").glob("run*")) if (_LIVE_LLM / "repeats").is_dir() else []
 
 # The hand-derived baseline, from harness/fixtures/extractions/. #2185 has no
-# hand extraction (its real comment timeline was unavailable until 2026-07-27),
-# so it has no ground truth to compare against and is excluded.
+# hand extraction (its real comment timeline was not available when the
+# baseline was built), so it has no ground truth to compare against and is
+# excluded.
 HAND = {
     2045: {"in_scope": True, "substrate": "none", "confidence": "medium"},
     2304: {"in_scope": False, "substrate": None, "confidence": "low"},
@@ -70,13 +71,13 @@ def _agreement(run_dir: Path, field: str) -> int:
 @pytest.fixture(autouse=True)
 def _require_runs():
     missing = [name for name, path in RUNS.items() if not path.exists()]
-    if missing:  # pragma: no cover - spike output not always present
+    if missing:  # pragma: no cover - recorded runs not always present
         pytest.skip(f"live run(s) not available: {missing}")
 
 
 @pytest.mark.parametrize(
     "run,expected",
-    # Finding 1. The original run returned JSON null for three host-only
+    # Substrate. The original run returned JSON null for three host-only
     # hypotheses and for #2639, which `choose_branch` silently routed to
     # k8s-scratch. Requiring the field took agreement to 5/6; the remaining
     # gap is #2304, whose hand value is null-because-dropped. The 1 -> 5 jump
@@ -91,7 +92,7 @@ def test_substrate_agreement_progression(run, expected):
 
 @pytest.mark.parametrize(
     "run,expected",
-    # Finding 3. #2304 -- a "this code can be removed" cleanup request -- was
+    # in_scope. #2304 -- a "this code can be removed" cleanup request -- was
     # kept as in_scope by every run until the in_scope criteria were spelled
     # out, at which point all six hand-baselined issues agree.
     [("original", 5), ("after_substrate_fix", 5), ("after_commands_fix", 5), ("current", 6)],
@@ -102,7 +103,7 @@ def test_in_scope_agreement_progression(run, expected):
 
 @pytest.mark.parametrize(
     "run,expected",
-    # Finding 4, and a caution. These numbers are recorded fact, but the
+    # Confidence, and a caution. These numbers are recorded fact, but the
     # apparent 5 -> 3 drop between the last two runs is NOT evidence that the
     # in_scope change regressed confidence: four samples of the *current*
     # config scored 3, 3, 5 and 4 (see `repeats/` and
@@ -133,7 +134,7 @@ def test_confidence_agreement_is_noise_dominated():
 
 
 def test_2304_stays_out_of_scope_across_every_repeat():
-    """The robust form of Finding 3.
+    """The robust form of the #2304 in_scope result.
 
     A single run showing `in_scope: false` for #2304 could be luck. All four
     samples of the current config agree, which is the claim worth making.
@@ -148,10 +149,10 @@ def test_in_scope_tightening_can_also_drop_a_real_bug():
     """The cost of the asymmetry, recorded rather than glossed over.
 
     The in_scope criteria tell the model to drop when genuinely ambiguous,
-    which is deliberate (Steps §1: a wrong drop costs a human triage, a wrong
-    keep costs maintainer attention). One of the four samples takes that far
+    which is deliberate (a wrong drop costs a human triage, a wrong keep
+    costs maintainer attention). One of the four samples takes that far
     enough to drop #2484, a real bug in the hand baseline. Worth knowing
-    before Steps §6 posts anything: this trades a false-comment risk for an
+    before the workflow posts anything: this trades a false-comment risk for an
     occasional false drop, which is the intended direction but not free.
     """
     if not REPEATS:  # pragma: no cover - repeats not always present
@@ -163,7 +164,7 @@ def test_in_scope_tightening_can_also_drop_a_real_bug():
 
 
 def test_2304_false_keep_is_closed():
-    """Finding 3, stated as the thing that actually matters.
+    """The #2304 in_scope result, stated as the thing that actually matters.
 
     #2304 is a maintainer-facing "this check is obsolete, remove it" report:
     nobody hit a failure, and a reproduction would only re-assert what the

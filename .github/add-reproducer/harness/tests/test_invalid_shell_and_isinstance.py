@@ -1,13 +1,12 @@
 """A fake hook tool whose script is not valid shell, and an unread lookup in
-a `try` with `assert isinstance(N, X)` after it
-(`spike-step-5/static-retry/RESULT.md` §35's 11-7, §36).
+a `try` with `assert isinstance(N, X)` after it.
 
-Live on `#2709`, 11-7 had both faults, and each alone makes it fail on
+A live answer for `#2709` had both faults, and each alone makes it fail on
 every version of ops: its `relation-ids` and `relation-list` fakes wrote
 `echo '['"db:2'"]'`, which `sh` cannot parse, and, with that fixed, it
 looked the databag up inside the `try` without reading it and then asserted
-that the name was a `RelationNotFoundError`. It failed the same way on
-3.8.3 and `main`, and the pipeline would have commented.
+that the name was a `RelationNotFoundError`. It fails the same way on
+3.8.3 and `main`, so without these rules the pipeline would comment.
 """
 
 from __future__ import annotations
@@ -59,11 +58,10 @@ _TAIL = '''\
     assert isinstance(relation_data, ops.RelationNotFoundError)
 '''
 
-# 11-7's final answer as the live run wrote it
-# (`live/retry-hooktool11-2709.json` run 7).
+# The live answer as it was written.
 _ELEVEN_SEVEN = _HEAD + _BROKEN_FAKES + _TAIL
 _QUOTING_FIXED = _HEAD + _FIXED_FAKES + _TAIL
-# And with 9-1's read-and-assert as well.
+# And with a read-and-assert that can pass as well.
 _BOTH_FIXED = _QUOTING_FIXED.replace(
     "relation_data = relation.data[relation.app]", "relation_data = dict(relation.data[relation.app])"
 ).replace(
@@ -105,7 +103,7 @@ def _isinstance(source: str) -> list[str]:
     return [r for r in check(source).reasons if "can never pass" in r]
 
 
-# --- 11-7 -------------------------------------------------------------------
+# --- the live answer --------------------------------------------------------
 
 
 def test_eleven_seven_as_written_is_rejected_on_its_shell(tmp_path, monkeypatch):

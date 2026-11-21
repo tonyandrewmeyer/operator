@@ -1,12 +1,11 @@
 """A value compared with pytest's `tmp_path` or `tmpdir` in a test that never
-hands the fixture to the charm (`spike-step-5/static-retry/RESULT.md` §38's
-prbar2045-8, §39).
+hands the fixture to the charm.
 
-Live on `#2045`, prbar2045-8's re-ask, told not to read `ctx._charm_dir`,
+On `#2045`, an answer re-asked and told not to read `ctx._charm_dir`
 compared the cwd a `start` handler captured with `str(tmp_path)`. The
 `Context` was built without `charm_root=`, so the charm root was a separate
 temporary directory, and the assertion failed on 3.8.3, `main` and the fix
-branch alike: a false comment. The five hand probes of §38 are the
+branch alike: a false comment. Five hand-written probes are the
 calibration cases.
 """
 
@@ -33,7 +32,7 @@ class MyCharm(ops.CharmBase):
         captured['cwd'] = os.getcwd()
 '''
 
-# prbar2045-8's final answer, as saved.
+# That `#2045` answer, as saved.
 _SAVED = _CHARM + '''\
 
 
@@ -75,19 +74,19 @@ def test_the_tmpdir_probe_is_rejected():
 @pytest.mark.parametrize(
     "body",
     [
-        # §38's probe: the same fixture given as the charm root is a fair comparison.
+        # The same fixture given as the charm root is a fair comparison.
         _SAVED.replace(
             "meta={'name': 'my-charm'})", "meta={'name': 'my-charm'}, charm_root=tmp_path)"
         ),
-        # §38's probe: the cwd before `ctx.run`, no fixture at all.
+        # The cwd before `ctx.run`, no fixture at all.
         _SAVED.replace(
             "def test_cwd_is_charm_dir(tmp_path):\n",
             "def test_cwd_is_charm_dir():\n    import pathlib\n    before = pathlib.Path.cwd()\n",
         )
         .replace("str(tmp_path)", "str(before)")
         .replace("==", "!="),
-        # §38's probe: the charm directory captured in the handler; `tmp_path`
-        # is taken and never used.
+        # The charm directory captured in the handler; `tmp_path` is taken
+        # and never used.
         _SAVED.replace(
             "captured['cwd'] = os.getcwd()",
             "captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = str(self.framework.charm_dir)",

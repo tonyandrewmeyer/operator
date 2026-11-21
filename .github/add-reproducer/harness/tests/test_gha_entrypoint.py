@@ -107,10 +107,9 @@ def test_marker_prefix_matches_what_the_composer_appends(run):
 
 # -- the extraction record reaches the artefact, the log and the summary -----
 #
-# A run that stops at the in-scope gate has no `RunResult`, so before the
-# extraction record existed it wrote nothing at all and `upload-artifact`
-# reported `No files were found` (`spike-step-5/seventh-dispatch/RESULT.md`
-# §4.2). That is the stop four dispatches took on 2026-09-23.
+# A run that stops at the in-scope gate has no `RunResult`, so without the
+# extraction record it would write nothing at all and `upload-artifact`
+# would report `No files were found`.
 
 
 def _gate_stop_result(number: int = 2484):
@@ -185,8 +184,8 @@ def test_a_gate_stop_writes_an_extraction_artefact(run, gate_stop, capsys):
 def test_a_gate_stop_prints_the_record_to_the_job_log(run, gate_stop, capsys):
     assert run.main() == 0
     out = capsys.readouterr().out
-    # The `stage=` line is unchanged apart from its parenthetical, so earlier
-    # rounds' logs still read the same way and a grep across them still works.
+    # The `stage=` line keeps its shape apart from its parenthetical, so logs
+    # read the same way across runs and a grep across them still works.
     assert "stage=extraction" in out
     assert "reason=in_scope=false (second pass ran and confirmed the drop)" in out
     assert "provider=DeepSeek" in out

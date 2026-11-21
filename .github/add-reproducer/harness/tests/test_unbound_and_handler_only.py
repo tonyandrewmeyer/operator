@@ -1,12 +1,11 @@
-"""Two narrow widenings from §32's live answers on `#2709`
-(`spike-step-5/static-retry/RESULT.md` §32, §33):
+"""Two narrow widenings from live answers on `#2709`:
 
-- 9-4: an unbound name after a `try` whose body looks the relation up and
+- an unbound name after a `try` whose body looks the relation up and
   assigns the unread databag lookup to a name (`relation =
   model.get_relation('db', 1)`; `data = relation.data[relation.app]`), so
   the `except ops.ModelError as e: result = e` never runs and `assert
   isinstance(result, ...)` raises `UnboundLocalError` on every version;
-- 9-5: an unread lookup in a `try` whose only assertion is in a handler,
+- an unread lookup in a `try` whose only assertion is in a handler,
   so no handler runs and the test passes on every version.
 """
 
@@ -65,7 +64,7 @@ def _handler_only(source: str) -> list[str]:
     return [r for r in check(source).reasons if "only assertions are in" in r]
 
 
-# --- 9-4: unbound after `try`, relation and lookup inside it ----------------
+# --- unbound after `try`, relation and lookup inside it ---------------------
 
 _NINE_FOUR = _HEAD + '''\
     try:
@@ -134,7 +133,7 @@ def test_a_relation_from_another_call_is_left_alone():
     assert not _unbound(source)
 
 
-# --- 9-5: unread lookup, the only assertion in a handler --------------------
+# --- unread lookup, the only assertion in a handler -------------------------
 
 _NINE_FIVE = _HEAD + '''\
     relation = model.get_relation('db', 1)

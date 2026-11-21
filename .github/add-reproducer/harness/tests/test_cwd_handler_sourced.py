@@ -1,14 +1,13 @@
 """A claim about the working directory whose other side does not come from
-the handler (`spike-step-5/static-retry/RESULT.md` §41).
+the handler.
 
-Four saved answers produced false comments on `#2045` (§38, §39 twice, §40)
-by comparing the cwd with a guess: pytest's `tmp_path`, a path ending in the
-charm's name, and the literal `'/path/to/charm'` (in a plain class with no
-`ops`). Each failed on 3.8.3, `main` and the fix branch alike. All 25 valid
-`#2045` finals of §38 to §40 compared the cwd with the charm directory read in
-a handler (`self.framework.charm_dir` / `self.charm_dir`) or with
-`mgr.charm...charm_dir` inside `with ctx(...)`. §39's and §40's hand probes are
-calibration cases too.
+Four saved answers produced false comments on `#2045` by comparing the cwd with
+a guess: pytest's `tmp_path`, a path ending in the charm's name, and the
+literal `'/path/to/charm'` (in a plain class with no `ops`). Each failed on
+3.8.3, `main` and the fix branch alike. All 25 valid `#2045` finals saved
+alongside them compared the cwd with the charm directory read in a handler
+(`self.framework.charm_dir` / `self.charm_dir`) or with `mgr.charm...charm_dir`
+inside `with ctx(...)`. Hand-written probes are calibration cases too.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ _MARK = "compares the working directory with"
 def _rule(source: str) -> list[str]:
     return _cwd_compared_with_unsourced_value(ast.parse(source))
 
-# §38 prbar2045-8: compared with `str(tmp_path)`; saved final, a false comment.
+# Compared with `str(tmp_path)`; saved final, a false comment.
 _FALSE_A08 = '''\
 import os
 
@@ -50,7 +49,7 @@ def test_cwd_is_charm_dir(tmp_path):
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'] == str(tmp_path)
 '''
-# §39 2045b-1: `captured.endswith('/my-charm')`; saved final, a false comment.
+# `captured.endswith('/my-charm')`; saved final, a false comment.
 _FALSE_B01 = '''\
 import os
 import pytest
@@ -73,7 +72,7 @@ def test_current_directory_is_charm_root():
     ctx.run(ctx.on.start(), testing.State())
     assert captured.endswith('/my-charm')
 '''
-# §39 2045b-5: `captured['cwd'].endswith('/my-charm')`; saved final, a false comment.
+# `captured['cwd'].endswith('/my-charm')`; saved final, a false comment.
 _FALSE_B05 = '''\
 import os
 
@@ -97,7 +96,7 @@ def test_charm_dir_is_cwd():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'].endswith('/my-charm')
 '''
-# §40 2045c-4: plain class, `== '/path/to/charm'`; saved final, a false comment.
+# Plain class, `== '/path/to/charm'`; saved final, a false comment.
 _FALSE_C04 = '''\
 import os
 
@@ -109,7 +108,7 @@ def test_cwd_is_charm_dir():
     charm = MyCharm()
     assert str(charm.charm_dir) == '/path/to/charm'
 '''
-# A valid `#2045` final (§38 run 1).
+# A valid `#2045` final.
 _VALID_A01 = '''\
 import os
 import ops
@@ -132,7 +131,7 @@ def test_cwd_matches_charm_dir():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'] == str(captured['charm_dir'])
 '''
-# A valid `#2045` final (§38 run 4).
+# A valid `#2045` final.
 _VALID_A04 = '''\
 import os
 import pytest
@@ -155,7 +154,7 @@ def test_cwd_is_charm_dir():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'] == captured['charm_dir']
 '''
-# A valid `#2045` final (§38 run 5).
+# A valid `#2045` final.
 _VALID_A05 = '''\
 import os
 import ops
@@ -176,7 +175,7 @@ def test_charm_cwd_matches_charm_dir():
     assert captured['cwd'] == captured['charm_dir'], \\
         f"Expected cwd ({captured['cwd']}) to match charm_dir ({captured['charm_dir']})"
 '''
-# A valid `#2045` final (§38 run 7).
+# A valid `#2045` final.
 _VALID_A07 = '''\
 import os
 import ops
@@ -198,7 +197,7 @@ def test_charm_dir_matches_cwd():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'] == captured['charm_dir']
 '''
-# A valid `#2045` final (§39 run 0).
+# A valid `#2045` final.
 _VALID_B00 = '''\
 import os
 import ops
@@ -212,7 +211,7 @@ def test_charm_dir_equals_cwd():
     with ctx(ctx.on.update_status(), testing.State()) as mgr:
         assert str(mgr.charm.charm_dir) == os.getcwd()
 '''
-# A valid `#2045` final (§39 run 3).
+# A valid `#2045` final.
 _VALID_B03 = '''\
 import os
 
@@ -238,7 +237,7 @@ def test_cwd_is_charm_root():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'] == captured['charm_dir']
 '''
-# A valid `#2045` final (§39 run 9).
+# A valid `#2045` final.
 _VALID_B09 = '''\
 import os
 import ops
@@ -260,7 +259,7 @@ def test_cwd_is_charm_dir():
     ctx.run(ctx.on.start(), testing.State())
     assert str(captured['cwd']) == str(captured['charm_dir'])
 '''
-# A valid `#2045` final (§39 run 10).
+# A valid `#2045` final.
 _VALID_B10 = '''\
 import os
 import pytest
@@ -275,7 +274,7 @@ def test_getcwd_is_charm_root():
     with ctx(ctx.on.start(), testing.State()) as mgr:
         assert os.getcwd() == str(mgr.charm.framework.charm_dir)
 '''
-# A valid `#2045` final (§39 run 13).
+# A valid `#2045` final.
 _VALID_B13 = '''\
 import os
 
@@ -299,7 +298,7 @@ def test_cwd_is_charm_root(tmp_path):
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'] == captured['charm_dir']
 '''
-# A valid `#2045` final (§40 run 5).
+# A valid `#2045` final.
 _VALID_C05 = '''\
 import os
 import pytest
@@ -314,7 +313,7 @@ def test_cwd_is_charm_root():
     with ctx(ctx.on.update_status(), testing.State()) as mgr:
         assert os.getcwd() == str(mgr.charm.framework.charm_dir)
 '''
-# A valid `#2045` final (§40 run 8).
+# A valid `#2045` final.
 _VALID_C08 = '''\
 import os
 
@@ -337,7 +336,7 @@ def test_charm_dir_matches_cwd():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['charm_dir'] == captured['cwd']
 '''
-# A valid `#2045` final (§40 run 13).
+# A valid `#2045` final.
 _VALID_C13 = '''\
 import os
 import pytest
@@ -360,7 +359,7 @@ def test_charm_dir_matches_cwd():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['charm_dir'] == captured['cwd']
 '''
-# A valid `#2045` final (§40 run 14).
+# A valid `#2045` final.
 _VALID_C14 = '''\
 import os
 import ops
@@ -382,7 +381,7 @@ def test_charm_dir_matches_cwd():
     ctx.run(ctx.on.start(), testing.State())
     assert captured['cwd'] == str(captured['charm_dir'])
 '''
-# A valid `#2045` final (§40 run 15).
+# A valid `#2045` final.
 _VALID_C15 = '''\
 import os
 import ops
@@ -642,7 +641,7 @@ _VALID = [
 )
 def test_false_finals_rejected(source: str):
     # The rule alone rejects each; in `check()` it is a backstop, so for
-    # §38's and §39's finals the older, narrower rules speak instead.
+    # the `tmp_path` and charm-name finals the narrower rules speak instead.
     reasons = _rule(source)
     assert reasons
     assert all(_MARK in r and "self.framework.charm_dir" in r for r in reasons)
@@ -664,7 +663,7 @@ def test_valid_finals_accepted(source: str):
     assert check(source).passed
 
 
-# (probe, whether the new rule rejects it). Each matches the probe's
+# (probe, whether this rule rejects it). Each matches the probe's
 # expectation: the probes that fail on the fix branch too (false comments)
 # are rejected; the charm_root, handler-sourced and cwd-vs-cwd ones are not.
 _PROBES = [

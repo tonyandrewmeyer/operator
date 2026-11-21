@@ -12,7 +12,7 @@ that reads params.yaml at runtime and wires itself up" shape that would
 still pack cleanly, and hardcoding keeps the generated charm inspectable.
 
 params.yaml values ultimately trace back to LLM hypothesis-extraction
-output (PLAN.md Approach §3) -- treat every string as untrusted. Structural
+output -- treat every string as untrusted. Structural
 identifiers (relation/storage/container/service names) are validated
 against juju's naming rules before being written into charmcraft.yaml or
 Python source; free-form values (the pebble command) are never
@@ -34,19 +34,18 @@ SURFACES = {"update-status", "config-changed", "relation-changed", "pebble-custo
 # The status message the generated charm sets once it is up and observing,
 # before anything has fired. Without it the charm sets no status at all
 # until its surface fires, so there is no way to tell "ready and waiting"
-# from "still installing" -- and the first real k8s run (2026-08-18)
-# stimulated a unit that was still running its install hook, recording the
-# notice before the observer existed. `juju wait-for ... active` is
-# meaningful only because of this.
+# from "still installing" -- a k8s run can stimulate a unit that is still
+# running its install hook, recording the notice before the observer
+# exists. `juju wait-for ... active` is meaningful only because of this.
 READY_STATUS = "reproducer ready"
 
 # The literal status-message prefix each surface produces when it fires.
 # This is the single source of truth for the classifier's
 # `expected_signal`: the string is decided *here*, by the template, so
-# asking an LLM to guess it can only ever introduce a mismatch (the first
-# successful k8s stimulus, 2026-08-18, was scored against the invented
-# "Received Pebble custom notice" while the charm emitted "observed
-# notice: ...", so the signal could never be found whatever the bug did).
+# asking an LLM to guess it can only ever introduce a mismatch (an
+# invented "Received Pebble custom notice" never matches the charm's
+# "observed notice: ...", so the signal could never be found whatever the
+# bug did).
 SURFACE_SIGNALS = {
     "update-status": "observed",
     "config-changed": "observed",
@@ -126,11 +125,6 @@ def build_charmcraft_yaml(p):
         # No top-level `base`: the platform key already carries it, and
         # charmcraft rejects declaring both -- "Platform 'ubuntu@24.04:amd64'
         # declares a base and a top-level base or build-base is declared."
-        # The 2026-07-22 fix for the original `platforms: {amd64: {}}` bug
-        # switched to this key form but left the `base` line behind, which
-        # made the pair mutually exclusive; charmcraft 4.3.1 enforces it and
-        # nothing packed a rendered charm between then and the first real
-        # run, so it went unnoticed.
         doc["platforms"] = {"ubuntu@24.04:amd64": None}
         container = p["pebble_service"]["container"]
         doc["containers"] = {container: {"resource": f"{container}-image"}}

@@ -1,15 +1,13 @@
-"""spike-step-5/gha-wallclock-2026-09-07/RESULT.md §3: a relative
-`--out-dir` builds a relative `charm_dir`, and `seams/runner.py`'s
-`_scratch_sequence()` embeds that verbatim into `juju deploy -m <target>
-{charm_dir}/*.charm ...` -- a command that runs with `cwd` set to the
-*issue's* directory, not wherever the relative path was anchored, and
-which juju 4 additionally refuses outright once reached ("... is
+"""Left as is, a relative `--out-dir` builds a relative `charm_dir`, and
+`seams/runner.py`'s `_scratch_sequence()` embeds that verbatim into
+`juju deploy -m <target> {charm_dir}/*.charm ...` -- a command that runs with
+`cwd` set to the *issue's* directory, not wherever the relative path was
+anchored, and which juju 4 additionally refuses outright once reached ("... is
 ambiguous. To deploy a local charm or bundle, run `juju deploy ./out/...`").
 
-Both VM sessions that measured this harness passed an absolute `--out-dir`
-by chance and so never hit this; the first GHA `workflow_dispatch` run
-that used `"$PWD/out"` only avoided it because that expands to an
-absolute path too -- nothing in the harness itself normalised one.
+A caller that passes an absolute `--out-dir`, or `"$PWD/out"` (which
+expands to one), never hits this, so the harness has to normalise the
+path itself rather than rely on the caller.
 
 These tests exercise the real failing shape end to end (a genuinely
 relative `Path` handed to `Pipeline`, reaching a scratch branch's

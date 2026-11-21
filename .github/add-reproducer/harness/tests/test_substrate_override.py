@@ -1,9 +1,9 @@
 """The substrate override: a fake-hook-tool `_ModelBackend` test runs as
 `substrate: none`, whatever the answer's `substrate` field says.
 
-On `#2709` 13 of 14 live answers wrote that test and none said `none`, so
-every one stopped at the stimulus gate without running it
-(`spike-step-5/static-retry/RESULT.md` §30). These tests drive the whole
+On `#2709` 13 of 14 answers wrote that test and none said `none`, so
+without the override every one would stop at the stimulus gate without
+running it. These tests drive the whole
 pipeline with a static extraction and a runner that records what it was
 asked to run.
 """

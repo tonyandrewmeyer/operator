@@ -1,8 +1,7 @@
-"""Runnability gate (`spike-step-5/live-llm/RESULT.md` Finding 2).
+"""Runnability gate: are an extraction's `commands[]` shell at all?
 
-The strings in the `live_*` tests are the **real** output of the live
-`deepseek/deepseek-chat` extraction run recorded in
-`spike-step-5/live-llm/out/`, not invented examples.
+The strings in the `live_*` tests are the **real** output of a live
+`deepseek/deepseek-chat` extraction run, not invented examples.
 """
 
 import json
@@ -126,10 +125,9 @@ def test_hand_corpus_runnability_is_measured_not_assumed():
 def _in_scope_command_lists(directory: Path) -> list[list[str]]:
     """`commands[]` of the in-scope extractions in a recorded live run.
 
-    In-scope is the right population for Approach §3's `commands_runnable`
-    bar: an out-of-scope extraction carries an empty `commands[]` by design
-    and never reaches a runner, so counting it as "not runnable" understates
-    the metric.
+    In-scope is the right population for the `commands_runnable` bar: an
+    out-of-scope extraction carries an empty `commands[]` by design and never
+    reaches a runner, so counting it as "not runnable" understates the metric.
     """
     lists = []
     for path in sorted(directory.glob("*.json")):
@@ -148,29 +146,29 @@ def _in_scope_command_lists(directory: Path) -> list[list[str]]:
         # Original run: prose, bare test names, Python fragments. The one
         # runnable entry is #2341's `python3 -m pytest tests/test_scenario.py`.
         (LIVE_SUBSTRATE, (1, 7)),
-        # After the substrate fix (Finding 1). Unchanged fraction -- that fix
+        # After the substrate fix. Unchanged fraction -- that fix
         # targeted routing, not commands -- though the one runnable issue
         # changed to #2045.
         (LIVE_COMMANDS, (1, 7)),
-        # After the commands-prompt hardening (Finding 2): five issues emit
+        # After the commands-prompt hardening: five issues emit
         # uv init -> uv add -> heredoc -> pytest.
         (LIVE_INSCOPE, (5, 7)),
-        # After the in_scope definition (Finding 3): #2185 and #2304 are now
+        # After the in_scope definition: #2185 and #2304 are now
         # correctly out of scope, so they leave the denominator rather than
         # counting as failures, and #2639 gained a runnable recipe. 4/5 = 80%,
-        # over Approach §3's >=70% bar.
+        # over the >=70% bar.
         (LIVE_OUT, (4, 5)),
     ],
 )
 def test_live_commands_runnable_fraction(run_dir, expected):
-    """Approach §3's commands_runnable metric, pinned across all four real runs.
+    """The commands_runnable metric, pinned across four recorded real runs.
 
-    Every directory is committed, so this documents the progression rather
-    than asserting it from memory. If a later prompt change moves a number,
-    this test is what should fail -- update it and record the new fraction in
-    `spike-step-5/live-llm/RESULT.md`.
+    When the recorded runs are checked out alongside the harness, this
+    documents the progression rather than asserting it from memory. If a
+    later prompt change moves a number, this test is what should fail --
+    update it with the new fraction.
     """
-    if not run_dir.exists():  # pragma: no cover - spike output not always present
+    if not run_dir.exists():  # pragma: no cover - recorded runs not always present
         pytest.skip(f"{run_dir.name} not available")
     assert runnability.runnable_fraction(_in_scope_command_lists(run_dir)) == expected
 
@@ -224,7 +222,7 @@ def test_substrate_none_prose_is_dropped_by_synthesis_not_run(tmp_path):
 
     `needs_test_file()` is true for any substrate-none hypothesis with no
     pytest invocation, so a prose-only extraction gets a synthesised test
-    appended -- and the prose itself is now dropped from the setup commands
+    appended -- and the prose itself is dropped from the setup commands
     rather than kept and executed. That's a better outcome than gating: a real
     reproduction is attempted from expected/observed, and nothing exits 127.
     """
@@ -246,7 +244,7 @@ def test_substrate_none_prose_is_dropped_by_synthesis_not_run(tmp_path):
 def test_gate_blocks_prose_on_the_clone_branch(tmp_path):
     """`k8s-clone` has no synthesis step, so the gate is the only protection.
 
-    Shape per spike-step-4's third-branch heuristic: a ci_run_url plus no
+    Shape per the third-branch heuristic: a ci_run_url plus no
     self-contained snippet.
     """
     import runner_stage

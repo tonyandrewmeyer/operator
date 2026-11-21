@@ -35,8 +35,8 @@ def test_extract_2341_high_confidence_none(extractor):
 
 def test_extract_2327_carries_symbol_anchor(extractor):
     hyp = extractor.extract(_load_issue(2327))
-    # Verified 2026-07-30 against the real permalink target (`gh`/curl on
-    # canonical/operator@deba324, ops/model.py#L970): that line is
+    # Checked against the real permalink target (canonical/operator@deba324,
+    # ops/model.py#L970): that line is
     # `RelationMapping._get_unique`'s `def`, not `Model.get_relation`'s (line
     # 244, a thin wrapper that calls it) -- "the dotted symbol the linked
     # line belongs to" per extraction.py's own prompt wording.
@@ -90,12 +90,11 @@ def _raw(**overrides) -> dict:
     return raw
 
 
-# `spike-step-5/live-llm/RESULT.md` Finding 1: a live model returned
-# `substrate: null` for three host-only hypotheses *and* for #2639, the only
-# hypothesis that has ever reproduced. `choose_branch` matched the string
-# "none" exactly and fell through to `k8s-scratch`, so a null silently bought
-# a cluster. Both guesses are wrong (see validate()'s comment), so an absent
-# substrate is now a failed extraction -> Approach §3 stay-silent.
+# A live model can return `substrate: null` for host-only hypotheses *and*
+# for k8s ones like #2639. `choose_branch` matches the string "none" exactly
+# and would fall through to `k8s-scratch`, so a null would silently buy a
+# cluster. Both guesses are wrong (see validate()'s comment), so an absent
+# substrate is a failed extraction -> stay silent.
 @pytest.mark.parametrize("substrate", [None, "kubernetes", "", "K8s", "microk8s"])
 def test_validate_rejects_unusable_substrate_when_in_scope(substrate):
     with pytest.raises(ExtractionInvalid, match="substrate"):
@@ -138,9 +137,9 @@ def test_extract_missing_fixture_raises():
         extractor.extract(issue)
 
 
-# `spike-step-5/corpus-v2/RESULT.md`: requiring expected/observed of every
-# extraction turned two clean out-of-scope drops into ExtractionInvalid, the
-# model having returned null for both after judging them not to be bugs. Same
+# Requiring expected/observed of every extraction would turn clean
+# out-of-scope drops into ExtractionInvalid, the model having returned null
+# for both after judging them not to be bugs. Same
 # shape as the substrate defect: a field demanded of every extraction that is
 # only defined for some.
 def test_out_of_scope_may_omit_expected_and_observed():

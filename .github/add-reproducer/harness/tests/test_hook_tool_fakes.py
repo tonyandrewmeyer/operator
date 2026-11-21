@@ -2,15 +2,15 @@
 
 `ops.testing` replaces the backend that runs hook tools, so it cannot
 produce what Juju's hook tools return. On `#2709` the extraction wrote an
-`ops.testing` test expecting Juju's "permission denied" in 2 of 24 live runs,
-and each failed on its own assertion with or without the fix, which rung 6
-reads as a reproduction (`spike-step-5/static-retry/RESULT.md` §10, §11).
+`ops.testing` test expecting Juju's "permission denied" in 2 of 24 runs, and
+each failed on its own assertion with or without the fix, which rung 6 reads
+as a reproduction.
 These tests cover the three parts of the change: the extraction's fake hook
 tool shape and its "needs_juju" decline, the static check's `_backend` rule,
 and the composer's caveat when a test fakes hook tools.
 
 The calibration corpus is the 24 saved `#2709` extractions under
-`fixtures/static_test_check/2709.json` (§10, §11, §13).
+`fixtures/static_test_check/2709.json`.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 # The test from `#2709`'s thread, in the shape the prompt asks for: it fails
 # on an assertion on ops 3.8.3 and passes with the fix
 # (`test_the_fake_tool_test_fails_only_on_its_assertion` runs it). Its
-# `relation-list` fake printed `[]` until §17, which made ops run
+# `relation-list` fake must not print `[]`: that makes ops run
 # `relation-list --app`, get `[]` back as the application name, and fail
 # with `TypeError` on both versions.
 _FAKE_TOOL_TEST = '''\
@@ -86,9 +86,9 @@ def _prompt_example() -> str:
 
 
 def test_the_backend_rule_rejects_only_the_backend_test_in_the_corpus():
-    """§10 run 3 is the only one of the 24 that reaches into the backend; §11
-    run 6, the other false reproduction, uses public API and is left to the
-    prompt."""
+    """Run 3 of `retry-2709.json` is the only one of the 24 that reaches into
+    the backend; the other false reproduction uses public API and is left to
+    the prompt."""
     rejected = []
     for record in _corpus():
         if record["test_file"] is None:
@@ -141,9 +141,9 @@ def test_the_prompt_example_passes_the_check():
 
 
 def test_the_prompt_example_nests_no_quotes_in_an_f_string():
-    """All 8 live answers at §16 copied the example's
-    `f"{bin_dir}{os.pathsep}{os.environ['PATH']}"` with the outer quotes
-    swapped, which only parses on Python 3.12 and later (§17)."""
+    """Answers copy the example closely: given
+    `f"{bin_dir}{os.pathsep}{os.environ['PATH']}"`, all 8 swapped the outer
+    quotes, which only parses on Python 3.12 and later."""
     example = _prompt_example()
     for node in ast.walk(ast.parse(example)):
         if isinstance(node, ast.JoinedStr):
@@ -211,8 +211,8 @@ def test_the_prompt_scopes_the_hook_tool_guidance_to_substrate_none():
 
 
 def test_the_prompt_puts_hook_tool_bugs_on_substrate_none():
-    """All 23 `#2709` answers in `spike-step-5/static-retry/RESULT.md` §29
-    said `substrate: lxd`, where the hook-tool guidance (scoped to
+    """Without this rule, all 23 `#2709` answers in one batch said
+    `substrate: lxd`, where the hook-tool guidance (scoped to
     `substrate: none`) never applies and `commands[]` never runs."""
     text = " ".join(extraction._SCHEMA_INSTRUCTIONS.split())
     rule = text[text.index("A bug in what a Juju hook tool returns") :]

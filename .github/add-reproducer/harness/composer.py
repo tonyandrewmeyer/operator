@@ -1,30 +1,25 @@
-"""Comment composition (PLAN.md Approach §6).
+"""Comment composition.
 
 Every comment is rendered by this module's own code from the run record:
 the automation banner, the versions line, the commands that ran (with the
 test file they write), their output, any captured log records or control
 run, the closing "Reproduced ... at ..." line and the idempotency marker.
 
-Until `spike-step-5/static-retry/RESULT.md` §42 an LLM wrote the middle of
-the comment (`Composer`, behind an `LLMSeam`), with `compose_template()` as
-its fallback. But every part it wrote was a copy of something in the run
-record that the prompt told it to copy verbatim, and `_validate()` rejected
-a response whose commands were not exactly the ones that ran; the only
-freedom left to the model was the wrapper, and that is where the composed
-comments differed. A human read of eleven composed `#2045` comments found
-one (`composed-41/2045-prbar2045d-14.md`) whose wrapper alone differed from
-the other ten: an unlabelled fence, a reworded opening sentence, and a
-closing `Reproduced on unpinned/unpinned` that contradicted its own
-`substrate=none`. With nothing left for the model to supply, the comment is
-rendered here and no LLM call is made. `Composer` keeps its constructor so
-the pipeline's wiring is unchanged.
+No LLM writes any part of the comment. Every part of it is a copy of
+something in the run record, so a model could only ever vary the wrapper
+around those parts -- an unlabelled fence, a reworded opening sentence, a
+closing `Reproduced on unpinned/unpinned` that contradicts its own
+`substrate=none` -- and that is exactly where model-written comments
+differ from one another. With nothing left for a model to supply, the
+comment is rendered here. `Composer` keeps its `LLMSeam` constructor so the
+pipeline's wiring is unchanged.
 
 `COMMENT_OUTCOMES` gates rendering first: a silent outcome returns `None`
-(PLAN.md Goal §4: "Nothing useful produced -> stay silent").
+(nothing useful produced -> stay silent).
 
-The leading `AUTOMATION_PREFIX` disclaimer is the mitigation criterion 2
-rests on (`spike-step-5/EXIT-CRITERIA.md`, criterion 2), and the trailing
-`<!-- add-reproducer:issue=<n>:run=<uuid> -->` marker is what Approach §7's
+The leading `AUTOMATION_PREFIX` disclaimer tells the reader the comment is
+an automated attempt to verify, and the trailing
+`<!-- add-reproducer:issue=<n>:run=<uuid> -->` marker is what the
 "skip if a comment carrying the same marker exists" check matches, so both
 are on every comment.
 """
@@ -48,14 +43,12 @@ from seams.llm import LLMSeam
 
 _TRIM_CHARS = 1500
 
-#: Prepended verbatim to every composed comment, on both paths. PLAN.md's
-#: Open Questions section named this as mitigation (b) for the
-#: false-comment cost -- "prefix every comment with a visible 'reproduced by
-#: automation, please verify' line", noting that the trailing HTML marker
-#: isn't reader-visible. It is worded as an *attempt* so the one string
-#: covers the `partial` rung as honestly as the reproduced ones, and it is
-#: a blockquote so it reads as chrome above the comment rather than as the
-#: comment's first claim.
+#: Prepended verbatim to every composed comment. It mitigates the cost of a
+#: false comment with a visible "reproduced by automation, please verify" line,
+#: since the trailing HTML marker isn't reader-visible. It is worded as an
+#: *attempt* so the one string covers the `partial` rung as honestly as the
+#: reproduced ones, and it is a blockquote so it reads as chrome above the
+#: comment rather than as the comment's first claim.
 AUTOMATION_PREFIX = (
     "> **Automated reproduction attempt.** These steps were produced by a bot "
     "that ran the commands below; please verify before relying on them."
@@ -94,10 +87,9 @@ def _trim(text: str, limit: int = _TRIM_CHARS) -> str:
 def _versions_line(hypothesis: Hypothesis, run_result: RunResult) -> str:
     """What the reproduction ran on, in words.
 
-    Before `spike-step-5/static-retry/RESULT.md` §42 this was
-    `repo=unpinned, juju=unpinned, base=unpinned, substrate=none`: four
-    pinned-or-not fields, two of them meaningless for a Scenario-only run,
-    which has no Juju and no base. A reader wants what was used, so this
+    Not `repo=unpinned, juju=unpinned, base=unpinned, substrate=none`:
+    four pinned-or-not fields, two of them meaningless for a Scenario-only
+    run, which has no Juju and no base. A reader wants what was used, so this
     leads with what the run record measured and leaves out what does not
     apply.
 
@@ -141,7 +133,7 @@ def _scenario_only(hypothesis: Hypothesis) -> bool:
 
 
 def _when(timestamp: str) -> str:
-    """`2026-11-19T12:46:00.843074+00:00` as `2026-11-19 12:46 UTC`: a
+    """`YYYY-MM-DDTHH:MM:SS.ffffff+00:00` as `YYYY-MM-DD HH:MM UTC`: a
     reader needs the minute, not the microsecond. A timestamp that does not
     parse is shown as given."""
     try:
@@ -182,18 +174,16 @@ def _log_output(run_result: RunResult) -> str | None:
     """Rendered captured-log-record text, or `None` if no command recorded
     any.
 
-    `spike-step-5/composer-scale/RESULT.md` Finding 1: `classifier.classify()`'s
-    rung 3 (`reproduced_log_only`, spike-step-4/2341's shape -- a
-    `logger.warning()` that never touches stdout/stderr) matches against
-    `CommandResult.log_records`, a channel `_observed_output()` never reads
-    (it only ever walks `stdout`/`stderr`). Before this fix, every composed
-    `reproduced_log_only` comment rendered "Observed output" from stdout/
-    stderr alone -- for this rung specifically, that is the evidence the
-    classifier did *not* use, and it can read as a clean pass (e.g. "1 passed
-    in 0.08s") sitting directly under a "the bug reproduced" opening line,
-    self-contradictory on its face. Same shape as Finding 1's control-run gap
-    in `composer-live/RESULT.md`: the one thing a reader would need to
-    verify the claim was never shown.
+    `classifier.classify()`'s rung 3 (`reproduced_log_only`, `#2341`'s
+    shape -- a `logger.warning()` that never touches stdout/stderr) matches
+    against `CommandResult.log_records`, a channel `_observed_output()` never
+    reads (it only ever walks `stdout`/`stderr`). Without this, a
+    `reproduced_log_only` comment would render output from stdout/stderr
+    alone -- for this rung specifically, that is the evidence the classifier
+    did *not* use, and it can read as a clean pass (e.g. "1 passed in
+    0.08s") under a claim that the bug reproduced, self-contradictory on its
+    face. Same shape as `_control_output()`: the one thing a reader needs to
+    verify the claim has to be shown.
     """
     lines = [record for c in run_result.commands for record in c.log_records]
     if not lines:
@@ -210,11 +200,9 @@ def _resolved_test_file(hypothesis: Hypothesis) -> TestFile | None:
     for the run that happened, where an embedded heredoc is only ever a
     plan for one.
 
-    `spike-step-5/maintainer-review/FOLLOWUPS.md` §1: closing only the
-    `synthesized_test_file` gap (`composer-live/RESULT.md` Finding 4,
-    2026-07-30) left every hypothesis whose test file arrived the other way
-    with no rendered file at all -- three of `maintainer-review/RESULT.md`
-    §7's five passing ratings were conditional on seeing this content.
+    Reading only `synthesized_test_file` would leave every hypothesis whose
+    test file arrived the other way with no rendered file at all, and a
+    reviewer needs to see this content to judge the reproduction.
     """
     return hypothesis.synthesized_test_file or embedded_test_file(hypothesis.commands)
 
@@ -224,13 +212,12 @@ def _test_file_to_render(hypothesis: Hypothesis, run_result: RunResult) -> TestF
     does not have to show one -- either because there is no test file at all,
     or because the commands this run actually executed already show it.
 
-    `spike-step-5/second-dispatch/RESULT.md` §5.2: the first composed comment
-    anywhere rendered `#2045`'s fourteen-line test file twice -- once in a
-    `<details>` block whose `<summary>` said it was "not shown in the commands
-    actually run below", and again, four lines later, as the `cat > ... <<
-    'PYEOF'` heredoc that wrote it. Both halves came from
-    `_resolved_test_file()` alone, which asks where the file *came from* and
-    never asks whether the reader can already see it.
+    `_resolved_test_file()` alone would render `#2045`'s fourteen-line test
+    file twice -- once in a `<details>` block whose `<summary>` says it is
+    "not shown in the commands actually run below", and again, four lines
+    later, as the `cat > ... << 'PYEOF'` heredoc that wrote it. That function
+    asks where the file *came from* and never asks whether the reader can
+    already see it.
 
     Provenance is the wrong question, and `#2341` and `#2045` are the two
     answers that prove it. Both embed their test file as a heredoc in the
@@ -241,7 +228,7 @@ def _test_file_to_render(hypothesis: Hypothesis, run_result: RunResult) -> TestF
     heredoc itself, so the block shows the file in full. The question that
     separates them is visibility, which is what this asks.
 
-    Not a reword of `_test_file_heading()`, which was the other available fix:
+    Not a reword of `_test_file_heading()`, which would be the other fix:
     that heading's claim is the *reason* the section exists, so a heading that
     had to hedge about whether the body appears below would be describing a
     section that should not have been rendered. Deciding not to render it
@@ -278,13 +265,11 @@ def _control_output(run_result: RunResult) -> str | None:
     """Rendered control-case command + output, or `None` if this run has no
     control (most outcomes don't).
 
-    Found missing from both render paths while measuring #2639's live
-    composition (spike-step-5/composer-live/RESULT.md): `_observed_output()`
-    only ever walked `run_result.commands`, so a `reproduced_positive_signal_
-    absent` comment stated the classifier's conclusion ("absent from the
-    main run but present in the control run") without ever showing the
-    control run itself. PLAN.md's own control-case concept
-    (spike-step-4/2639/RESULT.md) exists specifically so "silence" is
+    `_observed_output()` only walks `run_result.commands`, so without this a
+    `reproduced_positive_signal_absent` comment (`#2639`'s shape) would state
+    the classifier's conclusion ("absent from the main run but present in
+    the control run") without ever showing the control run itself. The
+    control case exists specifically so "silence" is
     checked against a stimulus that *should* produce the signal -- a
     comment that asserts the check happened without showing it asks the
     reader to trust exactly the step this pipeline is supposed to make
@@ -297,14 +282,12 @@ def _control_output(run_result: RunResult) -> str | None:
 
 
 def _reproduced_line(hypothesis: Hypothesis, outcome: Outcome, timestamp: str) -> str:
-    # PLAN.md Approach §6 specifies "a one-line 'reproduced on
-    # <base>/<substrate> at <timestamp>'" for both `reproduced` and
-    # `partial` outcomes. The verb is outcome-aware
-    # (`spike-step-5/composer-live/RESULT.md`): a `partial` attempt did not
-    # reproduce the bug, so its line says "Attempted". Where it ran is said
-    # in words (§42): a Scenario-only run names no base or substrate, and an
-    # unknown one is left out rather than shown as `unpinned/unpinned`, the
-    # form a model once wrote under its own `substrate=none`.
+    # A one-line "reproduced on <base>/<substrate> at <timestamp>" for both
+    # `reproduced` and `partial` outcomes. The verb is outcome-aware: a
+    # `partial` attempt did not reproduce the bug, so its line says
+    # "Attempted". Where it ran is said in words: a Scenario-only run names
+    # no base or substrate, and an unknown one is left out rather than shown
+    # as `unpinned/unpinned`, which would contradict `substrate=none`.
     verb = "Attempted" if outcome == Outcome.PARTIAL else "Reproduced"
     mp = hypothesis.moving_parts
     if _scenario_only(hypothesis):
@@ -336,7 +319,7 @@ def compose_template(
     test file) unchanged. Everything around them is fixed text: the banner,
     a `partial` caveat, the versions line, the closing line and the marker.
     There is no opening "the bug reproduced, please verify" sentence: the
-    banner says that already (§42), and the closing line says what
+    banner says that already, and the closing line says what
     reproduced and where. `reason` (the classifier's) is not rendered; it
     is kept in the signature for the pipeline's call.
     """
@@ -349,10 +332,10 @@ def compose_template(
     blocks.append(f"Versions: {_versions_line(hypothesis, run_result)}")
     test_file = _test_file_to_render(hypothesis, run_result)
     if test_file is not None:
-        # Collapsed: `maintainer-review/RESULT.md` §7, these bodies are long
-        # enough that an uncollapsed one pushes the rest below the fold. GFM
-        # only renders markdown inside <details> when there's a blank line
-        # straight after <summary>, so that blank line isn't cosmetic.
+        # Collapsed: these bodies are long enough that an uncollapsed one
+        # pushes the rest below the fold. GFM only renders markdown inside
+        # <details> when there's a blank line straight after <summary>, so
+        # that blank line isn't cosmetic.
         blocks.append(
             f"<details>\n<summary>{_test_file_heading(hypothesis, test_file)}</summary>\n\n"
             f"{_fence(test_file.body, 'python')}\n\n</details>"
@@ -385,8 +368,8 @@ class Composer:
     """The pipeline's composer: `compose_template()` behind the interface the
     pipeline already calls.
 
-    It takes an `LLMSeam` because it used to make one call to it; since §42
-    it makes none (see the module docstring), and the seam is kept only so
+    It takes an `LLMSeam` but makes no call to it (see the module
+    docstring); the seam is kept only so
     `Pipeline` and its tests construct it as before.
     """
 

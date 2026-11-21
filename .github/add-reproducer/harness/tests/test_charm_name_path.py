@@ -1,12 +1,11 @@
 """A value matched against the charm's name as a path component, in a test
-whose `Context(...)` has no `charm_root=` (`spike-step-5/static-retry/RESULT.md`
-§39's 2045b-1 and 2045b-5, §40).
+whose `Context(...)` has no `charm_root=`.
 
-Live on `#2045`, two answers checked the cwd a `start` handler captured with
+On `#2045`, two answers checked the cwd a `start` handler captured with
 `.endswith('/my-charm')`. Without `charm_root=`, `ops.testing` makes the charm
 root a `tempfile` directory that is never named after the charm, so the
 assertion failed on 3.8.3, `main` and the fix branch alike: two false
-comments. §39's five hand probes are the calibration cases.
+comments. Five hand-written probes are the calibration cases.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from static_test_check import check
 
 _MARK = "matches a path against the charm's name"
 
-# 2045b-5's final answer, as saved.
+# One of those `#2045` answers, as saved.
 _SAVED_5 = '''\
 import os
 
@@ -42,7 +41,7 @@ def test_charm_dir_is_cwd():
     assert captured['cwd'].endswith('/my-charm')
 '''
 
-# 2045b-1's final answer, as saved.
+# The other `#2045` answer, as saved.
 _SAVED_1 = '''\
 import os
 import pytest
@@ -101,7 +100,7 @@ def test_2045b_1_as_saved_is_rejected():
 @pytest.mark.parametrize(
     "assertion",
     [
-        # §39's probes.
+        # The hand-written probes.
         "assert os.path.basename(captured['cwd']) == 'my-charm'",
         "assert 'my-charm' in captured['cwd']",
         # Neighbours.
@@ -114,7 +113,7 @@ def test_2045b_1_as_saved_is_rejected():
         "assert '/my-charm' in captured['cwd']",
         "assert 'my-charm' not in captured['cwd']",
         "assert '/my-charm' in captured['value']",
-        # §13's retry-gate-2045 run 6: a guess at a longer charm-root path.
+        # A guess at a longer charm-root path.
         "assert captured['cwd'].endswith('/charms/my-charm')",
         "assert '/my-charm/src' in captured['cwd']",
     ],
@@ -143,7 +142,7 @@ def test_positional_meta_is_read():
 
 
 def test_charm_root_named_after_the_charm_passes():
-    # §39's probe 4: the charm root is named after the charm, so the check is valid.
+    # The charm root is named after the charm, so the check is valid.
     body = _SAVED_5.replace(
         "def test_charm_dir_is_cwd():\n",
         "def test_charm_dir_is_cwd(tmp_path):\n    (tmp_path / 'my-charm').mkdir()\n",
@@ -154,7 +153,7 @@ def test_charm_root_named_after_the_charm_passes():
 
 
 def test_charm_dir_from_handler_passes():
-    # §39's probe 5.
+    # The cwd compared with the charm directory read in the handler.
     body = _SAVED_5.replace(
         "captured['cwd'] = os.getcwd()",
         "captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = str(self.framework.charm_dir)",

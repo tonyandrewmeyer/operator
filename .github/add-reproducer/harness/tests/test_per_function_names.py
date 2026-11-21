@@ -1,14 +1,14 @@
-"""Names scoped to each test function, for the relation rules, and the §23
-corpus (`spike-step-5/static-retry/RESULT.md` §24).
+"""Names scoped to each test function, for the relation rules, and the
+`2709-hooktool4.json` corpus.
 
 The check counts bindings across the whole file and treats a name bound twice
-as unknown (§2). Live on `#2709` (§23), run 4-4 had two similar tests that each
-assigned `model`, so neither `model` was tracked, and both tests passed though
-each alone is rejected. The relation rules (`_scan_tests()` and the
-undeclared-endpoint rule) now see a name local to a test function as that
-function sees it. Everything else keeps file-wide counting.
+as unknown. Live on `#2709`, run 4 of that corpus had two similar tests that
+each assigned `model`; counted file-wide, neither `model` would be tracked,
+and both tests would pass though each alone is rejected. The relation rules
+(`_scan_tests()` and the undeclared-endpoint rule) see a name local to a test
+function as that function sees it. Everything else keeps file-wide counting.
 
-The calibration corpus is §23's 6 tests, under
+The calibration corpus is 6 tests, under
 `fixtures/static_test_check/2709-hooktool4.json`, and the hand repairs of the
 three whose verdict changed, under `2709-hooktool4-repaired.json`.
 """
@@ -51,7 +51,7 @@ def test_the_helper_gives_two_tests():
     assert source.count("model = ops.Model(meta, backend)") == 2
 
 
-# -- 4-4's shape -----------------------------------------------------------------
+# -- run 4's shape ---------------------------------------------------------------
 
 
 def test_one_test_alone_is_rejected():
@@ -75,8 +75,8 @@ def test_a_second_test_with_a_valid_access_does_not_hide_the_first():
 @pytest.mark.parametrize(
     "access",
     [
-        "relation = model.get_relation('db', 2)\nrelation.data['provider']",  # §21
-        "model.get_relation('db', 2)",  # §17, non-JSON `relation-list`
+        "relation = model.get_relation('db', 2)\nrelation.data['provider']",  # a databag keyed by a string
+        "model.get_relation('db', 2)",  # non-JSON `relation-list`
     ],
 )
 def test_every_relation_rule_sees_each_tests_names(access):
@@ -95,9 +95,10 @@ def test_every_relation_rule_sees_each_tests_names(access):
 
 
 def test_the_uncaught_error_rule_still_needs_juju_version_set_before_every_backend():
-    """§18's rule needs `JUJU_VERSION` set once in the file, before every
-    `_ModelBackend(...)` in it. That is not a name, so it stays file-wide, and
-    a second test that builds a backend still turns the rule off (§24)."""
+    """The uncaught-error rule needs `JUJU_VERSION` set once in the file,
+    before every `_ModelBackend(...)` in it. That is not a name, so it stays
+    file-wide, and a second test that builds a backend still turns the rule
+    off."""
     access = "relation = model.get_relation('db', 2)\nassert dict(relation.data[relation.app]) == {}"
     fakes = dict(_OUTPUT, **{"relation-get": "echo 'ERROR permission denied' >&2; exit 1"})
     assert any(_UNCAUGHT in r for r in check(_shape(access, fakes)).reasons)
@@ -125,12 +126,12 @@ def test_a_parameter_counts_as_a_binding():
 
 def test_the_undefined_name_rule_still_ignores_scope():
     """A name read in one test and bound only in another is not reported:
-    that rule only fires when a name cannot resolve at all (§2)."""
+    that rule only fires when a name cannot resolve at all."""
     source = "def test_a():\n    x = 1\n    assert x\n\n\ndef test_b():\n    assert x\n"
     assert check(source).passed
 
 
-# -- the §23 corpus ---------------------------------------------------------------
+# -- the `2709-hooktool4.json` corpus -------------------------------------------
 
 # run -> phrases each expected reason contains, one list per reason.
 EXPECTED = {
@@ -170,10 +171,10 @@ def test_the_hand_repairs_pass_the_check(record):
     assert retry_hints(result) == []
 
 
-# What each repair raises on ops 3.8.3: 4-0 fails on `assert ModelError(...)
-# == {}`, the bug; 4-4's `result` is never bound, on any version; 4-6's read
-# lets the `ModelError` out, which the check misses behind the `assert` before
-# it (§24 leaves that as it is).
+# What each repair raises on ops 3.8.3: run 0 fails on `assert ModelError(...)
+# == {}`, the bug; run 4's `result` is never bound, on any version; run 6's
+# read lets the `ModelError` out, which the check misses behind the `assert`
+# before it (a known gap, left as it is).
 REPAIRED = {0: AssertionError, 4: UnboundLocalError, 6: "ModelError"}
 
 

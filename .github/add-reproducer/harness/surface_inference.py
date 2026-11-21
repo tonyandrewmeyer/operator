@@ -1,14 +1,13 @@
-"""Surface inference pass (PLAN.md Approach §3's "distinct surface inference
-pass", added between extraction and scaffolding).
+"""Surface inference pass, run between extraction and scaffolding.
 
 A second LLM call, run only for hypotheses that need a deployed
-scratch-charm (the k8s-scratch branch — Approach §4), producing the
+scratch-charm (the k8s-scratch branch), producing the
 `relation`/`storage`/`pebble_service`/`ops_api_surface` values
 `scaffold.render_charm()` consumes. Kept separate from extraction
-deliberately (PLAN.md's ADR-style aside in Approach §3): it keeps the
-extractor's contract (issue -> moving parts + commands) stable and lets
-this pass reason over `commands`/`observed`/`expected` jointly, the way
-spike-step-3's by-hand derivation did.
+deliberately: it keeps the extractor's contract (issue -> moving parts +
+commands) stable and lets this pass reason over
+`commands`/`observed`/`expected` jointly, the way a by-hand derivation
+does.
 """
 
 from __future__ import annotations
@@ -19,10 +18,9 @@ import re
 from models import Hypothesis, Issue, SurfaceInference, TestFile
 from seams.llm import LLMError, LLMSeam
 
-# Steps §3 fix (2026-07-22): a numeric segment directly after a hyphen
-# breaks juju's local-charm URL parser ("local:repro-2639-... is not a
-# valid charm url"). Reject at the surface-inference boundary so a
-# regression can never reach render.py.
+# A numeric segment directly after a hyphen breaks juju's local-charm URL
+# parser ("local:repro-2639-... is not a valid charm url"). Reject at the
+# surface-inference boundary so a regression can never reach render.py.
 _CHARM_NAME_NUMERIC_SEGMENT_RE = re.compile(r"-\d")
 
 # `<workload-container>`, `<unit>` and friends -- the exact shape #2639's
@@ -40,9 +38,8 @@ _PEBBLE_USER_FLAG_RE = re.compile(r"--user[= ]")
 #   error: invalid argument for flag `--timeout' (expected time.Duration):
 #   time: missing unit in duration "1"
 # Same end state as the `--user` case: the stimulus never fires and the run
-# reaches a rung having done nothing to the charm. Prompt text alone has now
-# failed twice in this spot, so this is a validation rule.
-# See `spike-step-5/gate-substrate/RESULT.md` §7.
+# reaches a rung having done nothing to the charm. Prompt text alone has
+# failed in this spot more than once, so this is a validation rule.
 _DURATION_FLAGS = ("timeout",)
 _DURATION_FLAG_RE = re.compile(
     r"--(?P<flag>" + "|".join(_DURATION_FLAGS) + r")(?:=|\s+)(?P<value>\S+)"
@@ -124,19 +121,17 @@ def validate(raw: dict) -> None:
     if _CHARM_NAME_NUMERIC_SEGMENT_RE.search(raw["charm_name"]):
         raise SurfaceInferenceInvalid(
             f"charm_name={raw['charm_name']!r} has a digit after a hyphen -- "
-            "juju's local-charm URL parser rejects this (Steps §3 fix, do not regress)"
+            "juju's local-charm URL parser rejects this"
         )
     surface = raw.get("ops_api_surface")
     if surface not in (None, "update-status", "config-changed", "relation-changed", "pebble-custom-notice"):
         raise SurfaceInferenceInvalid(f"ops_api_surface invalid: {surface!r}")
 
-    # The stimulus half. `pebble_service.command` came back **null on 3 of
-    # 3** live calls for #2639 (`first-real-substrate/RESULT.md` finding 5)
-    # and nothing here looked at it, so the run deployed a charm, poked
-    # nothing, and still got a verdict. The fixture
-    # (`fixtures/surface/2639.json`) had been hand-filled from step 4's
-    # by-hand walk -- its own `_command_note` says so -- which is why no
-    # fixture run ever saw the null.
+    # The stimulus half. Live calls for #2639 can return a null
+    # `pebble_service.command`; unchecked, the run deploys a charm, pokes
+    # nothing, and still gets a verdict. The fixture
+    # (`fixtures/surface/2639.json`) is hand-filled -- its own
+    # `_command_note` says so -- so a fixture run never sees the null.
     #
     # Tied to `expected_signal` rather than demanded unconditionally:
     # that field is what puts the classifier on the
@@ -157,9 +152,8 @@ def validate(raw: dict) -> None:
     command = pebble.get("command")
     # `pebble notify` has no `--user` flag -- `as_user_in_container_command`
     # exists precisely because the user has to be applied by *running as*
-    # them. A live call invented `pebble notify --user=_daemon_ ...`
-    # (2026-08-18); pebble rejects the unknown flag, so the stimulus silently
-    # never fires.
+    # them. Live calls can invent `pebble notify --user=_daemon_ ...`;
+    # pebble rejects the unknown flag, so the stimulus silently never fires.
     if isinstance(command, str) and _PEBBLE_USER_FLAG_RE.search(command):
         raise SurfaceInferenceInvalid(
             f"pebble_service.command={command!r} passes a --user flag, which "
@@ -191,17 +185,14 @@ class SurfaceInferrer:
     def infer(self, issue: Issue, hypothesis: Hypothesis) -> SurfaceInference:
         """One call, plus one re-ask if the result fails validation.
 
-        The re-ask exists because this call is measurably unstable: five
-        live runs against the *same* issue returned three different
-        `charm_name`s, two different containers, two different pebble users
-        and a confidence that moved between `low` and `medium`
-        (`first-real-substrate/RESULT.md` finding 7). Against that, one bad
-        completion shouldn't cost the issue its whole run -- especially now
-        that validation rejects the shape the model actually produced 3/3
-        times. Bounded at one retry: this is a prompt-comprehension failure,
-        not a transient, so a third attempt buys nothing the second didn't.
-        `seams/llm.py`'s own retry is transport-level (HTTP status) and
-        never re-asks on a schema problem.
+        The re-ask exists because this call is unstable: repeated live runs
+        against the *same* issue return different `charm_name`s, containers,
+        pebble users and confidences. Against that, one bad completion
+        shouldn't cost the issue its whole run -- especially as validation
+        rejects shapes the model does produce. Bounded at one retry: this is a
+        prompt-comprehension failure, not a transient, so a third attempt buys
+        nothing the second didn't. `seams/llm.py`'s own retry is
+        transport-level (HTTP status) and never re-asks on a schema problem.
         """
         prompt = self._build_prompt(issue, hypothesis)
         raw = self.llm.complete_json(
@@ -231,32 +222,27 @@ class SurfaceInferrer:
 
 # --- substrate:none test-body synthesis -------------------------------
 #
-# PLAN.md Approach §3/§4 delta (spike-step-5/2045/RESULT.md "PLAN deltas
-# surfaced" §1): Approach §4's original "skip straight to a plain `uv venv`
-# + `pytest` run" assumed `commands[]` already contained a runnable pytest
-# invocation. `#2045` (an `ops[testing]`/Scenario `os.getcwd()` bug) is the
-# case that broke that assumption -- the extraction has enough `expected`/
-# `observed` text to reason about, but the issue body never gave a
-# self-contained repro snippet, so `commands[]` came back empty.
+# A plain `uv venv` + `pytest` run assumes `commands[]` already contains a
+# runnable pytest invocation. `#2045` (an `ops[testing]`/Scenario
+# `os.getcwd()` bug) is a case where it doesn't -- the extraction has enough
+# `expected`/`observed` text to reason about, but the issue body never gave a
+# self-contained repro snippet, so `commands[]` comes back empty.
 #
 # This synthesises a runnable `ops.testing.Context`/`State` scaffold instead
-# of leaving the hypothesis un-runnable, and (2026-07-30) does so with an
-# LLM call rather than the original fixed template. `spike-step-5/
-# composer-live/RESULT.md`'s addendum, Finding 6, ran the original
-# deterministic template's real #2045 output through an actual `uv add
-# 'ops[testing]' pytest && uv run pytest` and found it **passes** --
+# of leaving the hypothesis un-runnable, and does so with an LLM call rather
+# than a fixed template. A fixed template such as
 # `ctx.run(ctx.on.update_status(), state_in)` followed by a `# TODO` comment
-# has no assertion at all, so every `substrate: none` hypothesis routed
-# through synthesis was guaranteed to report `did_not_reproduce` regardless
-# of whether the bug was real. `TestFileSynthesizer` (below) closes that by
-# asking the model to encode the specific `expected`/`observed` claim as a
-# real assertion, behind the same `LLMSeam` pattern `Extractor`/
-# `SurfaceInferrer`/`Composer` already use. Any failure (no key, transport
-# error, invalid JSON, unusable body) falls back to
-# `_loud_failing_test_file()`, not to the old always-passing template --
-# an unfilled scaffold must fail loudly and be recognisable as such
-# (`classifier.py`'s `UNRUNNABLE_SYNTHESIS_INCOMPLETE` rung), never read as
-# a clean "did not reproduce".
+# has no assertion at all and **passes** under `uv add 'ops[testing]' pytest
+# && uv run pytest`, so every `substrate: none` hypothesis routed through it
+# would report `did_not_reproduce` regardless of whether the bug was real.
+# `TestFileSynthesizer` (below) avoids that by asking the model to encode the
+# specific `expected`/`observed` claim as a real assertion, behind the same
+# `LLMSeam` pattern `Extractor`/`SurfaceInferrer`/`Composer` already use. Any
+# failure (no key, transport error, invalid JSON, unusable body) falls back
+# to `_loud_failing_test_file()`, not to an always-passing template -- an
+# unfilled scaffold must fail loudly and be recognisable as such
+# (`classifier.py`'s `UNRUNNABLE_SYNTHESIS_INCOMPLETE` rung), never read as a
+# clean "did not reproduce".
 _PYTEST_TARGET_RE = re.compile(r"pytest\s+(\S+\.py)\b")
 
 
@@ -268,13 +254,12 @@ def _heredoc_writes(filename: str, commands: list[str]) -> bool:
     return any(pattern.search(c) for c in commands)
 
 
-# 2026-07-30 live measurement (see spike-step-5/synthesis-live/RESULT.md):
-# `write_synthesized_test_file_if_needed()`'s setup-command filter used to
-# drop any command containing the substring "pytest" -- which also silently
-# dropped `uv add 'ops[testing]' pytest` (the corpus-v2-standard modern
-# extraction shape, `uv init` -> `uv add` -> heredoc -> `pytest`), stripping
-# pytest out of the venv entirely before the appended, synthesized-test
-# invocation ever ran. This regex only matches an actual pytest *invocation*
+# `write_synthesized_test_file_if_needed()`'s setup-command filter must not
+# drop every command containing the substring "pytest" -- that would also
+# drop `uv add 'ops[testing]' pytest` (the standard modern extraction shape,
+# `uv init` -> `uv add` -> heredoc -> `pytest`), stripping pytest out of the
+# venv entirely before the appended, synthesized-test invocation ever ran.
+# This regex only matches an actual pytest *invocation*
 # (bare `pytest ...` or `uv run pytest ...`, optionally chained with
 # `&&`/`;`/`|`), not "pytest" appearing as a trailing package name to
 # `uv add`/`pip install`.
@@ -284,7 +269,7 @@ _PYTEST_INVOCATION_RE = re.compile(r"(?:^|&&|;|\|)\s*(?:uv\s+run\s+)?pytest\b")
 def is_pytest_invocation(command: str) -> bool:
     """True iff `command` actually invokes pytest, as opposed to merely
     mentioning the word "pytest" (e.g. as a package name). See the
-    `_PYTEST_INVOCATION_RE` comment above for the bug this closes."""
+    `_PYTEST_INVOCATION_RE` comment above for why the distinction matters."""
     return bool(_PYTEST_INVOCATION_RE.search(command))
 
 # The marker `classifier.py`'s `UNRUNNABLE_SYNTHESIS_INCOMPLETE` rung looks
@@ -293,15 +278,13 @@ def is_pytest_invocation(command: str) -> bool:
 SYNTHESIS_INCOMPLETE_MARKER = "SYNTHESIS_INCOMPLETE"
 
 _LOUD_FAILING_TEMPLATE = '''\
-"""Test-file synthesis fallback -- PLAN.md Approach §3 delta closing
-spike-step-5/composer-live/RESULT.md's Finding 6. LLM-driven synthesis
-(TestFileSynthesizer) was unavailable or returned an unusable body for this
-issue, so this scaffold has no real assertion encoding the reported bug.
-Unlike the pre-2026-07-30 deterministic template (which always passed,
-silently turning every fallback into a false "did not reproduce"), this
-fails loudly on purpose, and classifier.py's UNRUNNABLE_SYNTHESIS_INCOMPLETE
-rung recognises the marker in the raised message so it is never misread as
-a reproduction.
+"""Test-file synthesis fallback. LLM-driven synthesis (TestFileSynthesizer)
+was unavailable or returned an unusable body for this issue, so this scaffold
+has no real assertion encoding the reported bug. Unlike an always-passing
+template (which would silently turn every fallback into a false "did not
+reproduce"), this fails loudly on purpose, and classifier.py's
+UNRUNNABLE_SYNTHESIS_INCOMPLETE rung recognises the marker in the raised
+message so it is never misread as a reproduction.
 """
 
 import ops
@@ -349,13 +332,13 @@ def _is_raises_call(node: ast.AST) -> bool:
 
 
 def _validate_synthesized_body(body) -> None:
-    """The gate PLAN.md's task asked for, analogous to `composer._validate()`'s
+    """The synthesis gate, analogous to `composer._validate()`'s
     control-mention check: a synthesized test that doesn't parse, doesn't
-    import `ops`, or can't possibly fail is worse than no test at all (that's
-    exactly Finding 6). Structural, not a real sandbox execution -- consistent
-    with how `Extractor`/`SurfaceInferrer`/`Composer` validate LLM output
-    elsewhere in this codebase, and cheap enough to run on every synthesis
-    call.
+    import `ops`, or can't possibly fail is worse than no test at all (it turns
+    a real bug into a false "did not reproduce"). Structural, not a real
+    sandbox execution -- consistent with how
+    `Extractor`/`SurfaceInferrer`/`Composer` validate LLM output elsewhere in
+    this codebase, and cheap enough to run on every synthesis call.
     """
     if not isinstance(body, str) or not body.strip():
         raise TestFileSynthesisInvalid(f"body must be a non-empty string, got {body!r}")
@@ -462,8 +445,7 @@ attribute that isn't shown here.
 
 
 class TestFileSynthesizer:
-    """Approach §3's test-file synthesis, LLM-driven (2026-07-30, closing
-    spike-step-5/composer-live/RESULT.md's Finding 6). Same seam pattern as
+    """LLM-driven test-file synthesis. Same seam pattern as
     `Extractor`/`SurfaceInferrer`/`composer.Composer`: any failure (no key,
     transport error, invalid JSON, a body that fails `_validate_synthesized_
     body`) falls back to `_loud_failing_test_file()` rather than raising or
@@ -518,7 +500,7 @@ def _loud_failing_test_file(hypothesis: Hypothesis, path: str, *, reason: str) -
     message = (
         f"{SYNTHESIS_INCOMPLETE_MARKER}: LLM-driven test-file synthesis did not produce a "
         f"usable assertion for this issue ({reason}). This scaffold cannot confirm or refute "
-        "the reported bug -- see PLAN.md Approach §3."
+        "the reported bug."
     )
     body = _LOUD_FAILING_TEMPLATE.format(
         issue_number=hypothesis.issue_number,
@@ -531,17 +513,15 @@ def _loud_failing_test_file(hypothesis: Hypothesis, path: str, *, reason: str) -
 
 def needs_test_file(hypothesis: Hypothesis) -> bool:
     """True iff `hypothesis` is `substrate: none` and `commands[]` has no
-    *runnable* pytest invocation -- the trigger for the delta above.
+    *runnable* pytest invocation -- the trigger for the synthesis described above.
 
-    Two shapes both count as "not runnable", both real (spike-step-5/2045's
-    actual extraction is the second one, discovered only once real data was
-    available -- an earlier version of this function only checked for the
-    first):
+    Two shapes both count as "not runnable", both real (#2045's actual
+    extraction is the second one):
 
     - no `pytest` invocation anywhere in `commands[]` at all;
     - a `pytest <file>.py` invocation *is* present, but nothing in
-      `commands[]` actually materialises `<file>.py` (spike-step-5/2045's
-      extraction has `cd ... && uv run pytest test_cwd.py -v` alongside a
+      `commands[]` actually materialises `<file>.py` (#2045's extraction
+      has `cd ... && uv run pytest test_cwd.py -v` alongside a
       `# write test_cwd.py: ...` *comment*, not a real heredoc -- the LLM
       named the file it wanted without being able to write Python into a
       `commands[]` string list).

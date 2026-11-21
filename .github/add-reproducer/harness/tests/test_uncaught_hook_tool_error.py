@@ -1,6 +1,7 @@
-"""An uncaught hook-tool error (`spike-step-5/static-retry/RESULT.md` §18).
+"""An uncaught hook-tool error.
 
-Repaired by hand from §17's reasons, 4 of `#2709`'s 8 fake-hook-tool tests
+Repaired by hand from the fake-hook-tool rules' reasons
+(`test_hook_tool_rules.py`), 4 of `#2709`'s 8 fake-hook-tool tests
 reached the bug and passed with the fix, and none was valid: two read the
 databag with nothing around the read, and one wrapped it in
 `pytest.raises(RelationNotFoundError)`, which the plain `ModelError` ops 3.8.3
@@ -9,7 +10,7 @@ These tests cover the rule that rejects that shape, check what ops raises for
 each access by running it on the installed ops, and cover the prompt's
 instruction to catch the error and assert.
 
-The calibration corpus is §17's hand repairs, rebuilt from what §17 says it
+The calibration corpus is those hand repairs, rebuilt from what each one
 changed, under `fixtures/static_test_check/2709-hooktool-repaired.json`.
 """
 
@@ -51,8 +52,10 @@ def _uncaught(source: str) -> list[str]:
 
 # -- the calibration corpus ---------------------------------------------------
 
-# (run, repair) -> phrases the one §18 reason contains, or [] when the file
-# passes the check.
+# (run, repair) -> phrases the one uncaught-error reason contains, or [] when
+# the file passes the check. The repair labels are the fixture's own: "§17
+# reasons" is a repair made from the fake-hook-tool rules' reasons, and "the
+# §18 reason" one made from this rule's reason.
 EXPECTED = {
     (0, "§17 reasons"): [_NOTHING_CATCHES, "`try: result = dict(rel.data[rel.app])`"],
     (1, "§17 reasons"): [
@@ -73,13 +76,13 @@ EXPECTED = {
     (6, "§17 reasons"): [],
     # Run 6 catches `ModelError` around the lookup but first reads the
     # databag after the `try`, where `relation-get` runs and its `ModelError`
-    # escapes (§35); without the `is-leader` fake it dies on that first.
+    # escapes; without the `is-leader` fake it dies on that first.
     (6, "§17 reasons and the is-leader hint"): [
         "is the first read of `data`",
         "`try: data = dict(relation.data[model.app])`",
     ],
     (7, "§17 reasons"): [],
-    # Each repaired again from the §18 reason: all three are valid.
+    # Each repaired again from this rule's reason: all three are valid.
     (0, "§17 reasons, then the §18 reason"): [],
     (1, "§17 reasons, then the §18 reason (read through ops.Model) and the check's reasons on that"): [],
     (3, "§17 reasons, then the §18 reason"): [],
@@ -113,7 +116,7 @@ def test_calibration_verdict(record):
 @pytest.mark.parametrize("record", list(_corpus()))
 def test_the_repaired_tests_ran_as_recorded(record, tmp_path, monkeypatch):
     """Runs 0, 1 and 3 die on the uncaught `ModelError` on the installed ops
-    (3.8.3), and once repaired again from the §18 reason fail on their
+    (3.8.3), and once repaired again from this rule's reason fail on their
     assertion instead (`assert ModelError('ERROR permission denied\\n') == {}`
     under pytest)."""
     if not _IS_LEADER_RUNS:
@@ -506,6 +509,6 @@ def test_the_prompt_says_to_catch_the_error_and_assert():
 def test_the_prompt_example_still_catches_and_asserts():
     text = extraction._SCHEMA_INSTRUCTIONS
     assert "      # Catch the error the bug raises, so the bug fails the assert below.\n      try:\n" in text
-    # Not `#2709`'s relation-data shape: that is the issue it is measured on.
+    # Not `#2709`'s relation-data shape: that is the issue it is calibrated on.
     example = text[text.index("  import os\n") : text.index("      assert config == {}\n")]
     assert "relation" not in example

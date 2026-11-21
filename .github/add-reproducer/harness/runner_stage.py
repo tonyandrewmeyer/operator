@@ -1,4 +1,4 @@
-"""Reproduction runner orchestration (PLAN.md Approach §4).
+"""Reproduction runner orchestration.
 
 Three deterministic pieces, none of which need an LLM call:
 
@@ -28,29 +28,28 @@ _SNIPPET_MARKERS = ("import ops", "import scenario")
 def has_self_contained_snippet(commands: list[str]) -> bool:
     """A self-contained Python repro snippet in `commands` (the #2327/#2341/
     #2639 shape) vs. no such snippet, only a CI-run reference (#2484's
-    shape) -- spike-step-4/2484/RESULT.md's trigger-heuristic table."""
+    shape)."""
     joined = "\n".join(commands)
     return any(marker in joined for marker in _SNIPPET_MARKERS)
 
 
 def is_stale(hypothesis: Hypothesis, issue: Issue, runner_seam: RunnerSeam, context: dict) -> tuple[bool, str | None]:
-    """Approach §4's skip-when-almost-certainly-stale gate.
+    """The skip-when-almost-certainly-stale gate.
 
     Both triggers yield the same `skipped_stale` verdict -- distinct from
-    `did_not_reproduce` so Approach §6 never composes a "could not
+    `did_not_reproduce` so the composer never composes a "could not
     reproduce" comment for either case.
 
     "Almost certainly" is the whole of the second trigger's licence. It is a
     silent skip with no downstream appeal, so `resolve_symbol()` returning
     `False` has to be a positive finding that the symbol is gone; a seam that
     could not look answers `True` and the hypothesis goes to the runner. See
-    `SubprocessRunnerSeam.resolve_symbol()` for the case where that
-    distinction was not made and cost every anchor-carrying hypothesis on
-    GHA.
+    `SubprocessRunnerSeam.resolve_symbol()` for why that distinction
+    matters on GHA.
     """
     mp = hypothesis.moving_parts
     if mp.repo_version is None and issue.state == "CLOSED":
-        return True, "repo_version is null and issue is CLOSED (spike-step-4/2341, /2327 -- 2/2 on this pattern)"
+        return True, "repo_version is null and issue is CLOSED (#2341, #2327 -- 2/2 on this pattern)"
     if mp.symbol_anchor and not runner_seam.resolve_symbol(mp.symbol_anchor, context):
         return (
             True,
@@ -61,15 +60,14 @@ def is_stale(hypothesis: Hypothesis, issue: Issue, runner_seam: RunnerSeam, cont
 
 
 def choose_branch(hypothesis: Hypothesis) -> str:
-    """Approach §4's substrate/third-branch dispatch.
+    """The substrate/third-branch dispatch.
 
     Dispatch is explicit on all three substrates: an unrecognised or absent
-    value raises rather than falling through. It used to fall through to
-    `k8s-scratch`, which meant a `substrate: null` extraction silently
-    provisioned a cluster it had no use for (`spike-step-5/live-llm/RESULT.md`
-    Finding 1). `extraction.validate()` now rejects such extractions up
-    front, so reaching this raise means a `Hypothesis` was built by some
-    path that bypassed validation.
+    value raises rather than falling through. Falling through to
+    `k8s-scratch` would mean a `substrate: null` extraction silently
+    provisioned a cluster it had no use for. `extraction.validate()` rejects
+    such extractions up front, so reaching this raise means a `Hypothesis`
+    was built by some path that bypassed validation.
     """
     mp = hypothesis.moving_parts
     if mp.substrate == "none":
@@ -111,7 +109,7 @@ class RunnerStageResult:
 
 
 def check_runnable(hypothesis: Hypothesis, branch: str) -> tuple[bool, str | None]:
-    """Approach §4 pre-run gate (`spike-step-5/live-llm/RESULT.md` Finding 2).
+    """Pre-run gate: are `commands[]` executable shell at all?
 
     Returns `(ok, reason)`. Called after test-file synthesis, which can
     legitimately repair an otherwise un-runnable `commands[]`, and only for
@@ -130,8 +128,7 @@ SCRATCH_BRANCHES = frozenset({"k8s-scratch", "lxd-scratch"})
 # The private uv workspace root each `none`-branch issue gets, written one
 # directory above the directory its commands run in.
 #
-# Why it exists: `spike-step-5/second-dispatch/RESULT.md` §6.4, measured in
-# `fourth-dispatch/RESULT.md` §2. The branch's first command is the
+# Why it exists: the branch's first command is the
 # extraction's own `uv init --bare .`, and uv walks *up* from the working
 # directory looking for a workspace root. Given no root of its own it finds
 # whichever project happens to enclose the scratch tree -- in the shipped
@@ -146,12 +143,12 @@ SCRATCH_BRANCHES = frozenset({"k8s-scratch", "lxd-scratch"})
 #
 # Why it carries pytest, which is the part that is not obvious. The dominant
 # extraction shape writes a pytest test and installs `ops[testing]` -- and
-# nothing else. `#2045`'s four commands are the measured example: no pytest
-# anywhere in them. Under the old layout that worked only because the
-# harness's own dev group had already put pytest in the venv uv chose, so the
-# contamination was load-bearing, and isolating the scratch project without
-# replacing what it supplied turns a reproduction into `ModuleNotFoundError:
-# No module named 'ops'` at collection (`fourth-dispatch/RESULT.md` §2.3).
+# nothing else. `#2045`'s four commands are an example: no pytest anywhere in
+# them. Without a root of its own that works only because the harness's own
+# dev group has already put pytest in the venv uv chose, so the contamination
+# is load-bearing, and isolating the scratch project without replacing what
+# it supplied turns a reproduction into `ModuleNotFoundError: No module
+# named 'ops'` at collection.
 # One dev dependency, deliberately: this replaces what the harness was
 # supplying by accident, and nothing more.
 _SCRATCH_PROJECT_PYPROJECT = """\
@@ -184,8 +181,7 @@ def prepare_scratch_project(issue_dir: Path) -> Path:
     harness. No uv on PATH, no network, a sync that fails or hangs -- all
     leave the working directory in place and let the run proceed to say
     something true about what happened, rather than aborting over scratch
-    setup. The run then behaves as it did before this existed, minus the
-    contamination."""
+    setup."""
     issue_dir.mkdir(parents=True, exist_ok=True)
     workdir = issue_dir / SCRATCH_WORK_SUBDIR
     workdir.mkdir(parents=True, exist_ok=True)
@@ -226,16 +222,16 @@ def check_stimulus(branch: str, surface: SurfaceInference | None) -> tuple[bool,
     `seams/runner.py`'s `_scratch_sequence()` builds the stimulus only when
     surface inference hands over both a pebble `user` and a pebble
     `command`, and the control only when there is a stimulus to control
-    against. When either is missing it silently built neither -- and the
-    run went on to `concierge prepare`, `charmcraft pack` and `juju deploy`
-    (13+ minutes on the first real run), poked the deployed charm with
-    nothing at all, then handed the classifier a run whose "expected signal
-    absent" is a statement about an experiment that was never performed.
+    against. When either is missing it silently builds neither -- and the
+    run would go on to `concierge prepare`, `charmcraft pack` and `juju
+    deploy` (13+ minutes), poke the deployed charm with nothing at all, then
+    hand the classifier a run whose "expected signal absent" is a statement
+    about an experiment that was never performed.
 
     Live surface inference returns `pebble_service.command: null` for
-    `#2639` repeatably (3/3 runs, 2026-08-18), so this is the common case
-    rather than a corner. Gated here, next to `check_runnable`, so it costs
-    nothing instead of costing a substrate bootstrap.
+    `#2639` repeatably, so this is the common case rather than a corner.
+    Gated here, next to `check_runnable`, so it costs nothing instead of
+    costing a substrate bootstrap.
 
     Keyed on `expected_signal`, matching the rung it protects: only
     `classifier.py`'s positive-signal-absent rung reasons from a signal's
@@ -263,17 +259,14 @@ def check_stimulus(branch: str, surface: SurfaceInference | None) -> tuple[bool,
 def write_synthesized_test_file_if_needed(
     hypothesis: Hypothesis, issue: Issue, llm: LLMSeam, context: dict
 ) -> Hypothesis:
-    """Approach §3/§4 delta (spike-step-5/2045/RESULT.md "PLAN deltas
-    surfaced" §1): for `substrate: none` hypotheses with no runnable pytest
-    invocation in `commands[]`, synthesise a test file, write it into the
-    scratch working directory, and swap in the pytest invocation that runs
-    it -- mirroring what step 4/5's by-hand walks did per-issue. Returns
+    """For `substrate: none` hypotheses with no runnable pytest invocation in
+    `commands[]`, synthesise a test file, write it into the scratch working
+    directory, and swap in the pytest invocation that runs it. Returns
     `hypothesis` unchanged when no synthesis is needed.
 
-    `llm` is threaded through to `TestFileSynthesizer` (2026-07-30,
-    `spike-step-5/composer-live/RESULT.md` Finding 6): synthesis is now an
-    LLM call, not a fixed template, so this stage needs the same seam
-    `Extractor`/`SurfaceInferrer`/`Composer` already use.
+    `llm` is threaded through to `TestFileSynthesizer`: synthesis is an LLM
+    call, not a fixed template, so this stage needs the same seam
+    `Extractor`/`SurfaceInferrer`/`Composer` use.
 
     Genuine setup commands (`uv venv`/`uv init`/`uv add`/`uv pip install`)
     are kept; comment-only placeholders and any pytest invocation are
@@ -289,29 +282,24 @@ def write_synthesized_test_file_if_needed(
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / test_file.path).write_text(test_file.body)
     # Keep only genuinely executable setup; drop comment placeholders, the
-    # broken pytest invocation being replaced, and -- per
-    # `spike-step-5/live-llm/RESULT.md` Finding 2 -- prose and bare code
-    # fragments. Prose used to survive this filter as a "setup command" and
-    # then exit 127 mid-sequence, which the classifier's rung 7 reads as
-    # `partial`: another comment-worthy outcome from a command that never ran.
-    # 2026-07-30 live measurement (spike-step-5/synthesis-live/RESULT.md): a
-    # bare `"pytest" not in c` substring check here used to drop
-    # `uv add 'ops[testing]' pytest` -- a legitimate setup command, not the
-    # broken invocation this filter exists to remove -- silently stripping
-    # pytest out of the venv before the appended, synthesized-test
-    # invocation ever ran. `is_pytest_invocation()` only matches an actual
-    # pytest invocation (bare or `uv run`), not "pytest" as a trailing
-    # package name.
+    # broken pytest invocation being replaced, and prose and bare code
+    # fragments. Prose kept as a "setup command" would exit 127 mid-sequence,
+    # which the classifier's rung 7 reads as `partial`: another
+    # comment-worthy outcome from a command that never ran.
+    # `is_pytest_invocation()` only matches an actual pytest invocation (bare
+    # or `uv run`), not "pytest" as a trailing package name: a bare
+    # `"pytest" not in c` substring check would drop `uv add 'ops[testing]'
+    # pytest` -- a legitimate setup command, not the broken invocation this
+    # filter exists to remove -- silently stripping pytest out of the venv
+    # before the appended, synthesized-test invocation ever ran.
     setup_commands = [
         c
         for c in hypothesis.commands
         if not is_pytest_invocation(c) and runnability.classify_command(c) is runnability.Shape.SHELL
     ]
     # ...and if the extraction supplied no environment setup at all, build
-    # one. This whole stage assumed `commands[]` already carried the
-    # `uv init` -> `uv add` prologue, which is true of the corpus-v2
-    # extraction shape but not of a live extraction that returns
-    # `commands: []` -- the real 2026-08-18 case. With nothing prepended,
+    # one. A live extraction can return `commands: []`, with no `uv init`
+    # -> `uv add` prologue at all. With nothing prepended,
     # `uv run pytest` finds no project in the scratch dir, walks *up* to the
     # harness's own pyproject, runs against the harness venv (which has no
     # `ops`), and dies with ModuleNotFoundError at collection. A synthesised

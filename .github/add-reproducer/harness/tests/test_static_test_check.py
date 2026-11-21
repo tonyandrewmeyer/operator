@@ -1,14 +1,13 @@
 """The static check on an extraction's embedded test file, and the one re-ask
-it triggers (`spike-step-5/static-retry/RESULT.md`).
+it triggers.
 
 The calibration corpus is the 35 saved `#2045` extractions under
-`fixtures/static_test_check/`: 32 from `spike-step-5/assert-choice/` (8 per
-prompt version), the one live dispatch at `7888bb13`, and the two re-asks
-from `live/retry-unlisted-2045.json` (§14) that read
-`ctx.charm_spec.charm_dir`, which only the attribute-chain rule (§15)
-rejects. The verdicts below are that RESULT's tables. `assert-choice/RESULT.md` read five of the 33 tests
-as valid (after2 runs 1 and 3, after3 runs 1, 2 and 7); every one of them
-must pass, because a false rejection costs a reproduction.
+`fixtures/static_test_check/`: 32 from four prompt versions (8 each), one from
+a live workflow run (`dispatch`), and two re-asks (`unlisted`) that read
+`ctx.charm_spec.charm_dir`, which only the attribute-chain rule rejects. The
+verdicts below were judged by hand. Five of the tests are valid (after2 runs 1
+and 3, after3 runs 1, 2 and 7); every one of them must pass, because a false
+rejection costs a reproduction.
 
 No network, no key: the extraction tests drive `Extractor` through a
 scripted LLM seam.
@@ -35,7 +34,7 @@ _T = typing.TypeVar("_T")
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 CORPUS = FIXTURES / "static_test_check"
 
-# (file, run) -> (valid per assert-choice/RESULT.md, check passes, a phrase
+# (file, run) -> (valid by hand review, check passes, a phrase
 # each expected reason contains). `None` for "passes" means there is no
 # embedded test file to check.
 EXPECTED = {
@@ -47,7 +46,7 @@ EXPECTED = {
     ),
     ("before", 2): (False, False, ["inside the charm", "`str` and a `pathlib.Path`"]),
     ("before", 3): (False, False, ["no module-level `def test_", "inside the charm", "`str` and a `pathlib.Path`"]),
-    # Passed until §41: the cwd compared with a path built from `ops.__file__`.
+    # The cwd compared with a path built from `ops.__file__`.
     ("before", 4): (False, False, ["compares the working directory with"]),
     ("before", 5): (False, False, ["no module-level `def test_", "read-only `CharmBase` property", "at module level"]),
     ("before", 6): (False, False, ["read-only `CharmBase` property"]),
@@ -318,8 +317,8 @@ def test_the_chain_rule_is_off_when_ops_cannot_be_introspected(monkeypatch):
 
 
 def test_retry_hints_leave_a_chain_reason_as_it_is():
-    """The hint lists `Context`'s attributes; `charm_spec` came from that list
-    (§14), so a chain reason is sent on its own."""
+    """The hint lists `Context`'s attributes; `charm_spec` comes from that
+    list, so a chain reason is sent on its own."""
     result = check(_chain_body("ctx.charm_spec.charm_dir"))
     assert static_test_check.retry_hints(result) == []
 
@@ -741,7 +740,7 @@ def test_a_missing_context_attribute_retry_lists_the_ones_there_are():
     retry = llm.prompts[1]
     assert hint in retry
     assert "`emitted_events`" in retry and "`run`" in retry
-    # Listed, it was read as the charm's directory (RESULT.md §8-§13).
+    # Listed, the model reads it as the charm's directory.
     assert "charm_root" not in retry.split(hint, 1)[1]
     # The reasons come first, then the hint, then the instruction.
     assert retry.index("does not have") < retry.index(hint) < retry.index("Return the whole")

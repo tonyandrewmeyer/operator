@@ -36,7 +36,7 @@ def test_2304_dropped_at_extraction_in_scope_false(pipeline):
 
 def test_2341_skipped_stale_full_pipeline(pipeline):
     # confidence=high, so it clears the confidence gate and reaches the
-    # Approach §4 skip-when-stale gate on its own (repo_version null + CLOSED).
+    # skip-when-stale gate on its own (repo_version null + CLOSED).
     result = pipeline.run_for_issue(_load_issue(2341))
     assert result.outcome == Outcome.SKIPPED_STALE
     assert result.comment is None
@@ -74,12 +74,9 @@ def test_2639_confidence_gate_exempt_on_scratch_branch(pipeline):
     # `surface`, never from `commands[]`, which is exactly what the
     # extractor's `confidence` field is calibrated against (extraction.py:
     # "if you cannot produce a sequence like that ... set confidence to
-    # low"). `pipeline.py` no longer gates that branch on confidence, so
-    # production mode now behaves the same as calibration mode for this
-    # case. Fixed per spike-step-5/confidence-gate-2639/RESULT.md: this test
-    # used to assert the opposite ("stays silent in production mode"), which
-    # was the bug -- #2639 is the one hypothesis this project has ever
-    # confirmed reproduces end-to-end, and the confidence gate silenced it.
+    # low"). `pipeline.py` does not gate that branch on confidence, so
+    # production mode behaves the same as calibration mode for this case:
+    # #2639 reproduces end-to-end, and a confidence gate would silence it.
     result = pipeline.run_for_issue(_load_issue(2639), run_id="test-run", timestamp="2026-07-23T00:00:00Z")
     if result.stage_reached == "scaffold":
         pytest.skip(f"scratch-charm render needs network access for `uv lock`, unavailable here: {result.reason}")
@@ -124,12 +121,11 @@ def test_confidence_gate_still_silences_none_substrate(pipeline, monkeypatch):
 
 
 def test_2045_calibration_mode_composed_comment_includes_synthesized_test_file(pipeline):
-    # spike-step-5/composer-live/RESULT.md Finding 4, closed: #2045 is the
-    # real case whose commands[] has no runnable pytest invocation, so
-    # run_for_issue() synthesizes a test file before running. The composed
-    # comment (compose_template, since no compositions/2045.json fixture
-    # exists) must show that file's body, not just reference its name in
-    # the commands block.
+    # #2045 is the real case whose commands[] has no runnable pytest
+    # invocation, so run_for_issue() synthesizes a test file before running.
+    # The composed comment (compose_template, since no compositions/2045.json
+    # fixture exists) must show that file's body, not just reference its name
+    # in the commands block.
     result = pipeline.run_for_issue(_load_issue(2045), calibration_mode=True, run_id="test-run", timestamp="2026-07-30T00:00:00Z")
     assert result.comment is not None
     assert "test_issue_2045_repro.py" in result.comment
@@ -140,7 +136,7 @@ def test_2045_calibration_mode_composed_comment_includes_synthesized_test_file(p
 def test_2107_skipped_stale_full_pipeline(pipeline):
     # The real #2107 (the only substrate:lxd extraction in the corpus,
     # see fixtures/extractions/2107.json's _provenance) is CLOSED with
-    # repo_version null -- caught by the Approach §4 stale gate before ever
+    # repo_version null -- caught by the stale gate before ever
     # reaching branch dispatch, same as #2341/#2327. Confirms the full
     # pipeline doesn't crash on a real substrate:lxd issue and that the
     # gate short-circuits it exactly as it does for k8s/none hypotheses.
@@ -192,7 +188,7 @@ def test_lxd_scratch_reaches_classifier_via_full_pipeline(tmp_path):
             "confidence": "high",
         },
         # A complete `pebble_service`: with `user`/`command` missing, the
-        # no-stimulus gate now stops this before the runner (correctly --
+        # no-stimulus gate stops this before the runner (correctly --
         # such a run deploys a charm and pokes nothing), and this test is
         # about lxd-scratch *dispatch*, not that gate.
         surface={
@@ -226,7 +222,7 @@ def test_lxd_scratch_reaches_classifier_via_full_pipeline(tmp_path):
 def test_ignore_in_scope_runs_an_out_of_scope_hypothesis(tmp_path):
     """`--ignore-in-scope` is a measurement tool: production drops these,
     and a pipeline that composes nothing cannot be measured for false
-    comments (40 real issues, 2026-08-18: 0 comments)."""
+    comments."""
     extraction = {
         "in_scope": False,
         "moving_parts": {"substrate": "none", "repo_version": "main"},
@@ -353,7 +349,7 @@ def _gate_pipeline(tmp_path, commands):
 def test_a_test_that_fails_the_static_check_is_not_run(tmp_path):
     """A re-ask's answer is kept whatever its check says; one comparing with
     an unset `ctx.charm_root` fails on an assertion with or without the fix,
-    and used to reach rung 6 as `reproduced_weaker`."""
+    and would otherwise reach rung 6 as `reproduced_weaker`."""
     commands = [
         "uv init --bare .",
         f"cat > test_cwd.py << 'PYEOF'\n{_CHARM_ROOT_TEST}PYEOF",

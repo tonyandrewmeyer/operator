@@ -1,26 +1,22 @@
 """`in_scope` prompt retune attempt, pinned against the recorded runs --
 a negative result.
 
-`spike-step-5/2639-in-scope/RESULT.md` measured a real, repeatable `#2639`
-`in_scope` false-drop under the tightened prompt (75% without comments, 25%
-with, recorded the day before this pass) and named this task explicitly:
-retune the prompt, and prove the retune costs nothing on the 60-issue corpus
-(`spike-step-5/corpus-v2/`), where the last refinement holds a precision >=
-100% / recall >= 92% floor. Full write-up:
-`spike-step-5/inscope-retune/RESULT.md`.
+`test_2639_in_scope_repeats.py` pins a real, repeatable `#2639` `in_scope`
+false-drop under the tightened prompt (75% without comments, 25% with). The
+goal here was to retune the prompt, and prove the retune costs nothing on
+the 60-issue corpus, where the last refinement holds a precision >= 100% /
+recall >= 92% floor.
 
 Three structurally different, principled prompt revisions were tried (v1:
 broadened what counts as a "promise"; v2: same framing, narrowed promise
 sources and added explicit anti-loosening language; v3: minimal edit to the
-ambiguity tie-break paragraph only, the task's own named hypothesis). All
-three measurably improved `#2639`/`#2045`'s false-drop rate, and all three
-failed the corpus-v2 precision/recall floor on at least one of two repeat
-runs. Per the task's explicit exit condition, no prompt change shipped:
-`harness/extraction.py`'s `in_scope` prompt is byte-identical to what it was
-before this task ran. These tests pin the negative result -- what was tried,
-what it cost -- against `spike-step-5/inscope-retune/out/`, not a live
-model: no network, no key, deterministic -- same pattern as
-`test_2639_in_scope_repeats.py` / `test_comments_live_ab.py` /
+ambiguity tie-break paragraph only). All three measurably improved
+`#2639`/`#2045`'s false-drop rate, and all three failed the corpus
+precision/recall floor on at least one of two repeat runs, so no prompt change
+shipped: `harness/extraction.py`'s `in_scope` prompt is unchanged. These tests
+pin the negative result -- what was tried, what it cost -- against the recorded
+`out/` directory, not a live model: no network, no key, deterministic -- same
+pattern as `test_2639_in_scope_repeats.py` / `test_comments_live_ab.py` /
 `test_live_calibration.py`.
 """
 
@@ -35,7 +31,7 @@ _EXTRACTION_PY = Path(__file__).parent.parent / "extraction.py"
 
 @pytest.fixture(autouse=True)
 def _require_run():
-    if not _OUT.is_dir():  # pragma: no cover - spike output not always present
+    if not _OUT.is_dir():  # pragma: no cover - recorded run not always present
         pytest.skip(f"inscope-retune run not available at {_OUT}")
 
 
@@ -92,12 +88,10 @@ def _score_against_labels(run: dict[int, dict]) -> dict:
 
 
 def test_extraction_prompt_unchanged_after_negative_result():
-    # The task's explicit exit condition: if the retune can't hold the
-    # corpus floor, do not land a prompt change. All three attempts failed
-    # it (see below), so extraction.py's in_scope prompt is reverted to
-    # exactly what it was before this task -- these phrases (present before
-    # and never removed) and the *absence* of every attempt's added text
-    # together pin that.
+    # If a retune can't hold the corpus floor, no prompt change lands. All
+    # three attempts failed it (see below), so extraction.py's in_scope
+    # prompt keeps its original wording -- these phrases (never removed) and
+    # the *absence* of every attempt's added text together pin that.
     text = _EXTRACTION_PY.read_text()
     assert "But note what that tie-break is *for*" in text
     assert (
@@ -110,7 +104,7 @@ def test_extraction_prompt_unchanged_after_negative_result():
     assert "concrete non-ambiguous case" not in text.lower()
 
 
-# --- baseline (today, current/unmodified prompt) ---------------------------
+# --- same-day baseline (current/unmodified prompt) -------------------------
 
 
 def test_2639_baseline_today_recorded_at_n8_both_variants():
@@ -121,11 +115,12 @@ def test_2639_baseline_today_recorded_at_n8_both_variants():
 
 def test_2639_baseline_today_drifted_from_yesterdays_recorded_rate():
     # Worth pinning on its own: the unmodified prompt's false-drop rate
-    # moved from 75%/25% (recorded the day before, `../2639-in-scope/out/`)
-    # to 25%/25% measured today, same prompt, same issue, same n. The model
-    # is not seeded -- this is real day-to-day drift, not a regression, and
-    # it means any single-run comparison against yesterday's fixture would
-    # have been comparing against stale noise rather than a stable target.
+    # moved from 75%/25% (the earlier recording pinned in
+    # `test_2639_in_scope_repeats.py`) to 25%/25% in this baseline, a day
+    # later: same prompt, same issue, same n. The model is not seeded --
+    # this is real day-to-day drift, not a regression, and it means any
+    # single-run comparison against an older fixture compares against stale
+    # noise rather than a stable target.
     summary = _summary("2639-baseline")
     assert summary["without_comments"]["dropped"] == 2
     assert summary["with_comments"]["dropped"] == 2

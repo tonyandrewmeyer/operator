@@ -58,8 +58,7 @@ def test_body_has_reproducer_fenced_block():
     assert "fenced" in why
 
 
-# PLAN.md Approach §2 gap 2 (spike-step-5/corpus-v2/RESULT.md "Two filter
-# findings" #1): `gh` has no `issueType` field, so nothing ever supplied the
+# `gh` has no `issueType` field, so nothing ever supplied the
 # `classify_issue(issue, issue_type=...)` argument in practice. Production
 # gets the type from the `issues.opened` webhook payload's `issue.type.name`.
 
@@ -127,9 +126,7 @@ def test_explicit_issue_type_argument_still_overrides():
     assert reason == "issue-type=Feature"
 
 
-# PLAN.md Approach §2 gap 1 (spike-step-5/corpus-v2/RESULT.md "Two filter
-# findings" #2): `operator`'s real label vocabulary barely overlaps
-# DROP_LABELS.
+# `operator`'s real label vocabulary barely overlaps DROP_LABELS.
 
 
 def test_refactoring_label_drops():
@@ -150,8 +147,7 @@ def test_refactoring_label_drops():
 
 def test_needs_design_and_roadmap_labels_do_not_drop_a_real_bug():
     # fixtures/issues/2639.json is labelled ["needs design", "roadmap"] and is
-    # the one hypothesis this project has ever confirmed reproduces
-    # end-to-end (spike-step-4/2639/RESULT.md). Both labels mark a
+    # a hypothesis confirmed to reproduce end-to-end. Both labels mark a
     # triage/planning state, not bug-vs-not-bug (hand-labels.json's #1109 is a
     # real bug carrying "roadmap" alone) -- see filter_stage.py's comment
     # above DROP_LABELS for the full reasoning. This test pins that decision:

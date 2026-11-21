@@ -1,12 +1,10 @@
-"""Outcome classification (PLAN.md Approach §5).
+"""Outcome classification.
 
-The rung ladder, folded per `spike-step-4/FINDINGS.md`: the original
-four-rung ladder (traceback+substring -> non-zero exit -> success ->
-partial) misclassified 3 of 4 calibration hypotheses. This is the
-nine-outcome ladder that replaces it -- checked most-specific/safest
-first, so a noisy nonzero exit (a stale test selector, an API-shape
-crash) can't masquerade as a reproduction just because *something* in
-its output happens to look like a match.
+The rung ladder. A simple four-rung ladder (traceback+substring -> non-zero
+exit -> success -> partial) misclassifies most real hypotheses, so this one is
+checked most-specific/safest first: a noisy nonzero exit (a stale test
+selector, an API-shape crash) can't masquerade as a reproduction just because
+*something* in its output happens to look like a match.
 """
 
 from __future__ import annotations
@@ -54,7 +52,7 @@ _API_SHAPE_ERROR_RE = re.compile(r"\b(AttributeError|TypeError|ImportError)\b")
 # which reads as though nothing went wrong -- while the actual
 # `ERROR cannot add application ...` sat three lines further down. Prefer the
 # first line that looks like an error; fall back to the first line when none
-# does. See `spike-step-5/gate-substrate/RESULT.md` §6.
+# does.
 _ERROR_LINE_RE = re.compile(r"^\s*(error\b|.*\berror:)", re.I)
 
 
@@ -92,12 +90,12 @@ def classify(
 
     # Rung 0: infrastructure failed, so the run is not evidence about the
     # bug at all. Every rung below reads exit codes and output as though
-    # the reproduction attempt actually happened; that precondition was
-    # never checked. First real k8s run (2026-08-18) hit it immediately --
-    # `charmcraft pack` failed, `juju deploy` then failed for want of a
-    # charm, and `juju status`/`juju debug-log` both exited **0** against
-    # an empty model, so the ladder scored a healthy-looking run and
-    # returned `did_not_reproduce` about a bug nothing had tested. With a
+    # the reproduction attempt actually happened, so this checks that
+    # precondition first. For example, `charmcraft pack` fails, `juju
+    # deploy` then fails for want of a charm, and `juju status`/`juju
+    # debug-log` both exit **0** against an empty model, so without this
+    # rung the ladder scores a healthy-looking run and returns
+    # `did_not_reproduce` about a bug nothing has tested. With a
     # control in the sequence the same shape reaches
     # `reproduced_positive_signal_absent`, which composes a comment.
     if run_result.aborted_at_step:
@@ -124,11 +122,10 @@ def classify(
     # ImportError means the environment was never built -- the run is not
     # evidence about the bug, same as a failed pack. Checked *before* rung
     # 1 because pytest reports both as "collected 0 items", so rung 1's
-    # pattern matches this too and used to claim a stale `-k` selector for
-    # what is really a missing dependency: the first live `substrate: none`
-    # run (2026-08-18) synthesised a test importing `ops`, ran it with no
-    # `uv add 'ops[testing]'` ahead of it, and was scored
-    # `unrunnable_test_selector_stale`. Distinct outcome, not a rung: the
+    # pattern matches this too and would claim a stale `-k` selector for
+    # what is really a missing dependency -- for example, a synthesised
+    # test importing `ops` run with no `uv add 'ops[testing]'` ahead of
+    # it. Distinct outcome, not a rung: the
     # selector rung is a statement about the reproduction attempt, and this
     # is a statement about the machine.
     for c in commands:
@@ -145,9 +142,8 @@ def classify(
     # 0 on the scratch branches: if `uv init`/`uv venv`/`uv add`/`pip
     # install` did not succeed, whatever ran afterwards ran somewhere other
     # than the environment the hypothesis described, and is not evidence
-    # about the bug. Rung 6 previously read such a failure as `partial`,
-    # which composes a comment -- 5 of the 9 comments in the first
-    # loosened-gate batch (2026-08-18) were exactly that.
+    # about the bug. Rung 6 would otherwise read such a failure as
+    # `partial`, which composes a comment.
     for c in commands:
         if c.exit_code != 0 and _ENV_SETUP_RE.search(c.command):
             detail = (c.stderr or c.stdout or "").strip().splitlines()
@@ -161,12 +157,11 @@ def classify(
 
     # Rung 1a: the model-written test file failed while pytest was collecting
     # it. Checked before rung 1 because pytest reports this as "collected 0
-    # items" too, and rung 1 used to call it a stale selector. First
-    # `#2045` dispatch at `6853d40e` (2026-10-01, `scope-own-tests/RESULT.md`
-    # §4.1): the extraction put the `testing.Context` run at module level
-    # with no `test_` function, so the charm's assertion fired on import and
-    # pytest printed `ERROR collecting test_cwd.py`. Nothing was stale -- the
-    # file this project wrote was malformed, which is rung 1c's statement
+    # items" too, and rung 1 would call it a stale selector. For example
+    # (`#2045`), an extraction can put the `testing.Context` run at module level
+    # with no `test_` function, so the charm's assertion fires on import and
+    # pytest prints `ERROR collecting test_cwd.py`. Nothing is stale -- the
+    # file this project wrote is malformed, which is rung 1c's statement
     # about the generator, so it gets rung 1c's outcome. Rung 0b above has
     # already taken the collection errors that are really a missing
     # dependency.
@@ -184,7 +179,7 @@ def classify(
                     "this is evidence about the generator and not about the reported bug",
                 )
 
-    # Rung 1: un-runnable (test selector stale). spike-step-4/2484 --
+    # Rung 1: un-runnable (test selector stale). `#2484` --
     # pytest exits non-zero purely from unrelated collection errors, with
     # the `-k` selector matching zero tests. Checked first: this pattern
     # is specific enough that it should never be shadowed by a generic
@@ -197,8 +192,7 @@ def classify(
                 "(0 items collected, unrelated collection errors) -- not a reproduction",
             )
 
-    # Rung 1b: un-runnable (synthesis incomplete). spike-step-5/composer-live/
-    # RESULT.md Finding 6 -- a substrate:none hypothesis whose test-file
+    # Rung 1b: un-runnable (synthesis incomplete). A substrate:none hypothesis whose test-file
     # synthesis fell back to the loud-failing stub (LLM synthesis unavailable
     # or produced an unusable body, see surface_inference.TestFileSynthesizer)
     # raises an AssertionError carrying this marker. That's a genuine
@@ -221,44 +215,43 @@ def classify(
     # wrote a test that does not run -- a statement about the generator,
     # not about the issue.
     #
-    # First real `substrate: none` run, 2026-08-18: the synthesised test did
-    # `state = testing.State()` then `state.pebble = {...}`. `State` is
-    # frozen, so pytest reported `dataclasses.FrozenInstanceError: cannot
-    # assign to field 'pebble'`. Rung 6 read the non-zero exit as
-    # `reproduced_weaker` and the pipeline **composed a comment opening
-    # "The bug reproduced."** for a test that had tested nothing. Rung 1b
+    # For example, a synthesised test that does `state = testing.State()`
+    # then `state.pebble = {...}`: `State` is frozen, so pytest reports
+    # `dataclasses.FrozenInstanceError: cannot assign to field 'pebble'`.
+    # Rung 6 would read the non-zero exit as `reproduced_weaker` and the
+    # pipeline would **compose a comment opening "The bug reproduced."**
+    # for a test that tested nothing. Rung 1b
     # above only catches the loud-failing fallback stub, which is a
     # different failure: that one is a stub with no assertion, this one is
     # a real attempt at a test that is not valid `ops.testing` code.
     #
-    # This was scoped to `synthesized_test_file` alone until 2026-09-18, on
-    # the reasoning that a repro script the *reporter* supplied is allowed to
-    # fail with any exception it likes, since that exception may well be the
-    # bug. `spike-step-5/second-dispatch/RESULT.md` §7 found that scoping puts
-    # model-written tests on the reporter's side of the guard, because the
-    # dominant modern extraction shape does not synthesise a test file at all:
-    # it writes one as a `cat > ... << 'EOF'` heredoc inside the extraction's
-    # own `commands[]`, where `synthesized_test_file` stays `None`. Both of
-    # that round's live runs produced exactly that, and one of them produced
-    # an *invalid* `ops.testing` test (`ctx(ctx.on.update_status, ...)` --
-    # the event function where the event is expected). It stayed silent only
-    # because `AttributeError` happens to be in rung 4's regex; a heredoc test
-    # dying with `FrozenInstanceError`, `KeyError` or `RuntimeError` would
-    # have fallen through to rung 6 and composed "The bug reproduced."
+    # This is not scoped to `synthesized_test_file` alone. A repro script
+    # the *reporter* supplied is allowed to fail with any exception it
+    # likes, since that exception may well be the bug, but the dominant
+    # extraction shape does not synthesise a test file at all: it writes
+    # one as a `cat > ... << 'EOF'` heredoc inside the extraction's own
+    # `commands[]`, where `synthesized_test_file` stays `None`. Scoping to
+    # `synthesized_test_file` would put those model-written tests on the
+    # reporter's side of the guard. Such a test can be *invalid*
+    # `ops.testing` code (`ctx(ctx.on.update_status, ...)` -- the event
+    # function where the event is expected); `AttributeError` happens to be
+    # in rung 4's regex, but a heredoc test dying with
+    # `FrozenInstanceError`, `KeyError` or `RuntimeError` would fall through
+    # to rung 6 and compose "The bug reproduced."
     #
-    # So the guard asks the question it always meant to ask: was this test
-    # written by a model? Both sources are -- the synthesiser writes one and
-    # the extractor writes the other -- and `models.embedded_test_file()` is
-    # the same heredoc reader the composer uses to decide it has a file to
-    # render, so the two cannot disagree about whether there is one.
+    # So the guard asks: was this test written by a model? Both sources are --
+    # the synthesiser writes one and the extractor writes the other -- and
+    # `models.embedded_test_file()` is the same heredoc reader the composer
+    # uses to decide it has a file to render, so the two cannot disagree about
+    # whether there is one.
     #
-    # The reporter's exception is still allowed to be the bug; it is now
+    # The reporter's exception is still allowed to be the bug; it is
     # checked rather than assumed. When the failing output carries a
     # substring the reporter themselves quoted in `observed`, rung 2 below
     # would call it a reproduction, and that evidence does not stop being
     # evidence because a model retyped the script into a heredoc. Without
-    # this clause the widening would silence those runs, since this rung is
-    # checked first.
+    # this clause this rung would silence those runs, since it is checked
+    # first.
     if hypothesis.synthesized_test_file is not None or embedded_test_file(hypothesis.commands):
         for c in commands:
             if c.exit_code == 0:
@@ -280,13 +273,13 @@ def classify(
     # Rung 1d: the model-written test failed only because its own
     # `pytest.raises(...)` expectation did not hold. "DID NOT RAISE" is not an
     # assertion failure and not an exception out of the test body, so rung 1c
-    # let it through and rung 6 read it as `reproduced_weaker`. Live on
-    # `#2709` (`spike-step-5/static-retry/RESULT.md` §25, run 5-7) that was a
-    # false comment: `pytest.raises(ops.RelationNotFoundError)` around a
-    # `get_relation()` that never reads the databag, "DID NOT RAISE" on ops
-    # 3.8.3 and on the fix alike. The expectation is the model's, not the
+    # lets it through and rung 6 would read it as `reproduced_weaker`. On
+    # `#2709` that would be a false comment:
+    # `pytest.raises(ops.RelationNotFoundError)` around a `get_relation()`
+    # that never reads the databag, "DID NOT RAISE" on ops 3.8.3 and on the
+    # fix alike. The expectation is the model's, not the
     # reporter's symptom, so its not holding is graded no stronger than
-    # silent, whether or not the fix would make it hold (§26: the classifier
+    # silent, whether or not the fix would make it hold (the classifier
     # only sees one run, and a test whose expectation holds on the fix is
     # still not evidence the reported symptom is a missing exception). Checked
     # before rung 2 so a quoted snippet that happens to appear in the printed
@@ -313,13 +306,13 @@ def classify(
         if c.exit_code != 0 and _contains_any(_command_text(c), observed_snippets):
             return Outcome.REPRODUCED, f"{c.command!r} (exit {c.exit_code}) matched observed output"
 
-    # Rung 3: reproduced (log-only). spike-step-4/2341 -- a
+    # Rung 3: reproduced (log-only). `#2341` -- a
     # logger.warning() from ops-scenario's consistency checker that never
     # touches stdout/stderr or a non-zero exit code.
     if _contains_any(all_log_text, observed_snippets):
         return Outcome.REPRODUCED_LOG_ONLY, "observed substring matched captured log records (exit was zero)"
 
-    # Rung 4: un-runnable (API-shape mismatch). spike-step-4/2327 -- the
+    # Rung 4: un-runnable (API-shape mismatch). `#2327` -- the
     # extraction is written against the *current* API; the bug lived only
     # on an older one. Checked after the positive-match rungs above so a
     # real reproduction whose expected symptom *is* one of these
@@ -334,7 +327,7 @@ def classify(
             )
 
     # Rung 5: reproduced (positive-signal absent) + control case.
-    # spike-step-4/2639 -- the reproduction *is* "a specific hook does not
+    # `#2639` -- the reproduction *is* "a specific hook does not
     # fire." Silence is only meaningful evidence if a control stimulus
     # that *should* produce the signal actually did.
     if surface is not None and surface.expected_signal:
@@ -342,7 +335,7 @@ def classify(
         if surface.expected_signal not in main_text:
             control = run_result.control
             # The control has to have *succeeded*, not merely have been run.
-            # Since 2026-09-16 its `juju status` read is a bounded poll for
+            # Its `juju status` read is a bounded poll for
             # the signal (`seams/runner.py:_control_signal_command()`), so a
             # control that exits non-zero is one whose signal never appeared
             # inside the budget -- a control that did not fire. That command

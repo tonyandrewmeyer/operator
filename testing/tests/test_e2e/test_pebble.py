@@ -1721,3 +1721,28 @@ def test_service_shutdown_further_starts_raise_connection_error():
         with pytest.raises(ops.pebble.ConnectionError):
             workload.start('svc')
 
+
+def test_get_plan_raises_connection_error_when_container_cannot_connect():
+    container = Container('foo', can_connect=False, layers={'base': _crash_layer()})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ConnectionError):
+            workload.get_plan()
+
+
+def test_get_plan_raises_connection_error_after_shutdown():
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'base': _crash_layer(on_failure='shutdown')},
+        service_behaviours={ServiceBehaviour('svc', start=ServiceStart.FAILS)},
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        assert 'svc' in workload.get_plan().services
+        with pytest.raises(ops.pebble.ChangeError):
+            workload.start('svc')
+        with pytest.raises(ops.pebble.ConnectionError):
+            workload.get_plan()

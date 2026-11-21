@@ -1383,9 +1383,12 @@ def test_a_unit_removed_before_install_runs_nothing(juju: Juju):
     assert {d.unit_name for d in trace} == {'myapp/0'}
 
 
-def test_removing_the_leader_elects_the_lowest_unit_after_the_old_leader_has_gone():
+@pytest.mark.parametrize('juju_version', ['3.6.14', '4.0.9'])
+def test_removing_the_leader_elects_the_lowest_unit_after_the_old_leader_has_gone(
+    juju_version: str,
+):
     with Juju(cloud_spec=CloudSpec(type='lxd', name='localhost')) as juju:
-        app = juju.deploy(spec(PeerCharm, PEER_META), num_units=3)
+        app = juju.deploy(spec(PeerCharm, PEER_META), num_units=3, juju_version=juju_version)
         juju.settle()
         juju.remove_unit(app.units[0])
         trace = juju.settle()
@@ -1408,6 +1411,35 @@ def test_a_new_leader_that_has_not_started_runs_leader_elected_instead():
         trace = juju.settle()
     assert events(trace, 'myapp/1') == ['install', 'leader_elected', 'config_changed', 'start']
     assert events(trace, 'myapp/2')[1] == 'leader_settings_changed'
+
+
+def test_from_juju_4_a_new_leader_that_has_not_started_runs_leader_elected_last():
+    with Juju(cloud_spec=CloudSpec(type='lxd', name='localhost')) as juju:
+        app = deploy_mycharm(juju, num_units=3, juju_version='4.0.9')
+        juju.remove_unit(app.units[0])
+        trace = juju.settle()
+    assert events(trace, 'myapp/1') == ['install', 'config_changed', 'start', 'leader_elected']
+    assert events(trace, 'myapp/2') == ['install', 'config_changed', 'start']
+
+
+def test_the_old_leader_runs_the_same_teardown_before_and_from_juju_4():
+    def teardown(juju_version: str) -> list[tuple[str, str]]:
+        with Juju(cloud_spec=CloudSpec(type='lxd', name='localhost')) as juju:
+            app = juju.deploy(spec(PeerCharm, PEER_META), num_units=3, juju_version=juju_version)
+            juju.settle()
+            juju.remove_unit(app.units[0])
+            trace = juju.settle()
+        return [(d.unit_name, d.event.name) for d in trace]
+
+    juju_3, juju_4 = teardown('3.6.14'), teardown('4.0.9')
+    assert juju_3 == juju_4
+    assert [event for unit, event in juju_3 if unit == 'myapp/0'] == [
+        'replicas_relation_departed',
+        'replicas_relation_departed',
+        'replicas_relation_broken',
+        'stop',
+        'remove',
+    ]
 
 
 @pytest.mark.parametrize(

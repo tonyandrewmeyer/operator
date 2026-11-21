@@ -79,7 +79,7 @@ _COALESCED_SUFFIX = '_relation_changed'
 
 # Juju's uniter checks for leadership hooks, then config-changed, before it
 # looks at relation hooks, so these run ahead of relation hooks that are
-# already waiting.
+# already waiting. leader-settings-changed is only ever queued before Juju 4.
 _LEADERSHIP_EVENTS = ('leader_elected', 'leader_settings_changed')
 _WAITING_RELATION_SUFFIXES = (
     '_relation_joined',
@@ -748,6 +748,8 @@ class Juju:
 
         If the leader is removed, the lowest-numbered remaining unit gets
         leadership once the old leader is gone, and runs ``leader-elected``.
+        The other units don't run ``leader-settings-changed`` for it, and
+        from Juju 4 on, no unit runs ``leader-settings-changed`` at all.
 
         Raises:
             JujuError: if the arguments don't fit the model type, a unit is
@@ -1175,18 +1177,21 @@ class Juju:
         """Give leadership to the lowest-numbered unit left, which runs ``leader-elected``.
 
         In Juju any unit could win; the lowest-numbered is the same on every
-        run. If it hasn't run its ``leader-settings-changed`` from startup
-        yet, it runs ``leader-elected`` in its place, as Juju only runs
-        ``leader-settings-changed`` on a unit that isn't the leader.
+        run. Before Juju 4, if it hasn't run its ``leader-settings-changed``
+        from startup yet, it runs ``leader-elected`` in its place, as Juju only
+        runs ``leader-settings-changed`` on a unit that isn't the leader. From
+        Juju 4 on there is no ``leader-settings-changed`` to replace, so
+        ``leader-elected`` goes at the end of its queue.
         """
         leader = min(app._live_units, key=lambda u: u.id)
         app._leader_id = leader.id
         leader._state = dataclasses.replace(leader._state, leader=True)
         queue = self._queues[app.name, leader.id]
-        for index, queued in enumerate(queue):
-            if queued.event.name == 'leader_settings_changed':
-                queue[index] = _Queued(Event('leader_elected'))
-                return
+        if _has_leader_settings(app._charm.juju_version):
+            for index, queued in enumerate(queue):
+                if queued.event.name == 'leader_settings_changed':
+                    queue[index] = _Queued(Event('leader_elected'))
+                    return
         self._enqueue(app, leader.id, Event('leader_elected'))
 
     def _set_planned_units(self, app: App) -> None:

@@ -19,12 +19,12 @@
 # a reproduction on a version the reporter did not mention is disclosed
 # rather than hidden. A channel matrix is deliberately not built here.
 #
-# SAFE BY DEFAULT. `POST_COMMENTS` below is `false`, so an `issues.opened`
-# run does everything except deliver the comment: the composed text goes to
-# the job summary and the run artifact instead. Set it to `true` to let the
-# agent comment for real. `workflow_dispatch` takes the same switch as an
-# input, so a single issue can be tried by hand either way before the
-# automatic trigger is trusted with it.
+# POSTING. An `issues.opened` run posts its comment when the outcome is
+# comment-worthy; most outcomes are not, and those runs stay silent. Setting
+# `POST_COMMENTS` below to `false` turns posting off: the composed text then
+# goes only to the job summary and the run artifact. `workflow_dispatch`
+# keeps its `post_comment` input, which defaults to not posting, for trying
+# a single issue by hand.
 #
 # WHAT THIS JOB EXECUTES. The runner shells out to commands derived from the
 # issue body, on a throwaway `ubuntu-latest` runner, which is what makes the
@@ -83,11 +83,10 @@ on:
 permissions: {}
 
 env:
-  # Whether an `issues.opened` run posts what it composes. Start at `false`:
-  # every automatic run then goes all the way through the pipeline and
-  # reports what it would have said, without saying it to anyone. Flip to
-  # `true` to let the agent comment on new issues.
-  POST_COMMENTS: 'false'
+  # Whether an `issues.opened` run posts what it composes. Set to `false`
+  # to keep every automatic run going all the way through the pipeline and
+  # reporting what it would have said, without saying it to anyone.
+  POST_COMMENTS: 'true'
 
 jobs:
   reproduce:

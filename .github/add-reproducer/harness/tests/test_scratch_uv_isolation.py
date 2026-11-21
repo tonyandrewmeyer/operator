@@ -1,14 +1,11 @@
 """The `none` branch must not run inside whatever Python project happens to
 enclose its scratch directory.
 
-`spike-step-5/second-dispatch/RESULT.md` §6.4 saw this in the composed
-comment and did not act on it; `third-dispatch/RESULT.md` §7 carried it
-forward unobserved for a second round. `fourth-dispatch/RESULT.md` §2
-reproduced it: the branch's first command is the extraction's own `uv init
---bare .`, uv walks *up* from the working directory looking for a workspace
-root, and the shipped layout (`--out-dir "$PWD/out"` from
-`.github/add-reproducer/harness`) hands it the harness itself. Measured consequences,
-all three from one run of `#2045`'s real four commands:
+The branch's first command is often the extraction's own `uv init --bare .`,
+uv walks *up* from the working directory looking for a workspace root, and the
+shipped layout (`--out-dir "$PWD/out"` from `.github/add-reproducer/harness`)
+hands it the harness itself. The consequences, all three from `#2045`'s real
+four commands:
 
   - `.github/add-reproducer/harness/pyproject.toml`, a tracked file, gains a
     `[tool.uv.workspace] members` entry naming the scratch directory;
@@ -20,15 +17,15 @@ all three from one run of `#2045`'s real four commands:
     whose `pythonpath = ["."]` puts the harness's own modules on the
     reproducer's `sys.path`.
 
-The fix gives each issue a private workspace root instead of rewriting any
-command: `uv init --bare .` stays exactly the string the extraction wrote,
+Each issue gets a private workspace root instead of having any command
+rewritten: `uv init --bare .` stays exactly the string the extraction wrote,
 which `classifier.py`'s rung 0c keys on and which the composed comment tells
 a reader to paste.
 
 These tests exercise the real directory layout and the real `pyproject.toml`
 the harness ships. They do not shell out to uv -- `prepare_scratch_project()`
 tolerates its absence by design, and the behaviour that needs a network is
-recorded in the RESULT rather than asserted here."""
+not asserted here."""
 
 from __future__ import annotations
 
@@ -81,8 +78,8 @@ def test_the_shipped_harness_is_a_python_project_and_that_is_the_trap():
 def test_the_harness_pyproject_still_injects_its_own_directory_into_pytest():
     """`pythonpath = ["."]` is the third consequence above, and the one a
     reader of the composed comment cannot see. If this line ever goes, the
-    isolation is still wanted for the other two -- but the RESULT's claim
-    about `sys.path` would need re-measuring."""
+    isolation is still wanted for the other two -- but the claim above about
+    `sys.path` would need checking again."""
     assert 'pythonpath = ["."]' in (_HARNESS_ROOT / "pyproject.toml").read_text()
 
 
@@ -130,16 +127,15 @@ def test_prepare_scratch_project_makes_the_issue_dir_a_workspace_root(tmp_path):
 
 
 def test_the_private_root_supplies_the_pytest_the_extraction_does_not(tmp_path):
-    """The part of the fix that is not obvious, and the one that would have
-    broken the dominant extraction shape if it had been left out.
+    """The part of the isolation that is not obvious, and the one that would
+    break the dominant extraction shape if it were left out.
 
     `#2045`'s four commands install `ops[testing]` and nothing else -- no
-    pytest anywhere in them. Under the old layout they worked only because
-    the harness's own dev group had already put pytest in the venv uv chose,
-    so the contamination was load-bearing. `fourth-dispatch/RESULT.md` §2.3
-    measures what isolating without replacing it does: `ModuleNotFoundError:
-    No module named 'ops'` at collection, exit 2, a reproduction turned into
-    a broken run."""
+    pytest anywhere in them. Inside the harness's project they would work only
+    because the harness's own dev group had already put pytest in the venv uv
+    chose, so the contamination is load-bearing. Isolating without replacing
+    it gives `ModuleNotFoundError: No module named 'ops'` at collection,
+    exit 2, a reproduction turned into a broken run."""
     runner_stage.prepare_scratch_project(tmp_path / "issue-2045")
 
     pyproject = (tmp_path / "issue-2045" / "pyproject.toml").read_text()
@@ -175,7 +171,7 @@ def test_only_the_none_branch_gets_a_private_root(tmp_path, monkeypatch):
     """Scoped on purpose, and exercised through the real branch routing
     rather than asserted from the code. `k8s-clone` clones a repository into
     its scratch directory, and giving that checkout an enclosing workspace
-    root is a change this project has no live run to check.
+    root is a change nothing here checks against a real run.
 
     `#2045` is `substrate: none`; `#2484` carries a `ci_run_url` with no
     self-contained snippet and so routes to `k8s-clone`."""
@@ -230,17 +226,16 @@ def test_the_none_branch_runs_one_level_below_its_private_root(tmp_path):
 
 # --- uv's environment-selection variables ---
 #
-# `fourth-dispatch/RESULT.md` §2.4. Giving the scratch project a workspace
-# root of its own closes uv's *directory* walk, and nothing else: `uv` picks
-# its target environment from `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT` before it
-# looks at any directory at all. The harness runs under `uv run`, so both can
-# be set to the harness's own environment by the time a scratch command runs.
+# Giving the scratch project a workspace root of its own closes uv's
+# *directory* walk, and nothing else: `uv` picks its target environment from
+# `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT` before it looks at any directory at
+# all. The harness runs under `uv run`, so both can be set to the harness's own
+# environment by the time a scratch command runs.
 #
-# This was not reasoned out in advance -- the first version of the fix
-# inherited them, and `tox-uv` (which sets `UV_PROJECT_ENVIRONMENT` for the
-# whole test run) sent a scratch sync into this repository's `.tox/unit`,
-# emptying it down to the scratch project's four packages. 66 of `ops`'s own
-# tests then failed to import `websocket`.
+# Inheriting them is not harmless: `tox-uv` sets `UV_PROJECT_ENVIRONMENT` for
+# the whole test run, so a scratch sync would go into this repository's
+# `.tox/unit` and empty it down to the scratch project's four packages, and
+# `ops`'s own tests would then fail to import `websocket`.
 
 
 def test_scratch_commands_do_not_inherit_uvs_environment_selection(monkeypatch):

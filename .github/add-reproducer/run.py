@@ -184,10 +184,9 @@ def main() -> int:
     print(f"#{result.issue_number}: stage={result.stage_reached} outcome={result.outcome} reason={result.reason}")
     # Written before anything that can fail below it, and outside the
     # `run_result` branch: a run that stops at the in-scope gate has no
-    # `RunResult` at all, and that is precisely the stop whose reasons went
-    # unrecorded across four dispatches. `-extraction.json` matches the
-    # workflow's `out/*.json` upload glob, so the artefact now exists for a
-    # gate stop too.
+    # `RunResult` at all, and that is precisely the stop whose reasons most
+    # need recording. `-extraction.json` matches the workflow's `out/*.json`
+    # upload glob, so the artefact exists for a gate stop too.
     record_lines: list[str] = []
     if result.extraction_record is not None:
         (out_dir / f"{issue.number}-extraction.json").write_text(

@@ -1,5 +1,5 @@
-"""Tests for comment-threading in extraction (PLAN.md Approach §3 delta,
-surfaced by `spike-step-5/2185/RESULT.md` and `spike-step-5/2045/RESULT.md`).
+"""Tests for comment-threading in extraction (the `#2185` and `#2045`
+shapes).
 """
 
 import json
@@ -19,8 +19,8 @@ def _load_issue(number: int) -> Issue:
 
 
 def test_comment_from_dict_unwraps_nested_author_login():
-    # gh issue view --json ...,comments (and the raw REST/GraphQL API, per
-    # spike-step-5/2045/issue.json) nest the author as {"login": ...}.
+    # gh issue view --json ...,comments (and the raw REST/GraphQL API) nest
+    # the author as {"login": ...}.
     c = Comment.from_dict({"author": {"login": "james-garner-canonical"}, "body": "hi", "createdAt": "2026-01-01T00:00:00Z"})
     assert c.author == "james-garner-canonical"
 
@@ -42,8 +42,8 @@ def test_issue_from_dict_parses_comments_list():
 
 
 def test_issue_from_dict_defaults_comments_to_empty_list():
-    # Regression: fixtures/payloads written before this change (no
-    # "comments" key at all) must still parse.
+    # Regression: fixtures/payloads with no "comments" key at all must
+    # still parse.
     d = {"number": 1, "title": "t", "body": "b", "labels": [], "state": "OPEN"}
     issue = Issue.from_dict(d)
     assert issue.comments == []
@@ -54,8 +54,7 @@ def test_issue_from_dict_defaults_comments_to_empty_list():
 
 def test_no_comments_produces_empty_section_regression():
     # #2639 has no comments field at all -- confirms issues with zero
-    # comments format identically to before this change (existing
-    # extraction behaviour unchanged).
+    # comments add no comments section to the prompt.
     issue = _load_issue(2639)
     assert issue.comments == []
     assert _format_comments(issue, DEFAULT_MAX_COMMENT_CHARS) == ""
@@ -64,8 +63,8 @@ def test_no_comments_produces_empty_section_regression():
 
 
 def test_real_2045_comment_is_attributed_as_other():
-    # Real GitHub data (spike-step-5/2045/issue.json's verbatim API
-    # capture, carried into fixtures/issues/2045.json): a follow-up
+    # Real GitHub data (a verbatim API capture, in
+    # fixtures/issues/2045.json): a follow-up
     # comment from james-garner-canonical, who is not the issue's reporter
     # (tonyandrewmeyer) -- the "third-party follow-up" shape.
     issue = _load_issue(2045)
@@ -80,15 +79,10 @@ def test_real_2045_comment_is_attributed_as_other():
 
 def test_scope_redirecting_reply_is_flagged_as_issue_author():
     # Modeled on canonical/operator#2185's real body ("EDIT: see the first
-    # reply for the new scope of this issue"). spike-step-5/2185/RESULT.md
-    # hit a genuine, documented access blocker (no gh CLI, GitHub MCP
-    # scoped away from canonical/operator, WebFetch never returns the
-    # comment timeline) and never fetched the real reply text -- confirmed
-    # unreachable again in this session (same MCP/API denial). The reply
-    # body below is therefore INVENTED for this test, not real GitHub
-    # content; only the body's EDIT-pointer text and the general shape
-    # (reporter narrows their own issue's scope in the first reply) come
-    # from the real issue.
+    # reply for the new scope of this issue"). The reply body below is INVENTED
+    # for this test, not real GitHub content; only the body's EDIT-pointer text
+    # and the general shape (reporter narrows their own issue's scope in the
+    # first reply) come from the real issue.
     issue = Issue(
         number=99101,
         title="Don't include private-address in the default Scenario database when mocking Juju 4",
@@ -107,8 +101,7 @@ def test_scope_redirecting_reply_is_flagged_as_issue_author():
             Comment(
                 author="tonyandrewmeyer",
                 body=(
-                    "[SYNTHETIC -- not real GitHub content, see RESULT.md access "
-                    "note] Narrowing scope: let's only handle the lxd-substrate "
+                    "[SYNTHETIC -- not real GitHub content] Narrowing scope: let's only handle the lxd-substrate "
                     "case for now; the k8s mock can stay as-is until a separate "
                     "issue tracks it."
                 ),

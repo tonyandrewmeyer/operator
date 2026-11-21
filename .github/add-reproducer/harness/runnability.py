@@ -1,20 +1,19 @@
-"""Are `commands[]` actually runnable? (PLAN.md Approach §4 pre-run gate.)
+"""Are `commands[]` actually runnable? (The pre-run gate.)
 
-`spike-step-5/live-llm/RESULT.md` Finding 2: the extraction schema says
-`"commands": [str]` and nothing about what a command *is*, so a live model
-emits prose ("Run a charm test that checks the default relation settings"),
-bare Python expressions (`relation = self.model.get_relation(...)`), or
-pytest test names — none of which are shell. Post-fix live run: 0 of 7
-issues produced a runnable command sequence.
+The extraction schema says `"commands": [str]` and nothing about what a
+command *is*, so a live model can emit prose ("Run a charm test that checks
+the default relation settings"), bare Python expressions
+(`relation = self.model.get_relation(...)`), or pytest test names — none of
+which are shell.
 
 Handing those to a shell is not merely useless, it is actively harmful.
 `bash -c 'Run a charm test ...'` exits **127** (`Run: command not found`),
 and the classifier's rung 6 turns any non-zero last command into
 `reproduced (weaker)`, which is in `COMMENT_OUTCOMES` — so prose becomes a
-maintainer-visible comment claiming the bug reproduced. Demonstrated on
-the real #2185/#2341/#2327 live extractions. That is the false-comment
-mode PLAN.md Goal §4 ("nothing useful produced → stay silent") and Steps
-§1's bias-toward-false-drop exist to prevent.
+maintainer-visible comment claiming the bug reproduced (live extractions
+for #2185/#2341/#2327 had exactly this shape). That is the false-comment
+mode the tool's "nothing useful produced → stay silent" rule and its
+bias toward false drops exist to prevent.
 
 So this module answers one question, conservatively: would these strings
 survive contact with a shell at all? It deliberately does not judge
@@ -35,7 +34,7 @@ import shutil
 import subprocess
 
 # Tools the runner is documented to provide: the host scratch directory for
-# `substrate: none` (PLAN.md Approach §4) plus the multipass VM's
+# `substrate: none` plus the multipass VM's
 # concierge/juju/charmcraft for `lxd|k8s`. Kept as an explicit allowlist
 # rather than probing PATH, so the verdict is identical on this box, in the
 # VM, and on a GHA runner — a `which`-only check would call `juju` prose
@@ -154,7 +153,7 @@ def classify_command(command: str, *, extra_tools: frozenset[str] = frozenset())
 
 
 def assess(commands: list[str], *, extra_tools: frozenset[str] = frozenset()) -> RunnabilityReport:
-    """Approach §4's pre-run gate.
+    """The pre-run gate.
 
     Runnable requires **both**: at least one genuinely executable command,
     and no entry that would blow up on contact with a shell. A prose line
@@ -180,8 +179,8 @@ def assess(commands: list[str], *, extra_tools: frozenset[str] = frozenset()) ->
 
 
 def runnable_fraction(command_lists: list[list[str]]) -> tuple[int, int]:
-    """`(runnable, total)` over several hypotheses -- Approach §3's
-    `commands_runnable` metric, which the spikes measured by hand.
+    """`(runnable, total)` over several hypotheses -- the
+    `commands_runnable` metric.
     """
     total = len(command_lists)
     return sum(1 for cs in command_lists if assess(cs).runnable), total

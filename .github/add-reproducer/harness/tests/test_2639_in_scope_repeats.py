@@ -1,23 +1,20 @@
 """#2639 `in_scope` false-drop measurement, pinned against the recorded runs.
 
-`spike-step-5/composer-live/RESULT.md`'s 2026-07-30 addendum flagged (n=1,
-explicitly unmeasured) that a live A/B sample called `#2639` -- the project's
-only ever-successfully-reproduced case -- `in_scope: false` under the current
-tightened `in_scope` prompt, even without comments. `spike-step-5/2639-in-scope/
-run_2639_repeats.py` repeats the `in_scope` classification 8 times per variant
-(real comments / `comments=[]`) against the real issue capture
-(`spike-step-5/comments/2639.json`) to check whether that was a real,
-repeatable defect or n=1 noise.
+A single live A/B sample called `#2639` -- the project's only
+ever-successfully-reproduced case -- `in_scope: false` under the current
+tightened `in_scope` prompt, even without comments. A repeat script runs the
+`in_scope` classification 8 times per variant (real comments /
+`comments=[]`) against the real issue capture to check whether that was a
+real, repeatable defect or n=1 noise.
 
-These tests assert against the recorded JSON in `spike-step-5/2639-in-scope/
-out/`, not a live model: no network, no key, deterministic -- same pattern as
+These tests assert against the recorded JSON in the run's `out/` directory,
+not a live model: no network, no key, deterministic -- same pattern as
 `test_live_calibration.py` / `test_comments_live_ab.py`.
 
 This measurement does NOT retune `extraction.py`'s `in_scope` prompt --
 diagnosing and reporting the rate is the deliverable; a fix has its own
 precision/recall consequences across the whole 60-issue corpus and needs its
-own measured pass (see `spike-step-5/composer-live/RESULT.md`'s newest
-addendum).
+own measured pass.
 """
 
 import json
@@ -30,7 +27,7 @@ _RUN_DIR = Path(__file__).parent.parent.parent / "spike-step-5" / "2639-in-scope
 
 @pytest.fixture(autouse=True)
 def _require_run():
-    if not _RUN_DIR.is_dir():  # pragma: no cover - spike output not always present
+    if not _RUN_DIR.is_dir():  # pragma: no cover - recorded run not always present
         pytest.skip(f"2639 in_scope repeats run not available at {_RUN_DIR}")
 
 

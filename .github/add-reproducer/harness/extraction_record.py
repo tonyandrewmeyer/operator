@@ -1,21 +1,16 @@
 """What extraction actually did, on every run that reaches it.
 
-Until this module existed, a dispatch that stopped at the in-scope gate
-recorded one line -- `stage=extraction ... reason=in_scope=false (second
-opinion)` -- and that line was not even true: `pipeline.py` printed it for
-*any* first-pass drop, so it said "second opinion" whether or not the second
-pass had run (`spike-step-5/comments-check/RESULT.md` §3.1). The run wrote no
-artefact either, because `pipeline.py` returns before the record-writing step,
-so `upload-artifact` reported `No files were found`
-(`spike-step-5/seventh-dispatch/RESULT.md` §4.2).
+A run that stops at the in-scope gate otherwise records one line --
+`stage=extraction ... reason=in_scope=...` -- and writes no artefact, because
+`pipeline.py` returns before the record-writing step (so `upload-artifact`
+reports `No files were found`).
 
-The consequence was measured on 2026-09-23/24: four live runs dropped `#2639`
-and `#2484` at that gate, a local run of the same tip, the same model and the
-same fetch path put both in scope 24 of 24, and nothing either side recorded
-could say what differed. The candidates were the Actions key's account
-(OpenRouter routes per account), provider variance on the day, and the runner
--- and separating them needs the per-call `provider`/`model` OpenRouter
-returns, which nothing kept.
+That is not enough to explain a drop. CI runs can drop an issue at that gate
+that a local run of the same code, the same model and the same fetch path
+puts in scope every time, and nothing either side records can say what
+differed. The candidates are the Actions key's account (OpenRouter routes per
+account), provider variance on the day, and the runner -- and separating them
+needs the per-call `provider`/`model` OpenRouter returns.
 
 So: one record, built after extraction whether or not the issue is in scope,
 carrying the first pass's verdict, whether the second pass ran and what it
@@ -29,7 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 # 2: adds `test_check`, the first pass's static check of its embedded test
-# file and whether that check sent the extraction round once more.
+# file and whether that check sent the extraction back for one more attempt.
 # 3: adds `substrate_override`, set by the pipeline when a fake-hook-tool
 # test ran as `substrate: none` against the answer's own field
 # (`pipeline.override_substrate()`); `None` otherwise.
@@ -107,8 +102,8 @@ def _first_pass_fields(hypothesis: Any) -> dict | None:
 
 
 def _second_pass_fields(raw: dict | None) -> dict:
-    """`ran` is the field the old `(second opinion)` reason implied and could
-    not support. `recovered` is `concrete_defect` under the name that says
+    """`ran` says whether a second pass actually happened, which a bare
+    "second opinion" label cannot. `recovered` is `concrete_defect` under the name that says
     what it did: `inscope_second_pass.TwoPassExtractor.extract()` re-extracts
     the hypothesis exactly when `concrete_defect` is true."""
     if raw is None:
@@ -143,13 +138,10 @@ def _test_check_fields(extractor: Any) -> dict:
 def in_scope_drop_reason(record: dict | None) -> str:
     """The `stage=` reason for a run stopped at the in-scope gate.
 
-    Keeps the `in_scope=false` prefix every earlier round's logs carry, so
-    those logs still read the same way and a grep across rounds still finds
-    this stop. What changes is the parenthetical: it now names what happened
-    rather than what the code's structure implies. The old text --
-    `(second opinion)` -- was read by `seventh-dispatch` §4.1 as evidence the
-    second pass had run and recovered nothing, and it was never evidence of
-    that.
+    Keeps the `in_scope=false` prefix so a grep across older logs still
+    finds this stop. The parenthetical names what actually happened -- whether
+    the second pass ran -- so a drop is never read as "the second pass ran and
+    recovered nothing" when it did not run at all.
     """
     second = (record or {}).get("second_pass") or {}
     if second.get("ran"):

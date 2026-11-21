@@ -1,7 +1,6 @@
-"""A model-written test whose own `pytest.raises(...)` did not hold
-(`spike-step-5/static-retry/RESULT.md` §25, §26).
+"""A model-written test whose own `pytest.raises(...)` did not hold.
 
-Live on `#2709` (§25, run 5-7), a test wrapped `model.get_relation('db', 1)`,
+Live on `#2709`, a test wrapped `model.get_relation('db', 1)`,
 which never reads the databag, in `pytest.raises(ops.RelationNotFoundError)`.
 It failed "DID NOT RAISE" on ops 3.8.3 and on the fix, and rung 6 read that as
 `reproduced_weaker`, which composes "The bug reproduced." Rung 1d grades it no
@@ -26,8 +25,8 @@ def test_gone_relation(model):
 
 _HEREDOC = f"cat > test_gone.py << 'EOF'\n{_TEST}EOF"
 
-# What pytest 9 printed for run 5-7 on ops 3.8.3 and on `main` (§25's runs
-# file), trimmed to the failure.
+# What pytest 9 printed for that `#2709` test on ops 3.8.3 and on `main`,
+# trimmed to the failure.
 _DID_NOT_RAISE = """\
 F                                                                        [100%]
 =================================== FAILURES ===================================
@@ -50,8 +49,8 @@ E       Failed: DID NOT RAISE <class 'ops.model.ModelError'>
 1 failed in 0.12s
 """
 
-# §24's 4-0 repair on ops 3.8.3: the read raised, the catch-and-assert
-# compared it with `{}`.
+# A hand-repaired `#2709` test on ops 3.8.3: the read raised, the
+# catch-and-assert compared it with `{}`.
 _ASSERTION = """\
 >       assert data == {}
 E       AssertionError: assert ModelError('ERROR permission denied\\n') == {}

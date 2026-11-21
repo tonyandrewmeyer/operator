@@ -1,13 +1,11 @@
 """A cheap, deterministic check on the test file an extraction embeds.
 
-Until this module existed, an extraction whose heredoc test was broken went
-all the way to the runner, failed there, and only then was classified
+Without it, an extraction whose heredoc test is broken goes all the way to
+the runner, fails there, and only then is classified
 `UNRUNNABLE_SYNTHESIS_INVALID` by rung 1a or 1c and kept silent. On `#2045`,
-5 of 8 extractions at `0e6d7e28` were that shape, and so was the one live
-dispatch at `7888bb13` (`ctx.charm_dir`, an `AttributeError`): the model
-reaches for `testing.Context` attributes that do not exist, even with the
-prompt saying plainly that they do not (`spike-step-5/assert-choice/
-RESULT.md` §3, §5).
+most extractions are that shape (`ctx.charm_dir`, an `AttributeError`): the
+model reaches for `testing.Context` attributes that do not exist, even with
+the prompt saying plainly that they do not.
 
 Rung 1c already keeps those silent, so catching them earlier does not by
 itself buy a reproduction. What it buys is the chance to ask again:
@@ -21,8 +19,8 @@ and `CharmBase` have, so the allowed sets follow the installed `ops` rather
 than a list that goes stale.
 
 Each rule is there because it cannot fire on a test that would work: the
-calibration against the 33 saved `#2045` extractions
-(`spike-step-5/static-retry/RESULT.md`) rejects none of the five valid ones.
+calibration against 33 saved `#2045` extractions rejects none of the five
+valid ones.
 A false rejection costs a reproduction (the retry may come back worse, and is
 kept whatever it says), so anything this module cannot be sure of, it lets
 through. In particular, a name that is ever bound to something it cannot
@@ -113,10 +111,10 @@ def retry_hints(result: StaticCheckResult) -> list[str]:
 
     Told that `ctx.charm_dir` does not exist, the model reaches for another
     attribute that does not exist either (`ctx.mgr`, `ctx.charm`,
-    `ctx.framework`): live, the re-ask rescued 1 of 4 such tests
-    (`spike-step-5/static-retry/RESULT.md` §7). So when a reason is a missing
-    `Context` attribute, the re-ask also lists the attributes there are, and
-    says how to read something off the charm instead.
+    `ctx.framework`), so the re-ask alone rarely rescues such a test. When a
+    reason is a missing `Context` attribute, the re-ask also lists the
+    attributes there are, and says how to read something off the charm
+    instead.
     """
     hints = []
     allowed = context_attributes()
@@ -142,9 +140,8 @@ def _is_leader_hint(result: StaticCheckResult) -> list[str]:
 
     `_unfaked_hook_tools()` only rejects a missing `is-leader` fake when
     nothing before the access could fail the test first, so it misses some
-    tests that need one. By hand, applying the other reasons to the `#2709`
-    tests at §16 still left 2 of 8 dying on `FileNotFoundError: 'is-leader'`
-    (`spike-step-5/static-retry/RESULT.md` §17).
+    tests that need one: on `#2709`, applying the other reasons by hand still
+    left some tests dying on `FileNotFoundError: 'is-leader'`.
     """
     if not _security_event_runs_is_leader():
         return []
@@ -168,9 +165,8 @@ _FAKE_HOOK_TOOL_REASONS = ("before any hook tool runs", "hook tool", "which is n
 # Left off `retry_hints()`'s list. `charm_root` reads like the charm's
 # directory, but it is only the `Context(charm_root=...)` argument, `None` by
 # default, so a test comparing the cwd with it fails whether or not the bug is
-# real. Listed, it was taken in 1 of 7 re-asks; listed with a sentence saying
-# what it is, in 0 of 7, 2 of 11 and 3 of 13 (`spike-step-5/static-retry/
-# RESULT.md` §8, §9, §12, §13). The check still allows it: only the hint
+# real. Listed, the model still takes it in some re-asks, even with a
+# sentence saying what it is. The check still allows it: only the hint
 # leaves it out.
 _UNLISTED_CONTEXT_ATTRIBUTES = frozenset({"charm_root"})
 
@@ -241,9 +237,9 @@ def add_missing_imports(source: str, donor: str | None = None) -> tuple[str, lis
     where the import is known, and the lines added.
 
     The re-ask's answer sometimes fixes everything it was told about and
-    returns a test with no `import ops` or `from ops import testing` (3 of
-    18 re-asks, `spike-step-5/static-retry/RESULT.md` §11). The re-ask is
-    bounded at one, so the check catching it lost the test. A name that is
+    returns a test with no `import ops` or `from ops import testing`. The
+    re-ask is bounded at one, so the check catching it would lose the test.
+    A name that is
     used and bound nowhere is a `NameError` whatever it was meant to be, so
     adding the import cannot break a test that would have worked.
 
@@ -633,8 +629,7 @@ def _context_attributes(tree: ast.Module) -> list[str]:
 #
 # `ctx.charm_spec.charm_dir` passes `_context_attributes()`, which only looks
 # one attribute deep: `charm_spec` is a real `Context` attribute, and the
-# `AttributeError` is one level down (2 of 14 re-asks,
-# `spike-step-5/static-retry/RESULT.md` §14). These helpers follow such a
+# `AttributeError` is one level down. These helpers follow such a
 # chain through the types the installed `ops` declares, and give up, which
 # lets the test through, at the first step whose type is not certain.
 
@@ -1109,7 +1104,7 @@ def _unset_charm_root(tree: ast.Module) -> list[str]:
 
     It is the `charm_root=` argument and nothing else, so it is `None`, and
     a test comparing the charm's cwd with it fails whether or not the bug is
-    real (`spike-step-5/static-retry/RESULT.md` §8, §12). Only for a name
+    real. Only for a name
     bound exactly once in the file, by `Context(...)` with no `charm_root=`
     and no `**` argument, and never assigned an attribute.
     """
@@ -1214,8 +1209,7 @@ def _tmp_fixture_without_charm_root(tree: ast.Module) -> list[str]:
     `Context(charm_root=...)`; otherwise the charm root is a separate
     temporary directory, so a test comparing the charm's cwd (or anything
     else the charm sees) with the fixture has the same result whether or not
-    the bug is real (`spike-step-5/static-retry/RESULT.md` §38's
-    prbar2045-8, §39). Only when the test function builds a `Context(...)`
+    the bug is real. Only when the test function builds a `Context(...)`
     itself and every read of the fixture in it is an operand of an `==`,
     `!=`, `in` or `not in` comparison (bare, or in `str()`, `Path()`,
     `os.fspath()`, `.resolve()`, or `/ ...`): any other use, `charm_root=`
@@ -1408,8 +1402,7 @@ def _charm_name_as_path_without_charm_root(tree: ast.Module) -> list[str]:
     Without `charm_root=`, `ops.testing` makes the charm root a `tempfile`
     directory (`/tmp/tmpXXXX`), never named after the charm, so a test that
     checks the charm's cwd (or anything else) ends in `/<name>` fails
-    whether or not the bug is real (`spike-step-5/static-retry/RESULT.md`
-    §39's 2045b-1 and 2045b-5, §40). The name is the `meta=` the test's
+    whether or not the bug is real. The name is the `meta=` the test's
     `Context` is given: a dict literal, a module-level dict, or
     `yaml.safe_load()` of a string. Matches: `.endswith()` a string whose
     last path component is the name (`'<name>'`, `'/<name>'`,
@@ -1635,10 +1628,9 @@ def _cwd_compared_with_unsourced_value(tree: ast.Module) -> list[str]:
 
     `#2045` is about the cwd a charm runs in: `ops.testing` did not make it
     the charm directory. A test of it is only as good as the value it
-    compares the cwd with. Four saved answers compared it with a guess
-    (`spike-step-5/static-retry/RESULT.md` §38 to §41): pytest's `tmp_path`,
-    a path ending in the charm's name, and the literal `'/path/to/charm'`
-    (once in a plain class with no `ops` at all). Each fails on every
+    compares the cwd with. Saved answers have compared it with a guess:
+    pytest's `tmp_path`, a path ending in the charm's name, and the literal
+    `'/path/to/charm'` (once in a plain class with no `ops` at all). Each fails on every
     version, whether or not the bug is fixed. Every valid answer compared
     the cwd with the charm directory read where the charm runs:
     `self.framework.charm_dir` / `self.charm_dir` in a handler (stored on a
@@ -1876,10 +1868,9 @@ def _cwd_side_not_a_cwd_read(tree: ast.Module) -> list[str]:
 
     `_cwd_compared_with_unsourced_value()` checks the side a cwd is compared
     *with*; it finds the cwd by its value (`os.getcwd()` and the like).
-    §41's false `#2045` final (`spike-step-5/static-retry/RESULT.md` §41)
-    kept `self.charm_dir` from the handler on one side and stored
-    `str(ops.__path__[0])` under the key `'cwd'` on the other, so the file
-    read no cwd at all, failed on every version, and was out of that rule's
+    One false `#2045` answer kept `self.charm_dir` from the handler on one
+    side and stored `str(ops.__path__[0])` under the key `'cwd'` on the
+    other, so the file read no cwd at all, failed on every version, and was out of that rule's
     scope. This rule finds the cwd side by how the test presents it.
 
     In a test function, a side of a claim (the comparisons that rule counts)
@@ -2008,10 +1999,8 @@ def _testing_names(tree: ast.Module) -> list[str]:
     Both are a guess at the API rather than a test of the bug: on `#2709`, 3
     of 8 extractions wrote `testing.StateRelation`, `Context(relations=...)`
     or `Relation(remote_apps=...)`, and failed with `AttributeError` or
-    `TypeError` before reaching an assertion
-    (`spike-step-5/static-retry/RESULT.md` §10). The reason lists what does
-    exist, since naming only the wrong one sends the model to another guess
-    (§7).
+    `TypeError` before reaching an assertion. The reason lists what does
+    exist, since naming only the wrong one sends the model to another guess.
     """
     testing = testing_module()
     if testing is None:
@@ -2314,11 +2303,10 @@ def _backend_under_testing(tree: ast.Module) -> list[str]:
     `ops.testing` swaps the model backend for one that never runs a hook
     tool, so it cannot return what Juju's hook tools return. On `#2709`
     (Juju answers "permission denied" for a gone relation), a test whose
-    charm called `self.model._backend.relation_get(...)` and expected that
-    error failed on its own assertion with or without the fix, and rung 6
-    called it a reproduction (`spike-step-5/static-retry/RESULT.md` §10). No
-    `ops.testing` test has a reason to reach into the backend, so this cannot
-    reject one that would work.
+    charm calls `self.model._backend.relation_get(...)` and expects that
+    error fails on its own assertion with or without the fix, and rung 6
+    would call it a reproduction. No `ops.testing` test has a reason to reach
+    into the backend, so this cannot reject one that would work.
     """
     if not any(_is_context_call(node) for node in ast.walk(tree)):
         return []
@@ -2398,10 +2386,10 @@ def faked_hook_tools(source: str) -> list[str]:
 #
 # A test in the shape the prompt asks for on a hook-tool bug builds
 # `ops.Model(meta, _ModelBackend(...))` with fake hook tools on `PATH`. On
-# `#2709` all 8 live tests took that shape and none reached the bug
-# (`spike-step-5/static-retry/RESULT.md` §16): 5 asked for an endpoint their
-# `CharmMeta` never declares, 1 left `relation-ids` unfaked, and 1 passed
-# `_ModelBackend.relation_get()` keywords it does not take. The rules below
+# `#2709` live tests took that shape and none reached the bug: most asked
+# for an endpoint their `CharmMeta` never declares, one left `relation-ids`
+# unfaked, and one passed `_ModelBackend.relation_get()` keywords it does
+# not take. The rules below
 # reject those shapes. As everywhere in this module, anything they cannot be
 # sure of, they let through.
 
@@ -2483,8 +2471,7 @@ class _Names:
     With `function`, as seen from inside that module-level function: a name
     local to it is counted, and found, only in it, since another function's
     binding of the same name is a different variable. Two tests that each
-    assign `model` then each have a known `model` (`spike-step-5/
-    static-retry/RESULT.md` §23, §24). Every other name is counted across
+    assign `model` then each have a known `model`. Every other name is counted across
     the whole file, as without it."""
 
     def __init__(self, tree: ast.Module, counts: dict[str, int], function: ast.FunctionDef | None = None):
@@ -2876,11 +2863,10 @@ def _unbuildable_meta(tree: ast.Module) -> list[str]:
     four hook tools faked and the error caught and asserted on, but its meta
     was `CharmMeta.from_yaml('name: myapp\\nrequires:\\n  db:\\n')`: an
     endpoint with no mapping, which raises `TypeError: 'NoneType' object is
-    not subscriptable` inside `CharmMeta` on ops 3.8.3 and `main` alike
-    (`spike-step-5/static-retry/RESULT.md` §30, 8-7). With `interface: db`
-    added it was a valid reproduction. `_built_meta()` already builds such a
-    literal, but treated a build that raises as unknown, so every rule that
-    needs the meta stayed silent.
+    not subscriptable` inside `CharmMeta` on ops 3.8.3 and `main` alike.
+    With `interface: db` added it was a valid reproduction. `_built_meta()`
+    builds such a literal, but treats a build that raises as unknown, so
+    every rule that needs the meta stays silent; this rule covers that case.
 
     Rejects a `CharmMeta(...)` / `CharmMeta.from_yaml(...)` call whose
     arguments are all literals (or names assigned once to one, in the file or
@@ -2985,13 +2971,13 @@ def _endpoints_without_mapping(call: ast.Call, names: _Names) -> list[tuple[str,
 
 # -- `CharmMeta.from_yaml()` given a dict --------------------------------------
 #
-# Live on `#2709`, one final answer (10-5) and one first answer (10-2) built
-# their meta with `ops.CharmMeta.from_yaml({...})`, a dict where the method
-# takes a YAML string or stream (`spike-step-5/static-retry/RESULT.md` §33).
-# Both raise `TypeError: a string or stream input is required` on ops 3.8.3
-# and `main`, and the check let 10-5 through: `_build_meta()` only builds a
-# `from_yaml` meta from string literals, so `_unbuildable_meta()` was silent,
-# and with no meta built the undeclared-endpoint rule was silent too.
+# Live answers on `#2709` have built their meta with
+# `ops.CharmMeta.from_yaml({...})`, a dict where the method takes a YAML
+# string or stream. That raises `TypeError: a string or stream input is
+# required` on ops 3.8.3 and `main`, and nothing else catches it:
+# `_build_meta()` only builds a `from_yaml` meta from string literals, so
+# `_unbuildable_meta()` is silent, and with no meta built the
+# undeclared-endpoint rule is silent too.
 
 _NON_STRING_KINDS = {ast.Dict: "a dict", ast.List: "a list", ast.Set: "a set", ast.Tuple: "a tuple"}
 
@@ -3117,12 +3103,11 @@ def _from_yaml_non_string_reason(
 
 # -- a fake with no `#!` line, and an attribute `CharmMeta` lacks ------------
 #
-# Both from the §29 control answers, which the substrate override now runs
-# (`spike-step-5/static-retry/RESULT.md` §31): c-2 wrote its fakes as
+# Both seen in answers the substrate override runs: one wrote its fakes as
 # `path.write_text(script)` with no `#!` line and died on `OSError: [Errno 8]
-# Exec format error: 'relation-ids'`; c-7 built its meta with
-# `CharmMeta.from_yaml_file(...)` (and §27's 6-6 with `CharmMeta.from_dict(...)`),
-# neither of which exists. All three fail the same way on ops 3.8.3 and `main`.
+# Exec format error: 'relation-ids'`; others built their meta with
+# `CharmMeta.from_yaml_file(...)` or `CharmMeta.from_dict(...)`, neither of
+# which exists. All fail the same way on ops 3.8.3 and `main`.
 
 
 def _fake_writer(func: ast.FunctionDef) -> tuple[int, list, bool] | None:
@@ -3237,10 +3222,9 @@ def _fake_without_shebang(tree: ast.Module) -> list[str]:
     The kernel cannot run an executable text file that does not start with
     `#!`, and ops runs hook tools with `subprocess.run()`, not a shell, so
     the first one it runs raises `OSError: [Errno 8] Exec format error`
-    before the test reaches the bug, on every version of ops. §29's control
-    answer c-2 wrote its fakes with `path.write_text(script)` and died on
-    `relation-ids` that way on 3.8.3 and `main`
-    (`spike-step-5/static-retry/RESULT.md` §31).
+    before the test reaches the bug, on every version of ops. A test that
+    writes its fakes with `path.write_text(script)` dies on `relation-ids`
+    that way on 3.8.3 and `main`.
 
     Only for a fake written once, by a module-level helper that writes
     `<dir> / name` with `write_text(...)` and `chmod`s it, whose text
@@ -3325,14 +3309,14 @@ def _invalid_shell_fake(tree: ast.Module) -> list[str]:
     """A hook tool fake whose script is not valid shell, run first by an
     access the test certainly makes.
 
-    Live on `#2709` (§35's 11-7), the `relation-ids` fake's script was
+    For example, a `relation-ids` fake whose script is
     `echo '['"db:2'"]'` (unbalanced quotes): `sh` exits 2
     with `Syntax error: Unterminated quoted string`, so `get_relation()`
-    raised a plain `ModelError` on 3.8.3 and `main` alike, before ops
-    reached the code the issue is about. The rules that read fake scripts
-    use `shlex`, which raises on the unbalanced quote, so each treated the
-    script as unknown and said nothing; the test then failed the same way on
-    both versions and was classified as a reproduction.
+    raises a plain `ModelError` on 3.8.3 and `main` alike, before ops
+    reaches the code the issue is about. The rules that read fake scripts
+    use `shlex`, which raises on the unbalanced quote, so each treats the
+    script as unknown and says nothing; the test then fails the same way on
+    both versions and would be classified as a reproduction.
 
     Validity is decided by `sh -n` on the file the helper writes (parse
     only, nothing runs), not by `shlex`. Only for a fake written once, by a
@@ -3409,11 +3393,10 @@ def _missing_charm_meta_attribute(tree: ast.Module) -> list[str]:
     """A read of an attribute the installed `CharmMeta` class does not have,
     in a fake-hook-tool test, where that certainly fails the test.
 
-    §29's control answer c-7 built its meta with
-    `ops.CharmMeta.from_yaml_file('metadata.yaml')`, and §27's 6-6 with
+    Answers have built their meta with
+    `ops.CharmMeta.from_yaml_file('metadata.yaml')` and with
     `ops.CharmMeta.from_dict(meta)`: neither exists on ops 3.8.3 or `main`,
-    so both died on `AttributeError` before reaching the bug
-    (`spike-step-5/static-retry/RESULT.md` §31).
+    so both die on `AttributeError` before reaching the bug.
 
     `CharmMeta` however it is named (`ops.CharmMeta`, `ops.charm.CharmMeta`,
     an imported or aliased name, a name assigned once to it), checked
@@ -3486,10 +3469,10 @@ def _undeclared_endpoints(tree: ast.Module) -> list[str]:
 
     `model.get_relation('db', ...)` and `model.relations['db']` raise
     `KeyError: 'db'` when `db` is not under `requires`, `provides` or `peers`,
-    before any hook tool runs. On `#2709`, 5 of 8 fake-hook-tool tests copied
+    before any hook tool runs. On `#2709`, most fake-hook-tool tests copied
     the prompt example's `CharmMeta.from_yaml('name: myapp\\n')` and then asked
-    for `db` (`spike-step-5/static-retry/RESULT.md` §16), and one passed the
-    relation ID where the name goes (`get_relation(1)`, `KeyError: 1`).
+    for `db`, and one passed the relation ID where the name goes
+    (`get_relation(1)`, `KeyError: 1`).
 
     Only when the file builds exactly one `CharmMeta`, from literals that the
     installed ops accepts (`CharmMeta.from_yaml('...')` or
@@ -3504,8 +3487,9 @@ def _undeclared_endpoints(tree: ast.Module) -> list[str]:
     reasons = _undeclared_in(tree, parents, _Names(tree, counts), list(ast.walk(tree)))
     # Then each test function on its own, with its own names and only the
     # `CharmMeta`s it can see (its own and those outside every function):
-    # two similar tests each assigning `model` and building a `CharmMeta`
-    # hid both tests' undeclared endpoints (§23, §24).
+    # counted across the whole file, two similar tests each assigning
+    # `model` and building a `CharmMeta` would hide both tests' undeclared
+    # endpoints.
     tests = _test_functions(tree)
     outside = [
         node
@@ -3610,10 +3594,9 @@ def _tool_output(tool: str, endpoint: str | None, relation_id: int | None) -> st
         example = f"{endpoint or 'db'}:{relation_id if relation_id is not None else 1}"
         return f'`relation-ids` prints the endpoint\'s relation IDs as a JSON list, like `["{example}"]`'
     if tool == "relation-list":
-        # Live, the old wording's "if it prints `[]`, ops runs
-        # `relation-list --app` next" led 3 of 7 re-asks to a separate
-        # `--app` fake that is never run, and 2 to a fake printing `[]`
-        # (`spike-step-5/static-retry/RESULT.md` §23, §24).
+        # Wording like "if it prints `[]`, ops runs `relation-list --app`
+        # next" leads re-asks to a separate `--app` fake that is never run,
+        # or to a fake printing `[]`, so this says plainly not to.
         return (
             "`relation-list` prints the remote units as a JSON list: fake it once, with a script "
             "that prints a unit list whatever its arguments are, like `echo '[\"provider/0\"]'`; that "
@@ -4130,10 +4113,9 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
     """A model access whose hook tools a fake-hook-tool test does not fake.
 
     A hook tool missing from `PATH` fails the test with `FileNotFoundError`
-    before it reaches the bug, with or without a fix: on `#2709`, the one
-    test of 8 that declared its endpoint faked `relation-get` and
-    `relation-list` and died on `relation-ids`
-    (`spike-step-5/static-retry/RESULT.md` §16). Which tools an access needs
+    before it reaches the bug, with or without a fix: on `#2709`, a test that
+    declared its endpoint faked `relation-get` and `relation-list` and died
+    on `relation-ids`. Which tools an access needs
     comes from ops 3.8.3's `ops/model.py`, and each is checked by running the
     access with every tool faked and with each one left out
     (`tests/test_hook_tool_rules.py`):
@@ -4167,7 +4149,7 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
     `get_relation('db')` and `relations['db']` also run `relation-list` once
     `relation-ids` prints any IDs, so when the test's one `relation-ids` fake
     certainly prints some (`_relation_id_count()`), that is checked too
-    (§20; by running, the same on ops 3.8.3 and `main`).
+    (checked by running, the same on ops 3.8.3 and `main`).
 
     A `relation-list` fake that certainly prints `[]` whatever its arguments
     are is rejected too, for an access that builds a relation on an endpoint
@@ -4175,7 +4157,7 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
     in the file names `JUJU_RELATION_ID` or `JUJU_REMOTE_APP`: with no units,
     ops asks the same fake for the remote app (`relation-list --app`), gets
     `[]`, and fails with `TypeError: unhashable type: 'list'` on 3.8.3 and
-    `main` (§23, §24; checked by running in `tests/test_relation_list_fakes.py`).
+    `main` (checked by running in `tests/test_relation_list_fakes.py`).
     """
     reasons = []
     found = _hook_tool_accesses(tree)
@@ -4313,7 +4295,7 @@ def _scan_tests(tree: ast.Module):
     helpers = _fake_helpers(tree)
     for function in _test_functions(tree):
         # Names as this test sees them, so a second test assigning the same
-        # names does not make both unknown (§24).
+        # names does not make both unknown.
         names = _Names(tree, counts, function)
         models = _models(names)
         backends = _backends(names)
@@ -4430,12 +4412,11 @@ def _databag_not_read(tree: ast.Module) -> list[str]:
     is expected to raise `RelationNotFoundError`, where that certainly fails
     the test whether or not the bug is there.
 
-    Live on `#2709`, two tests were posted as reproductions that fail the
-    same way with the fix (`spike-step-5/static-retry/RESULT.md` §19): each
-    ends with `relation.data[relation.app]` as a statement of its own, inside
-    `pytest.raises(RelationNotFoundError)` or a `try` with
-    `except RelationNotFoundError` and an `else` that raises. Two things
-    make that certain to fail:
+    Live on `#2709`, two tests were posted as reproductions that fail the same
+    way with the fix: each ends with `relation.data[relation.app]` as a
+    statement of its own, inside `pytest.raises(RelationNotFoundError)` or a
+    `try` with `except RelationNotFoundError` and an `else` that raises. Two
+    things make that certain to fail:
 
     - `RelationData.__getitem__()` only looks up a `RelationDataContent`,
       which loads lazily, so the statement runs no `relation-get` and raises
@@ -4515,7 +4496,7 @@ def _asserts_only_in_handlers(
     passes whether or not the bug is there: a runner job with no
     information.
 
-    Live on `#2709` (§32's 9-5): `relation.data[relation.app]` in a `try`
+    Live on `#2709`: `relation.data[relation.app]` in a `try`
     with `except ops.RelationNotFoundError: pass` and `except
     ops.ModelError: assert False`, and nothing after; it passes on 3.8.3 and
     `main`. `_misread_block()` covers the shape where the `try` fails when
@@ -4714,8 +4695,7 @@ def _only_reads(
     is `.app` or `.unit` of such an access; what the access itself calls and
     looks up is then allowed. Live on `#2709`, one
     test read `dict(model.get_relation('db', 1).data[model.get_relation('db',
-    1).app])` inside `pytest.raises(ops.RelationNotFoundError)`
-    (`spike-step-5/static-retry/RESULT.md` §30, 8-1)."""
+    1).app])` inside `pytest.raises(ops.RelationNotFoundError)`."""
     quiet: dict[int, ast.AST] = {}
 
     def accepts(node: ast.AST) -> bool:
@@ -4837,9 +4817,8 @@ def _string_databag_key(tree: ast.Module) -> list[str]:
     its `__getitem__()` is a plain dict lookup, so any string raises
     `KeyError` at the subscript, before anything is read and without running
     a hook tool (checked by running, on ops 3.8.3 and `main`, with the app's
-    name, a unit's name, this charm's own, and the endpoint's). Live on
-    `#2709`, two of §19's tests did this (`spike-step-5/static-retry/
-    RESULT.md` §19, §20), and the rules there let both through.
+    name, a unit's name, this charm's own, and the endpoint's). Live tests
+    on `#2709` have done this, and no other rule catches it.
 
     `R` is a relation the test assigned at its top (`_scan_tests()`), from
     `get_relation(name, id)`, `relations[name][i]`, or `get_relation(name)`
@@ -4973,12 +4952,10 @@ def _lookup_expected_to_raise(tree: ast.Module) -> list[str]:
     e`, then `assert isinstance(result, ...)`).
 
     Live on `#2709`, a test was posted as a reproduction that fails the same
-    way with the fix (`spike-step-5/static-retry/RESULT.md` §25, 5-7):
-    `pytest.raises(ops.RelationNotFoundError)` around `model.get_relation('db',
-    1)`, which runs `relation-ids` and `relation-list` and never
-    `relation-get`, so "DID NOT RAISE" on ops 3.8.3 and `main`. §23's 4-4
-    and §25's 5-4, repaired, are the same misreading in the `try` form, and
-    die with `UnboundLocalError` on both.
+    way with the fix: `pytest.raises(ops.RelationNotFoundError)` around
+    `model.get_relation('db', 1)`, which runs `relation-ids` and
+    `relation-list` and never `relation-get`, so "DID NOT RAISE" on ops 3.8.3 and `main`. The same
+    misreading in the `try` form dies with `UnboundLocalError` on both.
 
     A lookup is `M.get_relation(<name>)`, `M.get_relation(<name>, <int>)`,
     `M.relations[<name>]` or `M.relations[<name>][<int>]`, as a statement or
@@ -5105,7 +5082,7 @@ def _expected_raise(block: ast.With | ast.Try, function, index: int, names: _Nam
         drop = " outside the `try`"
     lookups, unread = [], []
     # With `lazy`: relations the `try` itself assigns from a lookup that
-    # raises nothing (`relation = model.get_relation('db', 1)`, §33's 9-4).
+    # raises nothing (`relation = model.get_relation('db', 1)`).
     local: set[str] = set()
     counts = _local_binding_counts(function) if lazy is not None and function is not None else None
     for position, statement in enumerate(statements):
@@ -5312,17 +5289,17 @@ def _unbound_after_try(tree: ast.Module) -> list[str]:
     """A `try` whose body certainly raises nothing and whose handlers alone
     bind a name the test reads after it: a certain `UnboundLocalError`.
 
-    §23's 4-4 and §25's 5-4, repaired, are this shape with a lookup in the
-    `try`, which `_lookup_expected_to_raise()` rejects with a reason about
-    the databag. This rule takes the rest: a `try` whose body also has an
-    unread databag lookup, `R.data[K]` as a statement, with `R` a relation
-    the test assigned at its top and `K` that relation's `.app`, or the
-    tracked model's `.app` or `.unit`, which are always keys of `R.data`.
-    `RelationDataContent` loads lazily, so the lookup runs no hook tool and
-    raises nothing (§20; by running on 3.8.3 and `main`, the read is never
-    reached and `result` is unbound on both).
+    A lookup in the `try` is this shape too, which
+    `_lookup_expected_to_raise()` rejects with a reason about the databag. This
+    rule takes the rest: a `try` whose body also has an unread databag lookup,
+    `R.data[K]` as a statement, with `R` a relation the test assigned at its
+    top and `K` that relation's `.app`, or the tracked model's `.app` or
+    `.unit`, which are always keys of `R.data`. `RelationDataContent` loads
+    lazily, so the lookup runs no hook tool and raises nothing (checked by
+    running on 3.8.3 and `main`: the read is never reached and `result` is
+    unbound on both).
 
-    Live on `#2709` (§32's 9-4), the relation was looked up inside the same
+    Live on `#2709`, the relation was looked up inside the same
     `try` and the lookup assigned to a name: `relation =
     model.get_relation('db', 1)`; `data = relation.data[relation.app]`. So
     `R` may also be a name the `try` assigns once from a lookup that
@@ -5406,8 +5383,7 @@ def _testing_relation_dicts(tree: ast.Module) -> list[str]:
 
     `relations` takes `testing.Relation` (or `PeerRelation`,
     `SubordinateRelation`) objects. Live on `#2709`, an answer passed
-    `relations={'db': {1: {...}}}` (`spike-step-5/static-retry/RESULT.md`
-    §25, 5-1): iterating a dict gives its keys, so running that `State`
+    `relations={'db': {1: {...}}}`: iterating a dict gives its keys, so running that `State`
     fails with `AttributeError: 'str' object has no attribute 'endpoint'`,
     and a dict inside the list fails `State(...)` itself with `TypeError:
     unhashable type: 'dict'`, both on 3.8.3 and `main` (checked by running).
@@ -5555,12 +5531,11 @@ def _uncaught_hook_tool_error(tree: ast.Module) -> list[str]:
     catches `ops.ModelError`.
 
     On the buggy version the test then dies on that exception rather than
-    failing an assertion, and rung 1c keeps it silent: repaired by hand from
-    §17's reasons, 4 of `#2709`'s 8 tests reached the bug and passed with the
-    fix, and none was valid. Two read the databag with nothing around it and
-    one wrapped the read in `pytest.raises(RelationNotFoundError)`, which a
-    plain `ModelError` gets out of (`spike-step-5/static-retry/RESULT.md`
-    §17, §18). So this also rejects a `pytest.raises(X)` or `except X`
+    failing an assertion, and rung 1c keeps it silent. Repaired by hand from
+    the other rules' reasons, `#2709` tests can reach the bug and pass with
+    the fix and still not be valid: some read the databag with nothing around
+    it, and one wrapped the read in `pytest.raises(RelationNotFoundError)`,
+    which a plain `ModelError` gets out of. So this also rejects a `pytest.raises(X)` or `except X`
     around the access when `X` is a strict subclass of `ops.ModelError`.
 
     What ops raises comes from the installed ops's `_wrap_hookcmd()` (ops
@@ -5757,14 +5732,14 @@ def _read_after_try(tree: ast.Module) -> list[tuple[_Access, ast.Assign]]:
     """A databag looked up inside a top-level `try` and first read after it:
     (the read, as an `_Access`, and the lookup's assignment).
 
-    Live on `#2709` (§33's 10-5, repaired to a YAML meta in §34), the test
-    looked the relation and its databag up inside a `try` whose handler
-    catches `ops.ModelError`, and compared the databag after the `try`:
-    `try: rel = model.get_relation('db', 1)` / `rel_data = rel.data[model.app]`
-    / `except ops.ModelError as e: rel_data = e`, then `assert rel_data ==
-    {}`. `RelationDataContent` loads lazily, so the lookup runs no hook tool,
-    and `relation-get` runs at the comparison, outside the `try`; on ops 3.8.3
-    its `ModelError` escapes and the test dies instead of asserting.
+    Live on `#2709`, a test (with its meta repaired to YAML) looked the
+    relation and its databag up inside a `try` whose handler catches
+    `ops.ModelError`, and compared the databag after the `try`: `try: rel =
+    model.get_relation('db', 1)` / `rel_data = rel.data[model.app]` / `except
+    ops.ModelError as e: rel_data = e`, then `assert rel_data == {}`.
+    `RelationDataContent` loads lazily, so the lookup runs no hook tool, and
+    `relation-get` runs at the comparison, outside the `try`; on ops 3.8.3 its
+    `ModelError` escapes and the test dies instead of asserting.
 
     Only this shape, nothing wider: a top-level `try` with no `else` or
     `finally`, a handler that may catch `ops.ModelError`, and a body that is
@@ -5842,16 +5817,16 @@ def _isinstance_after_try(tree: ast.Module) -> list[str]:
     isinstance(N, X)` after it with `X` an exception class: an assertion
     that certainly fails on every version.
 
-    Live on `#2709` (§35's 11-7, with its fakes' quoting fixed), the test
-    looked the relation and its databag up inside a `try` and checked the
-    name's type after it: `try: relation = model.get_relation('db', 2)` /
-    `relation_data = relation.data[relation.app]` / `except ops.ModelError
-    as e: relation_data = e`, then `assert isinstance(relation_data,
-    ops.RelationNotFoundError)`. `RelationDataContent` loads lazily, so the
-    lookup runs no hook tool and raises nothing, the handler never runs, and
-    `relation_data` is a `RelationDataContent` on 3.8.3 and `main` alike:
-    the assertion fails on both, and that looks like a reproduction. §35
-    found the shape in 4 saved answers.
+    Live on `#2709`, a test (with its fakes' quoting fixed) looked the relation
+    and its databag up inside a `try` and checked the name's type after it:
+    `try: relation = model.get_relation('db', 2)` / `relation_data =
+    relation.data[relation.app]` / `except ops.ModelError as e: relation_data =
+    e`, then `assert isinstance(relation_data, ops.RelationNotFoundError)`.
+    `RelationDataContent` loads lazily, so the lookup runs no hook tool and
+    raises nothing, the handler never runs, and `relation_data` is a
+    `RelationDataContent` on 3.8.3 and `main` alike: the assertion fails on
+    both, and that looks like a reproduction. The shape recurs across saved
+    answers.
 
     The `try` is the one `_try_lookups()` finds (its body certainly raises
     nothing; `N` is not read in it and is bound nowhere else but in the
@@ -5973,8 +5948,8 @@ def _uncaught_reason(access: _Access, code: int, stderr: str) -> str:
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _BACKEND_METHOD_TOOLS:
         # Asserting on the backend call's own result can fail with the fix too:
         # ops can catch that layer's exception and return a value a layer up.
-        # By hand, `#2709` run 1 asserting `{}` on `relation_get()` failed on
-        # 3.8.3 and on `main`, a false reproduction (§18).
+        # By hand, a `#2709` test asserting `{}` on `relation_get()` fails on
+        # 3.8.3 and on `main`, a false reproduction.
         reason += (
             f". `{ast.unparse(node.func)}()` is `_ModelBackend`, a layer below what a charm sees, "
             "and ops can catch an exception there and return a value instead, so a test of the "
@@ -6166,10 +6141,9 @@ def _backend_keywords(tree: ast.Module) -> list[str]:
 
     On `#2709`, one fake-hook-tool test called
     `backend.relation_get(relation_id=2, unit_name=..., app_name=False)` and
-    died on the `TypeError` (`spike-step-5/static-retry/RESULT.md` §16), the
-    same guess at an API as the `ops.testing` keywords `_testing_names()`
-    rejects. The signature comes from the installed ops, and the reason lists
-    what the method does take.
+    died on the `TypeError`, the same guess at an API as the `ops.testing`
+    keywords `_testing_names()` rejects. The signature comes from the installed
+    ops, and the reason lists what the method does take.
 
     Only on a name assigned once to `_ModelBackend(...)`, or
     `<model>._backend` for a name assigned once to `ops.Model(...)` over one,
@@ -6219,8 +6193,7 @@ def _hand_built_relations(tree: ast.Module) -> list[str]:
     Live on `#2709`, a test built `ops.Relation('relation', 1, model)` by
     hand, which raises `TypeError` on ops 3.8.3 and `main` alike (it also
     takes `is_peer`, `our_unit`, `backend` and `cache`), so it never got to
-    the read it asserted on (`spike-step-5/static-retry/RESULT.md` §23,
-    §24). The same guess at an API as the `ops.testing` keywords
+    the read it asserted on. The same guess at an API as the `ops.testing` keywords
     `_testing_names()` rejects, so the same bar: the call is checked against
     the installed signature wherever it is, and only when the name resolves
     to `ops.model.Relation` (not `ops.testing.Relation`, a different class)
@@ -6296,7 +6269,7 @@ def _model_framework(tree: ast.Module) -> list[str]:
     Live on `#2709`, three fake-hook-tool answers drove a charm by hand over
     `_ModelBackend`, as `MyCharm(model.framework)` and
     `model.framework.on.start.emit()`, and died on the `AttributeError` on
-    ops 3.8.3 and `main` alike (`spike-step-5/static-retry/RESULT.md` §29).
+    ops 3.8.3 and `main` alike.
 
     Only on an `ops.Model(...)` call itself, or a name assigned once to one
     (in the file, or in the test function that reads it, directly or through

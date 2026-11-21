@@ -1,7 +1,6 @@
-"""`CharmMeta.from_yaml()` given a non-string literal, from `#2709`'s live
-answers (`spike-step-5/static-retry/RESULT.md` §33): 10-5's final answer and
-10-2's first answer passed a dict, which raises `TypeError` on ops 3.8.3 and
-`main` before the test reaches the bug.
+"""`CharmMeta.from_yaml()` given a non-string literal: live answers for
+`#2709` passed a dict, which raises `TypeError` on ops 3.8.3 and `main`
+before the test reaches the bug.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ def test_relation_get_permission_denied(tmp_path, monkeypatch):
     fake_hook_tool(bin_dir, 'is-leader', 'echo true')
 '''
 
-# 10-5's tail, as the live answer wrote it.
+# The test's tail, as a live answer wrote it.
 _TAIL = '''\
     try:
         rel = model.get_relation('db', 1)
@@ -51,7 +50,7 @@ _YAML = "'name: myapp\\nrequires:\\n  db:\\n    interface: db\\n'"
 
 
 def _named(value: str) -> str:
-    """10-5's shape: the meta assigned once to a name, then passed."""
+    """The live answer's shape: the meta assigned once to a name, then passed."""
     return f"{_HEAD}    meta = {value}\n    model = ops.Model(ops.CharmMeta.from_yaml(meta), _ModelBackend('myapp/0'))\n{_TAIL}"
 
 
@@ -141,7 +140,7 @@ def test_a_yaml_string_passes_this_rule(source):
 
 @pytest.mark.parametrize("source", [_named(_YAML), _inline(_YAML)], ids=["named", "inline"])
 def test_a_yaml_string_runs_past_from_yaml(source, tmp_path, monkeypatch):
-    """Past `from_yaml` it is §33's repaired 10-5: the lookup is read after
+    """Past `from_yaml` it is the repaired live answer: the lookup is read after
     the `try`, so on 3.8.3 the `relation-get` failure escapes as a
     `ModelError`; on a version without the bug it passes. Either way, no
     `TypeError`."""

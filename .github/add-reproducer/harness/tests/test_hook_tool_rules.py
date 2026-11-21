@@ -1,7 +1,7 @@
-"""Static rules for the fake hook tool shape (`spike-step-5/static-retry/RESULT.md` §17).
+"""Static rules for the fake hook tool shape.
 
-On `#2709` the extraction took the fake hook tool shape in 8 of 8 live runs,
-and every test died before it reached the bug (§16): an endpoint the
+On `#2709` the extraction took the fake hook tool shape in 8 of 8 runs, and
+without these rules every test died before it reached the bug: an endpoint the
 `CharmMeta` never declares, `relation-ids` left unfaked, and keywords
 `_ModelBackend.relation_get()` does not take. These tests cover the three rules
 that reject those shapes, and check the hook tools each model access needs by
@@ -262,7 +262,7 @@ def test_a_denied_first_tool_needs_is_leader(access, tools, first, tmp_path, mon
     assert raised.value.filename == "is-leader"
 
     # With `is-leader` faked the access gets to the bug, and the error it
-    # raises is uncaught, which `_uncaught_hook_tool_error()` rejects (§18).
+    # raises is uncaught, which `_uncaught_hook_tool_error()` rejects.
     fakes["is-leader"] = "echo false"
     source = _shape(access, fakes)
     (reason,) = check(source).reasons
@@ -329,7 +329,7 @@ def test_an_access_that_might_not_run_or_whose_error_might_be_caught_is_left_alo
         "try:\n    x = {access}\nexcept ops.model.ModelError as e:\n    x = e",
         "with pytest.raises(ops.ModelError):\n    {access}",
         "assert {access} is not None",
-        # Certain to run, and nothing swallows the error (§20).
+        # Certain to run, and nothing swallows the error.
         "for _ in range(1):\n    {access}",
         "with open(os.devnull):\n    {access}",
     ],
@@ -407,7 +407,7 @@ def test_is_leader_needs_a_fake_ops_certainly_sees_failing():
     del fakes["is-leader"]
     access = "relation = model.get_relation('db', 2)\ndict(relation.data[relation.app])"
     # To stdout, not stderr: no `is-leader`, though the uncaught `ModelError`
-    # it raises is rejected (§18).
+    # it raises is rejected.
     assert not [r for r in check(_shape(access, fakes)).reasons if "is-leader" in r]
     fakes["relation-get"] = "echo 'ERROR permission denied' >&2"
     assert check(_shape(access, fakes)).passed  # exits 0
@@ -434,7 +434,7 @@ def test_is_leader_needs_a_helper_that_writes_the_script_as_it_is(helper):
     reasons = check(source).reasons
     if helper == "path.write_text(script)":
         # No `#!` line at all: the fakes cannot run, which a rule of its own
-        # rejects (§32); the `is-leader` rule still says nothing.
+        # rejects; the `is-leader` rule still says nothing.
         assert reasons and all("no `#!` line" in r for r in reasons), reasons
     else:
         assert not reasons, reasons

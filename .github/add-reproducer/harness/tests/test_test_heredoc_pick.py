@@ -1,14 +1,12 @@
-"""Which heredoc in `commands[]` is the test file
-(`spike-step-5/static-retry/RESULT.md` §27, §28).
+"""Which heredoc in `commands[]` is the test file.
 
-Live on `#2709` (§27, run 6-4's second answer), an extraction wrote its fake
-hook tools as `cat > bin/relation-ids << 'EOF'` heredocs before the test
-file, and `embedded_test_file()`, which took the first heredoc, handed the
-static check a shell script. The check failed closed, but the real test was
-never checked, and rungs 1a, 1c and 1d read the shell script as the
-model-written file. `embedded_test_file()` now prefers the heredoc whose path
-is a `.py` file a later command passes to pytest, and falls back to the
-first heredoc when there is none.
+A live extraction for `#2709` wrote its fake hook tools as
+`cat > bin/relation-ids << 'EOF'` heredocs before the test file. Taking the
+first heredoc would hand the static check a shell script: the check fails
+closed, but the real test is never checked, and rungs 1a, 1c and 1d read the
+shell script as the model-written file. So `embedded_test_file()` prefers
+the heredoc whose path is a `.py` file a later command passes to pytest, and
+falls back to the first heredoc when there is none.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ _RUN = "uv run pytest test_x.py -v"
 
 
 def test_fakes_before_the_test_pick_the_test():
-    """6-4's shape: the shell fakes come first."""
+    """The live answer's shape: the shell fakes come first."""
     commands = ["uv init --bare .", "mkdir -p bin", _FAKE, "chmod +x bin/relation-ids", _FAKE_2, _TEST, _RUN]
     picked = embedded_test_file(commands)
     assert picked is not None
@@ -103,8 +101,8 @@ E   NameError: name 'model' is not defined
 
 def test_rung_1a_names_the_test_behind_fakes():
     """Rung 1a matches "ERROR collecting <name>" against the model-written
-    file; with the fakes first it used to look for `relation-ids` and leave
-    the run to rung 1's stale selector."""
+    file; with the fakes first, taking the first heredoc would look for
+    `relation-ids` and leave the run to rung 1's stale selector."""
     commands = ["uv init --bare .", _FAKE, _TEST, _RUN]
     hypothesis = Hypothesis.from_dict(
         2709,

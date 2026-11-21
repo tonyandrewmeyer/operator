@@ -1,11 +1,11 @@
-"""A relation lookup expected to raise, and a name only a handler binds
-(`spike-step-5/static-retry/RESULT.md` §25, §26).
+"""A relation lookup expected to raise, and a name only a handler binds.
 
-Live on `#2709` (§25, run 5-7), a test wrapped `model.get_relation('db', 1)` in
-`pytest.raises(ops.RelationNotFoundError)`. The lookup runs `relation-ids` and
-`relation-list`, never `relation-get`, so it failed "DID NOT RAISE" on ops 3.8.3
-and `main`, and the classifier called that `reproduced_weaker`: a false comment.
-§23's 4-4 and §25's 5-4, repaired, are the `try` form of the same misreading:
+Live on `#2709` (`2709-hooktool5.json` run 7), a test wrapped
+`model.get_relation('db', 1)` in `pytest.raises(ops.RelationNotFoundError)`.
+The lookup runs `relation-ids` and `relation-list`, never `relation-get`, so it
+failed "DID NOT RAISE" on ops 3.8.3 and `main`, and the classifier called that
+`reproduced_weaker`: a false comment. Run 4 of `2709-hooktool4.json` and of
+`2709-hooktool5.json`, repaired, are the `try` form of the same misreading:
 `except ops.ModelError as e: result = e`, then `assert isinstance(result, ...)`,
 an `UnboundLocalError` on both versions. These tests check by running that the
 blocks the rule rejects fail on the installed ops whatever the bug, cover what
@@ -210,8 +210,9 @@ def test_an_undeclared_endpoint_passes():
 
 
 def test_two_fakes_of_relation_ids_are_not_certain():
-    """Fakes are still file-wide (§24): a second test faking `relation-ids`
-    makes neither certain. That is why §23's 4-4 repair still passes."""
+    """Fakes are still file-wide: a second test faking `relation-ids` makes
+    neither certain. That is why `2709-hooktool4-repaired.json` run 4 still
+    passes."""
     first = _source(_raises_block("model.get_relation('db', 2)", "ops.ModelError"))
     second = first.split("def test_access", 1)[1].replace("(tmp_path, monkeypatch):", "", 1)
     assert not _reasons(first + "\n\ndef test_again(tmp_path, monkeypatch):" + second, _NEVER_READS)
@@ -332,7 +333,7 @@ def test_an_unread_lookup_whose_handler_alone_binds_the_result_is_rejected(key):
     ],
 )
 def test_unbound_shapes_it_cannot_be_sure_of_pass(access):
-    """(§20's rule still rejects the one where nothing can fail on an
+    """(Another rule still rejects the one where nothing can fail on an
     assertion, for its own reason.)"""
     assert not _reasons(_source(access), _UNBOUND)
 
@@ -345,7 +346,7 @@ def _corpus(name: str):
         yield pytest.param(record, id=f"{record['source']}-{record['run']}")
 
 
-# §25's five test files: run -> phrases each reason contains.
+# `2709-hooktool5.json`'s five test files: run -> phrases each reason contains.
 EXPECTED = {
     1: [["`relations=` is a dict", "`AttributeError: 'str' object has no attribute 'endpoint'`"]],
     2: [["needs `relation-ids`", "which is not JSON"], ["needs `relation-list`", "which is not JSON"]],
@@ -377,8 +378,8 @@ def test_the_hand_repairs_pass_the_check(record):
 
 
 def test_5_4_with_its_relation_list_fake_is_rejected():
-    """§25's probe: 5-4 with the `relation-list` fake it lacked. It passed the
-    check before and dies with `UnboundLocalError` on 3.8.3 and `main`."""
+    """Run 4 of `2709-hooktool5.json` with the `relation-list` fake it lacked.
+    It dies with `UnboundLocalError` on 3.8.3 and `main`."""
     (record,) = [p.values[0] for p in _corpus("2709-hooktool5.json") if p.values[0]["run"] == 4]
     body = record["test_file"]["body"].replace(
         "    fake_hook_tool(bin_dir, 'is-leader', 'echo true')",
@@ -391,6 +392,6 @@ def test_5_4_with_its_relation_list_fake_is_rejected():
 
 
 def test_4_4s_repair_still_passes():
-    """Its two tests each fake every tool, so no fake is certain (§24)."""
+    """Its two tests each fake every tool, so no fake is certain."""
     (record,) = [p.values[0] for p in _corpus("2709-hooktool4-repaired.json") if p.values[0]["run"] == 4]
     assert check(record["test_file"]["body"]).passed

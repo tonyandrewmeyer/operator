@@ -1,19 +1,10 @@
-"""A second, separately-prompted `in_scope` classification pass (PLAN.md
-Approach §3 delta).
+"""A second, separately-prompted `in_scope` classification pass.
 
-`spike-step-5/inscope-retune/RESULT.md` measured a real `#2639` false-drop
-under the single `in_scope` criterion and found that three structurally
-different rewordings of that one prompt all failed `spike-step-5/corpus-v2/`'s
-precision/recall floor -- concluding the single promise-based criterion
-"may not have enough resolution to carry the bug-vs-feature-request
-distinction via prompt wording alone" and naming a rationale field or a
-second pass as the more promising levers.
-
-`spike-step-5/inscope-instrument/RESULT.md` did both, in order: a rationale
-field first (diagnostic only, not shipped -- see that file), then this
-module, designed from what the rationale data showed. Full method, the
-corpus/flagship measurements, and the numbers behind the ship decision are
-in that RESULT.md; summarised here:
+The single `in_scope` criterion false-drops real bugs (`#2639` is the
+standing example), and rewording that one prompt does not fix it without
+costing precision or recall elsewhere: a single promise-based criterion
+does not have enough resolution to carry the bug-vs-feature-request
+distinction via prompt wording alone.
 
 For every issue the first pass (`extraction.Extractor`, completely
 unmodified) drops, this module asks a second, independent call a narrower
@@ -23,24 +14,17 @@ be phrased? If yes, it re-extracts the full hypothesis (not just a flipped
 boolean) so a recovered issue still has `moving_parts`/`commands` to run.
 
 The second pass runs on every drop, not only ones whose `observed` field
-still names a symptom -- the rationale instrumentation showed the failure
-mode is exactly the first pass talking itself out of writing one down (two
-of three false drops in that run had `observed: ""`), so gating on that
-same field would be circular. The extra calls (most of a corpus, not a
-handful) are cheap at this project's established sub-cent-per-call cost.
+still names a symptom -- the failure mode is exactly the first pass talking
+itself out of writing one down (false drops often have `observed: ""`), so
+gating on that same field would be circular. The extra calls (most of a
+corpus, not a handful) are cheap at a sub-cent-per-call cost.
 
-Measured on `spike-step-5/corpus-v2/`, two independent runs: precision 100%
-/ 100% (zero false keeps in either run -- the extra calls did not cost
-precision), recall 11/12 = 91.7% / 11/12 = 91.7% (both runs land on the
-exact same fraction the corpus-v2 refinement's own first confirmation run
-reported as "92%", with the exact same sole miss, `#1088`, unchanged from
-before this module existed -- a tie with the established baseline, not a
-regression, and not a strict >=92% by raw floating-point comparison; see
-RESULT.md for the full discussion of that nuance). On the flagship `#2639`
-anecdote (n=8, not part of the labelled corpus): false-drop rate fell from
-the same-day single-pass baseline's 75% to 62.5% with this module -- a
-real, partial improvement, explicitly not a fix (`#2639` is still dropped
-more often than kept).
+On a hand-labelled corpus of issues the second pass costs no precision
+(zero false keeps) and leaves recall where the single pass had it (11/12,
+the same sole miss, `#1088`). On `#2639` itself it lowers the false-drop
+rate (from about 75% to about 62.5% over eight tries) -- a real, partial
+improvement, explicitly not a fix (`#2639` is still dropped more often
+than kept).
 """
 
 from __future__ import annotations
@@ -152,14 +136,11 @@ class SecondPassInvalid(ExtractionInvalid):
 def needs_second_pass(hyp: Hypothesis) -> bool:
     """The gate: every first-pass drop.
 
-    Originally gated on the first pass's own `observed` field being
-    non-trivially populated (reusing `spike-step-5/corpus-v2/analyse.py`'s
-    `OBSERVED_MIN_CHARS = 25` / `dropped_with_symptom` screen). Dropped
-    after `spike-step-5/inscope-instrument/RESULT.md`'s corpus-instrumented
-    run showed that gate would have missed 2 of that run's 3 real false
-    drops outright (`observed: ""` on both) -- the failure mode is exactly
-    the first pass talking itself out of writing a symptom down, so gating
-    the second pass on that same field is circular.
+    Not gated on the first pass's own `observed` field being non-trivially
+    populated: such a gate misses real false drops outright (`observed: ""`)
+    -- the failure mode is exactly the first pass talking itself out of
+    writing a symptom down, so gating the second pass on that same field is
+    circular.
     """
     return not hyp.in_scope
 

@@ -1,13 +1,13 @@
-"""A relation databag indexed with a string (`spike-step-5/static-retry/RESULT.md` §21).
+"""A relation databag indexed with a string.
 
 `RelationData` is keyed by `ops.Unit` and `ops.Application` objects, so
 `relation.data['provider']` raises `KeyError` at the subscript, on ops 3.8.3
-and on `main`. Two of §19's `#2709` tests did that (3-7 and 3b-2) and §20's
-rules let both through. These tests cover the rule, and check by running on
+and on `main`. Two live `#2709` answers did that, and the other rules let
+both through. These tests cover the rule, and check by running on
 the installed ops that a string key raises `KeyError` and that the keys the
 reason suggests do not.
 
-The hand repair of 3b-2 from the new reason is under
+The hand repair of one of them from the reason is under
 `fixtures/static_test_check/2709-hooktool3-key-repaired.json`.
 """
 
@@ -231,7 +231,7 @@ def test_a_test_that_fakes_no_hook_tools_is_left_alone():
     assert check(source).passed
 
 
-# -- §19's run 3b-2, repaired from the reason ----------------------------------------
+# -- a live answer, repaired from the reason -----------------------------------------
 
 
 def _repaired():

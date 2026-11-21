@@ -1,8 +1,8 @@
-"""`.framework` read off an `ops.Model` (`spike-step-5/static-retry/RESULT.md` §29).
+"""`.framework` read off an `ops.Model`.
 
-Live on `#2709`, three fake-hook-tool answers drove a charm by hand with
+Live fake-hook-tool answers for `#2709` drove a charm by hand with
 `MyCharm(model.framework)` or `model.framework.on.start.emit()`. `ops.Model`
-has no `framework`, so each died on the `AttributeError` on ops 3.8.3 and
+has no `framework`, so each dies on the `AttributeError` on ops 3.8.3 and
 `main` alike. These tests check by running that the read raises, and cover
 the rule.
 """

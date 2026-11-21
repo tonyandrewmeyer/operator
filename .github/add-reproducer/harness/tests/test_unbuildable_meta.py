@@ -1,11 +1,10 @@
-"""Two fake-hook-tool rules from `#2709`'s live answers
-(`spike-step-5/static-retry/RESULT.md` §30):
+"""Two fake-hook-tool rules from `#2709`'s live answers:
 
-- a `CharmMeta` built from a literal the installed ops cannot build (8-7:
-  `requires:\\n  db:\\n`, an endpoint with no mapping);
+- a `CharmMeta` built from a literal the installed ops cannot build
+  (`requires:\\n  db:\\n`, an endpoint with no mapping);
 - a databag read of a relation access written inline, inside
-  `pytest.raises(RelationNotFoundError)` (8-1), which `_databag_not_read()`
-  only caught for a named relation.
+  `pytest.raises(RelationNotFoundError)`, which `_databag_not_read()`
+  catches as it does for a named relation.
 """
 
 from __future__ import annotations
@@ -89,7 +88,7 @@ def test_an_endpoint_with_no_mapping_is_rejected():
 
 
 def test_inline_in_the_model_call_is_rejected():
-    """8-7's own shape: the meta built inside the `ops.Model(...)` call."""
+    """The live answer's own shape: the meta built inside the `ops.Model(...)` call."""
     source = _HEAD + (
         f"    model = ops.Model(ops.CharmMeta.from_yaml({_BAD_YAML}), _ModelBackend('myapp/0'))\n" + _READ
     )

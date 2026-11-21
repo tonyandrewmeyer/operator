@@ -1,20 +1,21 @@
 """Unread databags, `RelationNotFoundError` around a read, `get_relation(name)`,
-and accesses inside other statements (`spike-step-5/static-retry/RESULT.md` §20).
+and accesses inside other statements.
 
-Live, §18's prompt gave 7 `#2709` tests, and 2 would have been posted as
-reproductions that fail the same way with the fix (§19). Both end with
+Asked for a catch-and-assert test, the extraction gave 7 `#2709` tests, and 2
+would have been posted as reproductions that fail the same way with the fix.
+Both end with
 `relation.data[relation.app]` as a statement of its own, inside
 `pytest.raises(RelationNotFoundError)` or a `try` expecting it: the databag
 loads lazily, so nothing runs, and a read could not raise
 `RelationNotFoundError` anyway, because `RelationDataContent._load()` turns it
-into `{}`. Two more passed the check because its walk did not follow
+into `{}`. Two more would pass a check whose walk did not follow
 `get_relation(name)` without an ID, or an access under a second `except`.
 These tests cover the rules for those, and check what each shape does by
 running it on the installed ops.
 
-The calibration corpus is the 5 §19 tests, under
+The calibration corpus is 5 of those tests, under
 `fixtures/static_test_check/2709-hooktool3.json`, and their hand repairs from
-the new reasons, under `2709-hooktool3-repaired.json`.
+these rules' reasons, under `2709-hooktool3-repaired.json`.
 """
 
 from __future__ import annotations
@@ -52,20 +53,20 @@ def _ops():
 
 # (source, run) -> phrases each expected reason contains, one list per reason.
 EXPECTED = {
-    # §19's two false comments: a lookup that is never read, expected to
+    # The two false comments: a lookup that is never read, expected to
     # raise `RelationNotFoundError`.
     ("retry-hooktool3-2709.json", 0): [[_LOOKED_UP, "the `except ops.RelationNotFoundError` after it never runs"]],
     ("retry-hooktool3-2709.json", 6): [[_LOOKED_UP, 'fails with "DID NOT RAISE"']],
     # A fake's quoting breaks the file.
     ("retry-hooktool3-2709.json", 7): [["does not parse"]],
-    # `get_relation('db')`, followed now to `relation-list`, whose fake
+    # `get_relation('db')`, followed to `relation-list`, whose fake
     # prints `provider`; and the lookup inside `pytest.raises`.
     ("retry-hooktool3b-2709.json", 1): [
         ["`model.get_relation('db')` needs `relation-list`", _NOT_JSON],
         [_LOOKED_UP, 'fails with "DID NOT RAISE"'],
     ],
     # Under a second handler that fails the test; and a string databag key
-    # (§21, `test_string_databag_key.py`).
+    # (`test_string_databag_key.py`).
     ("retry-hooktool3b-2709.json", 2): [
         [_UNDECLARED],
         [_NOT_FAKED + " `relation-ids` and `relation-list`"],
@@ -113,8 +114,8 @@ REPAIRED = {
     ("retry-hooktool3-2709.json", 6): AssertionError,
     ("retry-hooktool3b-2709.json", 1): AssertionError,
     # Indexes the databag with the string `'provider'`, which no rule here
-    # catches (§21's does): `KeyError`, turned into `pytest.fail` by its
-    # second handler.
+    # catches (`test_string_databag_key.py`'s does): `KeyError`, turned into
+    # `pytest.fail` by its second handler.
     ("retry-hooktool3b-2709.json", 2): pytest.fail.Exception,
 }
 
@@ -123,7 +124,7 @@ REPAIRED = {
 def test_the_hand_repairs_pass_the_check(record):
     result = check(record["test_file"]["body"])
     if (record["source"], record["run"]) == ("retry-hooktool3b-2709.json", 2):
-        # Since §21, its string key is rejected too.
+        # Its string key is rejected too, by the string-key rule.
         (reason,) = result.reasons
         assert "indexes the databag with the string `'provider'`" in reason
         return
@@ -134,7 +135,8 @@ def test_the_hand_repairs_pass_the_check(record):
 @pytest.mark.parametrize("record", list(_corpus("2709-hooktool3-repaired.json")))
 def test_the_hand_repairs_ran_as_recorded(record, tmp_path, monkeypatch):
     """On ops 3.8.3, three fail on `assert ModelError('ERROR permission
-    denied\\n') == {}`, the bug, and run 3b-2 still dies on its string key."""
+    denied\\n') == {}`, the bug, and `retry-hooktool3b-2709.json` run 2
+    still dies on its string key."""
     namespace: dict = {}
     exec(compile(record["test_file"]["body"], record["test_file"]["path"], "exec"), namespace)
     (test,) = [v for k, v in namespace.items() if k.startswith("test")]
@@ -326,9 +328,9 @@ def test_a_read_or_a_lookup_it_cannot_be_sure_of_passes(access):
 
 def test_a_relation_access_whose_fakes_succeed_counts_as_a_relation(tmp_path, monkeypatch):
     """`model.get_relation('db').data[model.get_relation('db').app]`, as in
-    §19's run 3b-1: with `relation-ids` printing one ID and `relation-list`
-    unit names, the two calls run them once (the second is cached) and
-    nothing else."""
+    `retry-hooktool3b-2709.json` run 1: with `relation-ids` printing one ID
+    and `relation-list` unit names, the two calls run them once (the second is
+    cached) and nothing else."""
     access = "with pytest.raises(ops.RelationNotFoundError):\n    model.get_relation('db').data[model.get_relation('db').app]"
     fakes = dict(_TOOLS, **{"relation-ids": """echo '["db:1"]'""", "relation-get": _DENIED})
     source = "import pytest\n" + _shape(access, fakes)
@@ -428,7 +430,7 @@ def test_with_a_failing_relation_get_the_read_reason_says_to_catch_it():
         "`try: result = dict(relation.data[relation.app])` / `except ops.ModelError as e: result = e` / "
         "`assert result == {}`"
     )
-    if _ON:  # and §18's rule says the same `ModelError` gets out
+    if _ON:  # and the uncaught-error rule says the same `ModelError` gets out
         assert any("does not catch a plain `ModelError`" in r for r in reasons)
 
 
@@ -516,9 +518,8 @@ def test_an_access_by_name_is_not_followed_when_the_ids_are_not_certain(ids):
     ],
 )
 def test_the_section_19_probe_is_rejected(access):
-    """§19: with `relation-list` faked to print `provider`, `get_relation('db',
-    1)` was rejected and `get_relation('db')` passed, bare or inside
-    `pytest.raises`."""
+    """With `relation-list` faked to print `provider`, `get_relation('db')` is
+    rejected like `get_relation('db', 1)`, bare or inside `pytest.raises`."""
     fakes = {"relation-ids": """echo '["db:1"]'""", "relation-list": "echo provider"}
     source = "import pytest\n" + _shape(access, fakes)
     assert any("`model.get_relation('db')` needs `relation-list`" in r and _NOT_JSON in r for r in check(source).reasons)
@@ -600,7 +601,8 @@ def _wrapped(wrap: str, access: str, fakes: dict, meta: str | None = None) -> st
 
 @pytest.mark.parametrize("wrap", _ALSO_CERTAIN)
 def test_an_undeclared_endpoint_inside_a_statement_that_certainly_runs_is_rejected(wrap, tmp_path, monkeypatch):
-    """§19's run 3b-2: `get_relation('dbc', 1)` with no relations declared."""
+    """As in `retry-hooktool3b-2709.json` run 2: `get_relation('dbc', 1)` with
+    no relations declared."""
     source = _wrapped(wrap, _DBC, dict(_OUTPUT), meta="name: myapp\n")
     assert any("reads the `dbc` endpoint" in r for r in check(source).reasons), check(source).reasons
     with pytest.raises((KeyError, AssertionError, pytest.fail.Exception)):
@@ -641,7 +643,8 @@ def test_an_uncaught_error_inside_a_statement_that_certainly_runs_is_rejected(wr
 @pytest.mark.parametrize("wrap", _ALSO_CERTAIN[:4])
 def test_a_handler_that_catches_model_error_still_passes_the_uncaught_rule(wrap):
     """`except Exception` catches `ModelError`: the test fails in the handler,
-    not on an uncaught exception, so §18's rule has nothing to say."""
+    not on an uncaught exception, so the uncaught-error rule has nothing to
+    say."""
     fakes = dict(_OUTPUT, **{"relation-get": _DENIED})
     source = _wrapped(wrap, "dict(relation.data[relation.app])", fakes).replace(
         "    model = ops.Model(meta, backend)\n", "    model = ops.Model(meta, backend)\n" + "    " + _RELATION

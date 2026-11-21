@@ -1,20 +1,16 @@
 """The extraction record: what a run that reached extraction actually did.
 
-The gap this closes is measured, not hypothetical. On 2026-09-23 four live
-GitHub Actions dispatches stopped at `stage=extraction ... reason=in_scope=
-false (second opinion)` on `#2639` and `#2484`; on 2026-09-24 a local run of
-the same tip, the same model and the same `run.fetch_issue()` put both in
-scope 24 of 24, and a re-dispatch of `#2639` came back in scope. Nothing
-either side recorded could say what differed
-(`spike-step-5/comments-check/RESULT.md` §4), because the job log printed one
-`stage=` line, the run wrote no artefact at that stop
-(`spike-step-5/seventh-dispatch/RESULT.md` §4.2), and the seam kept only the
+The gap this closes is real, not hypothetical: GitHub Actions runs can stop
+at `stage=extraction ... reason=in_scope=false` on issues (`#2639`, `#2484`)
+that a local run of the same code, the same model and the same
+`run.fetch_issue()` puts in scope every time. Without this record nothing
+either side records can say what differed: the job log prints one `stage=`
+line, the run writes no artefact at that stop, and the seam keeps only the
 *last* call's raw content and usage -- never the `provider` OpenRouter
 returns, which is the field a routing question turns on.
 
-Two further things the old reason string got wrong, both fixed here:
-`(second opinion)` was printed for any first-pass drop whether or not the
-second pass ran, and the same stop reported no substrate.
+The reason string also has to say whether the second pass actually ran,
+and the same stop has to report the substrate.
 
 No network: `urlopen` is monkeypatched, and everything else runs on
 `FixtureLLM`.
@@ -126,7 +122,7 @@ def test_a_payload_without_a_provider_still_records_the_call(monkeypatch):
 
 
 def test_the_existing_last_raw_content_and_last_usage_still_work(monkeypatch):
-    """These are what the calibration rounds read; the per-call list is an
+    """These are what calibration scripts read; the per-call list is an
     addition, not a replacement."""
     monkeypatch.setattr(
         llm_module.urllib.request,
@@ -181,7 +177,7 @@ def _pipeline(tmp_path, llm=None):
 
 def test_an_in_scope_drop_records_the_second_pass_that_ran(tmp_path):
     """`#2304`: first pass drops, second pass runs and agrees. Both facts are
-    now in the record, and the `stage=` reason says which of them happened."""
+    in the record, and the `stage=` reason says which of them happened."""
     result = _pipeline(tmp_path).run_for_issue(_load_issue(2304))
 
     assert result.stage_reached == "extraction"
@@ -197,11 +193,10 @@ def test_an_in_scope_drop_records_the_second_pass_that_ran(tmp_path):
 
 
 def test_an_in_scope_drop_with_no_second_pass_says_so(tmp_path):
-    """The distinction the old string could not make. An extractor that never
+    """The distinction the reason has to make. An extractor that never
     ran a second pass -- a plain `Extractor`, or a `TwoPassExtractor` whose
-    gate changed -- must not have a "second opinion" attributed to it.
-    `seventh-dispatch` §4.1 read four such lines as evidence of four second
-    passes that recovered nothing; nothing in the log supported that."""
+    gate changed -- must not have a "second opinion" attributed to it, or the
+    log reads as a second pass that recovered nothing when none ran."""
 
     class FirstPassOnly:
         def extract(self, issue):
@@ -283,9 +278,9 @@ def test_one_issues_record_does_not_leak_into_the_next(tmp_path):
 
 
 def test_the_substrate_is_recorded_on_a_gate_stop(tmp_path):
-    """`seventh-dispatch` §4.2: substrate was unobservable on the commonest
-    non-filter stop, which made substrate stability unmeasurable live. It is
-    in the record now, whatever the first pass put there."""
+    """Without it, substrate is unobservable on the commonest non-filter stop,
+    which makes substrate stability unmeasurable live. It is in the record,
+    whatever the first pass put there."""
     result = _pipeline(tmp_path).run_for_issue(_load_issue(2304))
 
     assert "substrate" in result.extraction_record["first_pass"]

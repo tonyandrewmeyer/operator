@@ -1,10 +1,8 @@
 """`snap install concierge` happens only when a branch is about to use it.
 
-Measured cost of the unconditional workflow step it replaces: 14-21s on every
-one of thirty dispatches, on well under a tenth of which anything reached a
-concierge command, plus one outright job failure on a snap store 408 before
-any harness code ran (`spike-step-5/seventh-dispatch/RESULT.md` §2.2, §5, and
-`sixth-dispatch`'s 212 unused seconds before it).
+An unconditional workflow step costs 14-21s on every dispatch, though few
+dispatches ever reach a concierge command, and a snap store error (such as a
+408) there fails the whole job before any harness code runs.
 
 Concierge is used by exactly one thing -- `sudo concierge prepare`, the first
 command of `_scratch_sequence()` -- so the install goes immediately in front
@@ -179,9 +177,9 @@ def test_a_failed_install_aborts_the_run_and_skips_everything_after_it(monkeypat
 
 
 def test_a_failed_install_is_classified_as_infrastructure_and_composes_nothing():
-    """The store 408 that killed a dispatch on 2026-09-23 failed a workflow
-    step, so the job was red with no `stage=` line and no artefact. Inside the
-    sequence it is an outcome instead -- and one that never composes."""
+    """A store 408 in a workflow step fails the step, so the job is red with
+    no `stage=` line and no artefact. Inside the sequence it is an outcome
+    instead -- and one that never composes."""
     run_result = RunResult(
         hypothesis_number=9999,
         branch="k8s-scratch",
@@ -210,7 +208,7 @@ def test_a_failed_install_is_classified_as_infrastructure_and_composes_nothing()
     assert "install-concierge" in reason
 
 
-# -- and the workflow no longer does it unconditionally -----------------------
+# -- and the workflow does not do it unconditionally --------------------------
 
 
 @pytest.mark.skipif(not WORKFLOW.exists(), reason="no workflow alongside this checkout")

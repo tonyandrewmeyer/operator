@@ -1,10 +1,10 @@
-"""Scratch-charm scaffolding (PLAN.md Approach §4's k8s-scratch branch).
+"""Scratch-charm scaffolding for the k8s-scratch runner branch.
 
 Thin wrapper around `scratch-charm/charm/render.py`, invoked exactly as its
 own docstring documents (`render.py params/<name>.yaml out/<name>/`) --
 deliberately *not* reimplemented here. render.py carries three real
-charmcraft/juju bugfixes (Steps §3, landed 2026-07-22: `platforms:` shape,
-missing `uv.lock`, charm-name shape); invoking the file directly rather
+charmcraft/juju bugfixes (`platforms:` shape, missing `uv.lock`,
+charm-name shape); invoking the file directly rather
 than duplicating its logic means this harness can't silently drift out of
 sync with those fixes.
 """
@@ -34,10 +34,9 @@ def expected_signal_for(surface: SurfaceInference) -> str | None:
 
     Read from `render.py`'s own `SURFACE_SIGNALS` table rather than asked
     of an LLM: the string is decided by the template, so a guess can only
-    match by luck. The first successful k8s stimulus (2026-08-18) was
-    scored against an invented "Received Pebble custom notice" while the
-    charm emitted "observed notice: ..." -- the signal could not have been
-    found however the bug behaved, and the run was recorded as
+    match by luck. An invented "Received Pebble custom notice" would never
+    match a charm that emits "observed notice: ..." -- the signal could not
+    be found however the bug behaved, and the run would be recorded as
     `did_not_reproduce`.
     """
     signals = _render_module().SURFACE_SIGNALS

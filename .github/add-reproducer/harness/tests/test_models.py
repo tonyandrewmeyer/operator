@@ -1,9 +1,8 @@
 """`Issue.from_dict` against the shapes `gh` actually emits.
 
 The whole fixture corpus in `fixtures/issues/` hand-writes `labels` as
-bare strings. Real `gh issue list --json labels` emits label *objects*.
-Nothing in the suite noticed until the first live run against
-`canonical/operator#2639` died in `filter_stage.classify_issue` on
+bare strings. Real `gh issue list --json labels` emits label *objects*,
+which would otherwise fail in `filter_stage.classify_issue` on
 `label.lower()` -- stage 2 of 8, before any LLM call. These tests pin
 both shapes so the corpus's convenience shape can't drift back into
 being the only one that works.
@@ -88,32 +87,30 @@ def _run_result_dict(**overrides):
 
 
 def test_run_result_records_the_observed_juju_version():
-    """`spike-step-5/wallclock-substrate/RESULT.md` §5: nothing recorded
-    which juju actually produced a run's verdict, which is how `#2639`
-    reproducing on 4.0.5 and not on 3.6.27 went unnoticed."""
+    """Which juju actually produced a run's verdict is recorded: `#2639`
+    reproduces on 4.0.5 and not on 3.6.27."""
     run = RunResult.from_dict(_run_result_dict(observed_juju_version="3.6.27-ubuntu-amd64"))
     assert run.observed_juju_version == "3.6.27-ubuntu-amd64"
 
 
 def test_run_result_observed_juju_version_is_optional():
-    """Every fixture recorded before this field existed has no
-    `observed_juju_version` key at all -- it must still load, as `None`,
-    not raise a KeyError."""
+    """Older fixtures have no `observed_juju_version` key at all -- they
+    must still load, as `None`, not raise a KeyError."""
     run = RunResult.from_dict(_run_result_dict())
     assert run.observed_juju_version is None
 
 
 def test_run_result_records_the_packed_ops_version():
-    """`spike-step-5/first-dispatch/RESULT.md` §6.1: the scratch charm is
-    packed against released `ops` from PyPI, never the checked-out tree, and
-    which `ops` that was survived only as a line of charmcraft's stderr."""
+    """The scratch charm is packed against released `ops` from PyPI, never
+    the checked-out tree, and which `ops` that was is otherwise only a line
+    of charmcraft's stderr."""
     run = RunResult.from_dict(_run_result_dict(observed_ops_version="3.8.2"))
     assert run.observed_ops_version == "3.8.2"
 
 
 def test_run_result_observed_ops_version_is_optional():
-    """Same as `observed_juju_version` above: every fixture recorded before
-    this field existed has no `observed_ops_version` key, and must still
+    """Same as `observed_juju_version` above: older fixtures have no
+    `observed_ops_version` key, and must still
     load as `None` rather than raising."""
     run = RunResult.from_dict(_run_result_dict())
     assert run.observed_ops_version is None

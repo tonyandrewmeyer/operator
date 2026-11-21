@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Entry point: fetch issues -> in-scope filter -> hypothesis extraction ->
 scratch-charm render -> reproduction run -> outcome classification ->
-comment composition (PLAN.md Approach §1-7).
+comment composition.
 
 Fixture mode (default, what the test suite runs): no OPENROUTER_API_KEY, no
 juju/concierge/charmcraft needed -- the LLM and runner seams replay
@@ -9,7 +9,7 @@ recorded fixtures under `fixtures/`.
 
 Live mode (`--live`): point at a real `gh issue list --json ...` dump, set
 OPENROUTER_API_KEY, and run on a host with concierge/juju/charmcraft
-installed (the multipass VM per PLAN.md Steps §5). See harness/README.md.
+installed. See harness/README.md.
 """
 
 from __future__ import annotations
@@ -48,18 +48,16 @@ class PipelineResult:
     outcome: Outcome | None
     reason: str | None
     comment: str | None
-    # The captured `RunResult` used to be dropped on the floor here, so a
-    # live run's real exit codes and stderr -- the only evidence that says
-    # whether a verdict came from the bug or from a broken deploy -- were
-    # unrecoverable once `run_for_issue` returned. `--dump-run` writes this
-    # to `<out-dir>/<issue>-run.json`.
+    # The captured `RunResult`: a live run's real exit codes and stderr are
+    # the only evidence that says whether a verdict came from the bug or from
+    # a broken deploy. `--dump-run` writes this to `<out-dir>/<issue>-run.json`.
     run_result: RunResult | None = None
     branch: str | None = None
     hypothesis: object | None = None
     surface: SurfaceInference | None = None
     # What extraction did, on every run that got as far as extraction --
-    # including the ones that stop at the in-scope gate, which is where the
-    # dispatches that most needed explaining stopped. `None` means the run
+    # including the ones that stop at the in-scope gate, which are the runs
+    # that most need explaining. `None` means the run
     # never reached extraction (a filter drop). See `extraction_record.py`.
     extraction_record: dict | None = None
     # Set when `override_substrate()` ran the answer as `substrate: none`
@@ -77,8 +75,8 @@ def override_substrate(hypothesis):
     `substrate: none`: it fakes the hook tools on `PATH` and needs no Juju.
     On `#2709` 13 of 14 live answers wrote that test and none said `none`
     (12 `lxd`, 2 `k8s`), so every one stopped at the stimulus gate without
-    running it, and a prompt rule asking for `none` moved nothing
-    (`spike-step-5/static-retry/RESULT.md` §29, §30). So the test decides:
+    running it, and a prompt rule asking for `none` moved nothing. So the
+    test decides:
     such an answer is `none` for everything downstream (`needs_juju`, the
     confidence gate, the static check gate, running `commands[]`, the
     classifier and the composer), whatever its `substrate` field says.
@@ -110,8 +108,7 @@ def _scratch_root(work_dir: Path) -> Path:
     """`work_dir`, unless it sits inside a Python project -- in which case a
     fresh directory that does not.
 
-    `spike-step-5/second-dispatch/RESULT.md` §6.4, measured in
-    `fourth-dispatch/RESULT.md` §2. The `none` branch's first command is the
+    The `none` branch's first command is the
     extraction's own `uv init --bare .`, run with `cwd` set to the issue's
     scratch directory. uv walks *up* from that directory looking for a
     workspace root, and the shipped layout gives it one: the workflow passes
@@ -140,8 +137,7 @@ def _scratch_root(work_dir: Path) -> Path:
 
     Deliberately scoped to the scratch directory and not to `charm_dir`, which
     stays under `work_dir`: no `uv init` ever runs there, and `charm_dir` is
-    embedded verbatim into the juju commands the scratch branches build, a
-    path this project has no way to re-measure from here."""
+    embedded verbatim into the juju commands the scratch branches build."""
     if _enclosing_python_project(work_dir) is None:
         return work_dir
     relocated = Path(tempfile.mkdtemp(prefix="add-reproducer-scratch-")).resolve()
@@ -167,10 +163,6 @@ class Pipeline:
         # produces a `charm_dir` that resolves against the wrong directory
         # at execution time; juju 4 additionally refuses a local-charm path
         # that isn't absolute or `./`-prefixed outright ("... is ambiguous").
-        # Both VM sessions that measured this harness happened to pass an
-        # absolute `--out-dir`, so this went unnoticed until a GHA run
-        # passed a relative one (spike-step-5/gha-wallclock-2026-09-07/
-        # RESULT.md §3).
         self.work_dir = (Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="add-reproducer-"))).resolve()
         self.work_dir.mkdir(parents=True, exist_ok=True)
         # Where per-issue scratch directories go: usually `work_dir` itself,
@@ -179,9 +171,8 @@ class Pipeline:
         # pipeline that never reaches the `none` branch creates no directory.
         # See `_scratch_root()`.
         self._scratch_root: Path | None = None
-        # PLAN.md Approach §3 delta, `spike-step-5/inscope-instrument/
-        # RESULT.md`: a second, narrower-question pass on every first-pass
-        # drop, measured to hold the corpus-v2 precision/recall floor.
+        # A second, narrower-question pass on every first-pass drop, which
+        # recovers in-scope reports the first pass was too blunt for.
         self.extractor = TwoPassExtractor(llm)
         self.surface_inferrer = SurfaceInferrer(llm)
         self.composer = Composer(llm)
@@ -209,10 +200,9 @@ class Pipeline:
         run_id: str | None = None,
         timestamp: str | None = None,
     ) -> PipelineResult:
-        """`calibration_mode` bypasses Approach §3's confidence gate --
-        this is exactly what spike-step-4 did by hand (walked all four
-        `in_scope: true` extractions regardless of confidence, to
-        calibrate the runner/classifier). Production runs leave it False."""
+        """`calibration_mode` bypasses the confidence gate, so every
+        `in_scope: true` extraction is run regardless of confidence, to
+        calibrate the runner/classifier. Production runs leave it False."""
         # Cleared per issue: a batch run reuses one `Pipeline`, and a filter
         # drop must not inherit the previous issue's extraction record.
         self._extraction_record = None
@@ -256,7 +246,7 @@ class Pipeline:
         )
 
         if not hypothesis.in_scope and not ignore_in_scope:
-            # The reason now names what the second pass did, instead of
+            # The reason names what the second pass did, instead of
             # asserting a "second opinion" the log could not support -- see
             # `extraction_record.in_scope_drop_reason()`.
             return PipelineResult(
@@ -275,15 +265,12 @@ class Pipeline:
         # execute commands[] (`runner_stage.COMMAND_EXECUTING_BRANCHES`), and
         # not connected to anything on `runner_stage.SCRATCH_BRANCHES`, which
         # build their reproduction sequence from `surface`, never from
-        # `commands[]`. Gating scratch-branch hypotheses on it silenced
+        # `commands[]`. Gating scratch-branch hypotheses on it would silence
         # `#2639` -- the project's one end-to-end-confirmed reproduction --
-        # in 2 of 3 corpus-v4 runs, for a reason unconnected to whether the
+        # most of the time, for a reason unconnected to whether the
         # reproduction would work. Every in-scope, confidence=low, k8s/lxd
-        # hypothesis recorded anywhere in this project's history that routes
-        # to a scratch branch is a real bug (spike-step-5/
-        # confidence-gate-2639/RESULT.md); the confidence-gated false-keep
-        # rate this exemption is measured against is 0/0, not merely 0-of-
-        # something-untried.
+        # hypothesis recorded so far that routes to a scratch branch is a
+        # real bug, so the exemption has no known false keep.
         # Before anything reads `substrate`. See `override_substrate()`.
         hypothesis, self._substrate_override = override_substrate(hypothesis)
         if self._extraction_record is not None:
@@ -312,12 +299,12 @@ class Pipeline:
 
         # A model-written pytest file that fails the static check is not run.
         # The extractor re-asks once and keeps the second answer whatever its
-        # check says, and until this gate that answer went to the runner. If
-        # it then failed on an exception, rung 1c kept it silent; if it failed
-        # on an assertion it composed "The bug reproduced": two of 11 live
-        # re-asks compared the handler's cwd with `ctx.charm_root` (`None`,
-        # unset), which fails with or without the fix
-        # (`spike-step-5/static-retry/RESULT.md` §12, §13). The check rejects
+        # check says, and without this gate that answer would go to the
+        # runner. If it then failed on an exception, rung 1c would keep it
+        # silent; if it failed on an assertion it would compose "The bug
+        # reproduced": a re-ask can compare the handler's cwd with
+        # `ctx.charm_root` (`None`, unset), which fails with or without the
+        # fix. The check rejects
         # no valid test in its calibration, so skipping the run loses nothing
         # and saves a runner job. Only where `commands[]` is what runs, and
         # only when pytest runs the file: the check's rules are about pytest
@@ -342,13 +329,13 @@ class Pipeline:
                     hypothesis=hypothesis,
                 )
 
-        # Per-issue scratch dir. Every issue used to share one workdir, so a
-        # 40-issue batch ran `uv init` in an already-initialised project for
-        # all but the first (exit 2, "Project is already initialized"), which
-        # the classifier scored as `partial` -- a comment claiming partial
-        # reproduction off a setup collision, for issues whose test then
-        # passed. It also put every synthesised test file in one pytest
-        # rootdir, so unrelated issues' tests shared a collection.
+        # Per-issue scratch dir. With one shared workdir, a batch would run
+        # `uv init` in an already-initialised project for all but the first
+        # issue (exit 2, "Project is already initialized"), which the
+        # classifier scores as `partial` -- a comment claiming partial
+        # reproduction off a setup collision. It would also put every
+        # synthesised test file in one pytest rootdir, so unrelated issues'
+        # tests shared a collection.
         # `scratch_root`, not `work_dir`: the commands that run in here are
         # `uv init`/`uv add`, and uv walks up out of any directory that sits
         # inside a Python project. See `_scratch_root()`.
@@ -359,8 +346,8 @@ class Pipeline:
             # gets a private workspace root one level up from where it runs.
             # Scoped rather than applied to every branch on purpose: a
             # `k8s-clone` run clones a repository into this directory, and
-            # giving that checkout an enclosing workspace root is a change
-            # this project has no live run to check.
+            # giving that checkout an enclosing workspace root would change
+            # what its own tests run against.
             scratch_environment = runner_stage.scratch_environment(issue_dir)
             issue_dir = runner_stage.prepare_scratch_project(issue_dir)
         else:
@@ -374,7 +361,7 @@ class Pipeline:
             # `seams/runner.py:scratch_command_env()`.
             context["uv_project_environment"] = str(scratch_environment)
 
-        # Skip-when-stale gate first (Approach §4): cheapest possible
+        # Skip-when-stale gate first: cheapest possible
         # drop, before spending any time on surface inference or a
         # scratch-charm render for a hypothesis that's going nowhere.
         stale, stale_reason = runner_stage.is_stale(hypothesis, issue, self.runner, context)
@@ -383,16 +370,12 @@ class Pipeline:
 
         surface: SurfaceInference | None = None
         if branch == "none":
-            # Approach §3/§4 delta (spike-step-5/2045/RESULT.md §1): a
-            # `substrate: none` hypothesis with no runnable pytest
+            # A `substrate: none` hypothesis with no runnable pytest
             # invocation gets a synthesised test file instead of staying
             # un-runnable.
             hypothesis = runner_stage.write_synthesized_test_file_if_needed(hypothesis, issue, self.llm, context)
         # Both scratch-charm branches need a rendered charm before the
-        # runner seam can pack/deploy it. `lxd-scratch` joined `k8s-scratch`
-        # here when `seams/runner.py` grew `_run_lxd_scratch` -- before that,
-        # a `substrate: lxd` hypothesis never reached this far (the runner
-        # seam raised `ValueError: unknown branch` first). Surface inference
+        # runner seam can pack/deploy it. Surface inference
         # and `scaffold.render_charm()` are substrate-agnostic (render.py
         # picks a machine- vs k8s-shaped charm from whether
         # `pebble_service.container` is set), so nothing else here changes.
@@ -403,9 +386,8 @@ class Pipeline:
                 return PipelineResult(issue.number, "surface_inference", None, f"invalid surface inference: {exc}", None)
             # `expected_signal` is decided by the charm template, not by the
             # model: `scaffold.expected_signal_for()` reads render.py's own
-            # table. A guessed string can only match by luck, and the first
-            # successful k8s stimulus (2026-08-18) was scored against an
-            # invented one while the charm emitted something else entirely.
+            # table. A guessed string can only match by luck: an invented one
+            # is scored against a charm that emits something else entirely.
             # Applied before the gates below so they see the real value.
             surface = dataclasses.replace(surface, expected_signal=expected_signal_for(surface))
             # Before rendering or packing anything: a scratch branch with no
@@ -432,8 +414,7 @@ class Pipeline:
                 return PipelineResult(issue.number, "scaffold", None, f"render failed: {exc}", None)
             context["charm_dir"] = str(charm_dir)
 
-        # Approach §4 pre-run gate (spike-step-5/live-llm/RESULT.md Finding
-        # 2): commands[] that aren't shell exit 127 on contact with one, and
+        # Pre-run gate: commands[] that aren't shell exit 127 on contact with one, and
         # the classifier reads that as evidence of a reproduction. Checked
         # after synthesis, which can repair the sequence.
         runnable, unrunnable_reason = runner_stage.check_runnable(hypothesis, branch)
@@ -505,7 +486,7 @@ def main() -> int:
         "--calibration-mode",
         action="store_true",
         help=(
-            "bypass Approach §3's confidence gate, as spike-step-4 did by hand. "
+            "bypass the extraction's confidence gate. "
             "Needed to exercise the runner against a `confidence: low` extraction "
             "(#2639's own is one); never correct for a production run, since the "
             "gate is what keeps low-confidence hypotheses from composing a comment."

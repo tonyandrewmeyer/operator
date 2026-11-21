@@ -1,5 +1,4 @@
-"""The split-heredoc `commands[]` shape (`spike-step-5/criterion-1-live/
-RESULT.md` §5.1, `spike-step-5/gate-accounting/RESULT.md`).
+"""The split-heredoc `commands[]` shape.
 
 A live extraction sometimes opens a heredoc (`cat > file.py << 'PYEOF'`) and
 puts every line of the body -- and the closing terminator -- in its own
@@ -13,9 +12,8 @@ split body. `Hypothesis.from_dict`'s `_join_split_heredocs()` re-joins the
 opener through its terminator into one element at construction time, so
 every consumer downstream reads the same thing.
 
-`#1685` and `#1552` are the real, recorded live extractions this shape was
-found on -- `spike-step-5/corpus-v4/out/twopass-run5/1685.json` and
-`out/twopass-run6/1552.json`, not invented examples.
+`#1685` and `#1552` are real, recorded live extractions with this shape
+(read from the recorded corpus run output), not invented examples.
 """
 
 import json
@@ -28,7 +26,7 @@ from runner_stage import needs_test_file
 
 CORPUS_V4_OUT = Path(__file__).resolve().parent.parent.parent / "spike-step-5" / "corpus-v4" / "out"
 
-if not CORPUS_V4_OUT.is_dir():  # pragma: no cover - spike output not always present
+if not CORPUS_V4_OUT.is_dir():  # pragma: no cover - recorded run not always present
     pytest.skip(
         f"corpus-v4 run output not available at {CORPUS_V4_OUT}",
         allow_module_level=True,

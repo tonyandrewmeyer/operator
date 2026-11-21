@@ -1,7 +1,7 @@
-"""Pins the no-ship decision from `spike-step-5/model-comparison/RESULT.md`:
-three candidate OpenRouter models were measured against the incumbent
-`deepseek/deepseek-chat`, none beat its corpus-v2 floor, so the default
-model is unchanged. Same pattern as `test_inscope_instrument.py`: reads
+"""Pins the no-ship decision from the model comparison: three candidate
+OpenRouter models were measured against the incumbent
+`deepseek/deepseek-chat`, none beat its corpus floor, so the default model
+is unchanged. Same pattern as `test_inscope_instrument.py`: reads
 recorded `out/*` fixtures and skips (not fails) if that directory isn't
 present. No network, no key.
 """
@@ -25,7 +25,7 @@ def test_default_model_unchanged_by_the_no_ship_decision():
 
 @pytest.fixture(autouse=True)
 def _require_run():
-    if not _OUT.is_dir():  # pragma: no cover - spike output not always present
+    if not _OUT.is_dir():  # pragma: no cover - recorded run not always present
         pytest.skip(f"model-comparison run not available at {_OUT}")
 
 

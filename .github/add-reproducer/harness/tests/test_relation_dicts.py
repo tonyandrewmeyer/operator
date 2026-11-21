@@ -1,13 +1,12 @@
-"""A dict for `testing.State(relations=...)` (`spike-step-5/static-retry/
-RESULT.md` §25, §26).
+"""A dict for `testing.State(relations=...)`.
 
-Live on `#2709` (§25, run 5-1), an answer passed `relations={'db': {1: {...}}}`.
+A live answer for `#2709` passed `relations={'db': {1: {...}}}`.
 `relations` takes `testing.Relation` objects: running a `State` built from a
 dict fails with `AttributeError: 'str' object has no attribute 'endpoint'`, and
 a dict inside the list fails `State(...)` itself with `TypeError: unhashable
-type: 'dict'`, on 3.8.3 and `main`. Nine of the earlier saved `#2709` tests
-(§10, §11, §13) are the same shape. These tests check both by running, and
-what the rule lets through.
+type: 'dict'`, on 3.8.3 and `main`. Nine other saved `#2709` answers have
+the same shape. These tests check both by running, and what the rule lets
+through.
 """
 
 from __future__ import annotations
@@ -138,6 +137,6 @@ def test_a_state_that_is_not_ops_testings_passes():
 
 
 def test_a_dict_through_a_name_is_not_followed():
-    """It fails just the same, but only literals are read, as for §11's
-    keywords."""
+    """It fails just the same, but only literals are read, as for the
+    `ops.testing` keyword rule."""
     assert not _dict_reasons(_source("rels = {'db': {}}\nctx.run(ctx.on.update_status(), testing.State(relations=rels))"))

@@ -1,10 +1,8 @@
-"""Comment composition tests (PLAN.md Approach §6).
+"""Comment composition tests.
 
-`compose_template()` renders every comment (since
-`spike-step-5/static-retry/RESULT.md` §42 there is no LLM path; `Composer`
-wraps the renderer and makes no call). These tests cover the renderer
-directly; the tests of the former LLM path's prompt and response checks went
-with it.
+`compose_template()` renders every comment (there is no LLM path;
+`Composer` wraps the renderer and makes no call). These tests cover the
+renderer directly.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ from models import (
 def after_prefix(text: str) -> str:
     """The comment with `AUTOMATION_PREFIX` stripped.
 
-    Every composed comment opens with the prefix (criterion 2's accepted-risk
+    Every composed comment opens with the prefix (the false-comment
     mitigation), so assertions about what a *renderer* or the *model* wrote
     start one line further down.
     """
@@ -87,7 +85,7 @@ def test_template_partial_wording():
 
 def test_template_partial_says_attempted_not_reproduced():
     # A `partial` outcome did not reproduce the bug -- the trailing summary
-    # line must not contradict that (spike-step-5/composer-live/RESULT.md).
+    # line must not contradict that.
     hyp = Hypothesis(
         issue_number=3,
         in_scope=True,
@@ -105,8 +103,7 @@ def test_template_partial_says_attempted_not_reproduced():
 
 
 def test_template_versions_line_includes_observed_juju_version_when_present():
-    """`spike-step-5/wallclock-substrate/RESULT.md` §5: the pinned
-    `moving_parts.juju_version` (often nothing) and the juju that actually
+    """The pinned `moving_parts.juju_version` (often nothing) and the juju that actually
     produced the verdict can differ -- a reader trusting a "Reproduced"
     comment needs both, not just the pin."""
     hyp = Hypothesis(
@@ -146,14 +143,13 @@ def test_template_versions_line_omits_observed_juju_version_when_absent():
     issue = Issue(number=3, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator")
     body = compose_template(hyp, issue, run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
     assert "Juju " not in body.split("Commands run:")[0]
-    # Scenario only: no Juju and no base to state (§42).
+    # Scenario only: no Juju and no base to state.
     assert "Versions: Scenario only (no Juju)\n" in body
 
 
 def test_template_2639_includes_control_run():
-    # spike-step-5/composer-live/RESULT.md Finding 1: the control run is the
-    # entire basis for a `reproduced_positive_signal_absent` verdict, and it
-    # was silently dropped from both render paths before this fix.
+    # The control run is the entire basis for a
+    # `reproduced_positive_signal_absent` verdict, so the comment must show it.
     hyp = _load_hypothesis(2639)
     run = _load_run(2639)
     issue = _load_issue(2639)
@@ -165,10 +161,9 @@ def test_template_2639_includes_control_run():
 
 
 def test_template_control_label_explains_what_it_rules_out():
-    # spike-step-5/maintainer-review/RESULT.md §7: rated C1, this label was
-    # flagged as possibly unclear cold -- it separates
+    # Read cold, a bare "Control" label is unclear -- it separates
     # reproduced_positive_signal_absent from a broken observer, and the
-    # unclarified label didn't say so. One clause, not a new section.
+    # label has to say so. One clause, not a new section.
     hyp = _load_hypothesis(2639)
     run = _load_run(2639)
     issue = _load_issue(2639)
@@ -177,7 +172,7 @@ def test_template_control_label_explains_what_it_rules_out():
 
 
 def _log_only_run():
-    # spike-step-4/2341's shape: exit 0, no stdout/stderr worth reading, the
+    # #2341's shape: exit 0, no stdout/stderr worth reading, the
     # bug's only evidence is a captured log record.
     return RunResult(
         hypothesis_number=2341,
@@ -268,25 +263,22 @@ def test_template_includes_synthesized_test_file_body():
     body = compose_template(hyp, _issue_9999(), run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
     assert "test_issue_9999_repro.py" in body
     assert "def test_x():" in body
-    # The file body must appear before the commands section, per
-    # composer-live/RESULT.md Finding 4 ("the reader needs the file to exist
-    # before the commands that reference it make sense").
+    # The file body must appear before the commands section: the reader
+    # needs the file to exist before the commands that reference it make
+    # sense.
     assert body.index("def test_x():") < body.index("Commands run:")
-    # spike-step-5/maintainer-review/RESULT.md §7's cross-cutting note:
-    # inline it collapsed, since these bodies are long.
+    # Inline it collapsed, since these bodies are long.
     assert "<details>" in body
     assert "<summary>Synthesized test file: test_issue_9999_repro.py" in body
     assert body.index("<summary>") < body.index("def test_x():") < body.index("</details>")
 
 
-# --- Heredoc-embedded test file (spike-step-5/maintainer-review/
-# FOLLOWUPS.md §1: three of five passing maintainer ratings were
-# conditional on seeing a test file that `synthesized_test_file` alone
-# never covered -- #2341's real extraction writes its own test file via a
-# `cat > ... << 'EOF'` heredoc in commands[], not LLM synthesis, and the
-# executed run's own commands (e.g. a runner that replays only the final
-# pytest invocation) can drop that heredoc before it ever reaches the
-# composer.) -----------------------------------------------------------
+# --- Heredoc-embedded test file (a reviewer needs to see a test file that
+# `synthesized_test_file` alone never covers -- #2341's real extraction
+# writes its own test file via a `cat > ... << 'EOF'` heredoc in
+# commands[], not LLM synthesis, and the executed run's own commands (e.g.
+# a runner that replays only the final pytest invocation) can drop that
+# heredoc before it ever reaches the composer.) --------------------------
 
 
 def test_template_includes_heredoc_embedded_test_file():
@@ -328,7 +320,7 @@ def test_template_omits_test_file_section_when_none():
     run = _load_run(2341)
     hyp.observed = 'crashes with "boom"'
     # #2341's real extraction embeds a test file as a heredoc in commands[]
-    # (spike-step-5/maintainer-review/FOLLOWUPS.md §1) -- strip it so this
+    # -- strip it so this
     # case actually has no test file, which is what the test name claims.
     hyp.commands = ["uv run pytest -v"]
     run.commands[-1] = CommandResult(command="uv run pytest -v", exit_code=1, stderr='"boom"')
@@ -360,17 +352,17 @@ def _prefix_case() -> tuple[Hypothesis, Issue, RunResult]:
 
 @pytest.mark.parametrize("outcome", sorted(COMMENT_OUTCOMES, key=lambda o: o.value))
 def test_template_prefixes_every_comment_worthy_outcome(outcome):
-    """Criterion 2 rests on this line being present, so it is asserted on
-    every rung that can reach a maintainer -- including `partial`, which is
-    why the wording says "attempt" rather than "reproduced"."""
+    """The false-comment mitigation rests on this line being present, so it
+    is asserted on every rung that can reach a maintainer -- including
+    `partial`, which is why the wording says "attempt" rather than
+    "reproduced"."""
     hyp, issue, run = _prefix_case()
     body = compose_template(hyp, issue, run, outcome, "reason", run_id="r1", timestamp="t")
     assert body.startswith(AUTOMATION_PREFIX + "\n\n")
 
 
 def test_template_versions_line_includes_observed_ops_version_when_present():
-    """`spike-step-5/first-dispatch/RESULT.md` §6.1: `charmcraft pack`
-    resolves `ops~=3.8` from PyPI inside its own managed LXD instance, so the
+    """`charmcraft pack` resolves `ops~=3.8` from PyPI inside its own managed LXD instance, so the
     `ops` a verdict was produced on is not the checked-out tree and is not
     what `repo=` names either -- `repo=` is the extraction's pin, usually
     nothing. Disclosed for the same reason `observed_juju` is."""
@@ -414,20 +406,16 @@ def test_template_versions_line_omits_observed_ops_version_when_absent():
     assert "ops" not in body.split("Commands run:")[0].split("Versions:")[1]
 
 
-# --- The `<summary>` contradiction (spike-step-5/second-dispatch/RESULT.md
-# §5.2) ----------------------------------------------------------------
+# --- The `<summary>` contradiction ------------------------------------
 #
-# The first comment this project ever composed on GitHub Actions
-# (`tonyandrewmeyer/operator` run 35219949266, 2026-09-17) rendered `#2045`'s
+# A comment composed on GitHub Actions for `#2045` can render its
 # fourteen-line test file twice: once inside a `<details>` block whose
-# `<summary>` said it was "not shown in the commands actually run below", and
+# `<summary>` says it is "not shown in the commands actually run below", and
 # again four lines later as the `cat > test_cwd.py << 'PYEOF'` heredoc that
-# wrote it. The commands and the file body below are transcribed from that
-# comment, which `second-dispatch/RESULT.md` §5.1 quotes verbatim and
-# complete; the run artefact itself was not committed, and the live
-# extraction's `expected`/`observed` prose was never recorded anywhere, so
-# those two fields are left empty here rather than guessed at. Nothing the
-# assertions below check reads them.
+# wrote it. The commands and the file body below are transcribed from a real
+# composed comment; the extraction's `expected`/`observed` prose was not
+# recorded, so those two fields are left empty here rather than guessed at.
+# Nothing the assertions below check reads them.
 
 _DISPATCH_TEST_FILE_BODY = """\
 import os
@@ -591,14 +579,11 @@ def test_a_synthesized_file_is_always_rendered():
 
 
 def test_a_none_branch_comment_now_discloses_the_ops_it_resolved():
-    """`spike-step-5/second-dispatch/RESULT.md` §6.2, closed in
-    `fourth-dispatch/RESULT.md` §1.
-
-    The second dispatch's comment rendered ` + ops==3.8.2` in its observed
-    output and `Versions: ... substrate=none` with no `observed_ops=` four
-    lines above it. Same commands, same branch, with the version the seam now
-    captures: the versions line states what the observed output already
-    showed, and the two halves of the comment stop disagreeing."""
+    """A `none`-branch comment shows ` + ops==3.8.2` in its observed output,
+    so the versions line four lines above it must name that `ops` too. Same
+    commands, same branch, with the version the seam captures: the versions
+    line states what the observed output already shows, and the two halves
+    of the comment agree."""
     run = _dispatch_run()
     run.observed_ops_version = "3.8.2"
 
@@ -615,14 +600,12 @@ def test_a_none_branch_comment_now_discloses_the_ops_it_resolved():
     assert "Versions: ops 3.8.2, Scenario only (no Juju)\n" in body
 
 
-# --- §42: the wrapper is fixed text (spike-step-5/static-retry/RESULT.md §42)
+# --- The wrapper is fixed text -----------------------------------------
 #
-# A human read of eleven composed `#2045` comments (`composed-41/`) found
-# them all valid but the wrapper unstable: one had an unlabelled commands
-# fence, a reworded opening sentence and a closing `Reproduced on
-# unpinned/unpinned` under its own `substrate=none`, and the opening
-# sentences differed across ten wordings. The comment is now rendered from
-# the run record alone.
+# A model-written wrapper is unstable: an unlabelled commands fence, a
+# reworded opening sentence, a closing `Reproduced on unpinned/unpinned`
+# under its own `substrate=none`. The comment is rendered from the run
+# record alone, so these pin the wrapper's exact text.
 
 
 def _cwd_case(timestamp: str = "2026-11-19T12:46:00.843074+00:00") -> str:

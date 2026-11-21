@@ -26,7 +26,7 @@ def test_render_charm_2639_end_to_end(tmp_path):
     charmcraft_yaml = (out_dir / "charmcraft.yaml").read_text()
     doc = yaml.safe_load(charmcraft_yaml)
 
-    # Steps §3 fixes (2026-07-22), must not regress:
+    # render.py's charmcraft/juju fixes, must not regress:
     assert doc["name"] == "repro-i2639-pebble-notice"  # no digit directly after a hyphen
     assert not re.search(r"-\d", doc["name"])  # juju's local-charm URL parser rejects this shape
     platforms = doc["platforms"]

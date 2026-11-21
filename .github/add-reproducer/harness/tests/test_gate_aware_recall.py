@@ -1,10 +1,10 @@
-"""Pins `spike-step-5/gate-aware-recall/RESULT.md`'s finding: raw `in_scope`
-recall (92-100% across every recorded run) overstates what a maintainer
-would actually see, because `pipeline.py`'s confidence gate silences any
-in-scope hypothesis with `confidence: low` before a comment is ever
-composed. `corpus-v2/analyse.py.score()` now reports both numbers; these
-tests pin the effective figure against the already-recorded `out/`
-directories, not a live run. No network, no key.
+"""Pins the gate-aware recall finding: raw `in_scope` recall (92-100%
+across every recorded run) overstates what a maintainer would actually
+see, because `pipeline.py`'s confidence gate silences any in-scope
+hypothesis with `confidence: low` before a comment is ever composed. The
+corpus scoring script's `score()` reports both numbers; these tests pin
+the effective figure against the already-recorded `out/` directories, not
+a live run. No network, no key.
 """
 
 import importlib.util
@@ -19,7 +19,7 @@ _CORPUS_V2 = _SPIKE_STEP_5 / "corpus-v2"
 _LABELS_PATH = _CORPUS_V2 / "hand-labels.json"
 _ANALYSE_PATH = _CORPUS_V2 / "analyse.py"
 
-if not _ANALYSE_PATH.is_file():  # pragma: no cover - spike output not always present
+if not _ANALYSE_PATH.is_file():  # pragma: no cover - recorded run not always present
     pytest.skip(
         f"corpus-v2 scoring script not available at {_ANALYSE_PATH}",
         allow_module_level=True,
@@ -39,7 +39,7 @@ analyse = _load_analyse()
 
 @pytest.fixture(autouse=True)
 def _require_runs():
-    if not _LABELS_PATH.is_file():  # pragma: no cover - spike output not always present
+    if not _LABELS_PATH.is_file():  # pragma: no cover - recorded run not always present
         pytest.skip(f"hand-labels not available at {_LABELS_PATH}")
 
 
@@ -98,7 +98,7 @@ def test_confidence_gate_never_touches_false_positives_or_drops():
     assert s["fn"] == 1
 
 
-# --- against the recorded corpus-v2 runs -------------------------------------
+# --- against the recorded corpus runs ----------------------------------------
 
 
 @pytest.mark.parametrize(

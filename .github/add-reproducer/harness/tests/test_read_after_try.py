@@ -1,11 +1,10 @@
-"""A databag looked up inside a `try` and first read after it
-(`spike-step-5/static-retry/RESULT.md` §33's 10-5, §34, §35).
+"""A databag looked up inside a `try` and first read after it.
 
-Live on `#2709`, 10-5 looked the relation and its databag up inside a
+A live answer for `#2709` looked the relation and its databag up inside a
 `try` whose handler catches `ops.ModelError`, and compared the databag
 after the `try`. `RelationDataContent` loads lazily, so `relation-get`
 runs at the comparison, outside the `try`, and on ops 3.8.3 the
-`ModelError` escapes. The shape here has §34's YAML-string repair applied,
+`ModelError` escapes. The shape here has the YAML-string repair applied,
 so the `from_yaml` rule does not reject it first.
 """
 
@@ -42,7 +41,7 @@ def test_gone(tmp_path, monkeypatch):
     model = ops.Model(ops.CharmMeta.from_yaml(meta), _ModelBackend('myapp/0'))
 '''
 
-# 10-5 as the live answer wrote it, with the YAML-string repair.
+# The live answer as it was written, with the YAML-string repair.
 _TEN_FIVE = _HEAD + '''\
     try:
         rel = model.get_relation('db', 1)
@@ -87,7 +86,7 @@ def test_10_5_is_rejected_and_crashes(tmp_path, monkeypatch):
     assert 'exits 1, printing "ERROR permission denied" to stderr' in reason
     assert "`try: rel_data = dict(rel.data[model.app])`" in reason
     assert "`except ops.ModelError as e: rel_data = e`" in reason
-    # It is the only reason: nothing else in the check rejects 10-5.
+    # It is the only reason: nothing else in the check rejects the live answer.
     assert check(_TEN_FIVE).reasons == reasons
     error = _run(_TEN_FIVE, tmp_path, monkeypatch)
     assert isinstance(error, __import__("ops").ModelError)

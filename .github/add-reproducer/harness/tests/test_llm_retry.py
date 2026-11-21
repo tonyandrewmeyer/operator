@@ -1,9 +1,8 @@
 """Retry policy on the live LLM seam.
 
-Added after a 60-issue corpus run died partway through on an unhandled
-`HTTP 429` (`spike-step-5/corpus-v2/RESULT.md`). Any run over more than a
-handful of issues hits rate limiting, so this matters for Steps §6's GHA
-rollout, not just local calibration.
+Without retries, a 60-issue corpus run dies partway through on an unhandled
+`HTTP 429`. Any run over more than a handful of issues hits rate limiting, so
+this matters for the GitHub Actions workflow, not just local calibration.
 
 No network: `urlopen` is monkeypatched and `sleep` is injected.
 """
@@ -93,9 +92,8 @@ def test_unparseable_retry_after_falls_back_to_backoff(monkeypatch, seam):
 def test_does_not_retry_permanent_failures(monkeypatch, seam, code):
     """A bad key or an exhausted balance will not fix itself.
 
-    401 in particular: the first live attempt in this project burned a run on a
-    revoked key, and retrying it five times with backoff would have wasted
-    ~30s to reach the same answer.
+    401 in particular: a revoked key gets the same answer every time, and
+    retrying it five times with backoff wastes ~30s to reach it.
     """
     client, slept = seam
     calls = []

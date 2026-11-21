@@ -1,10 +1,7 @@
-"""In-scope filter (PLAN.md Approach §2) plus the `ci_run_url` pre-extraction
-(Approach §3 delta: "trivially regex-extractable at filter time... before
-any LLM call").
+"""In-scope filter plus the `ci_run_url` pre-extraction (a CI run URL is
+trivially regex-extractable at filter time, before any LLM call).
 
-The classification logic here is ported verbatim from
-`spike-step-1/filter.py` / `spike-step-2/filter.py` (identical between the
-two spikes) — deterministic, no LLM call.
+The classification logic here is deterministic -- no LLM call.
 """
 
 from __future__ import annotations
@@ -19,25 +16,22 @@ _DROP_ISSUE_TYPES_LOWER = {t.lower() for t in DROP_ISSUE_TYPES}
 DROP_LABELS = {
     "docs", "documentation", "question", "discussion", "epic", "tracking",
     "enhancement", "feature", "feature-request", "meta", "chore",
-    # spike-step-5/corpus-v2/RESULT.md "Two filter findings": `operator`'s
-    # real label vocabulary barely overlaps the set above (only `docs`
-    # matched across 400 issues). `refactoring` is added on that finding's
-    # evidence -- every corpus-v2 issue carrying it is in `hand-labels.json`'s
+    # `operator`'s real label vocabulary barely overlaps the set above (only
+    # `docs` matched across 400 issues). `refactoring` is added because every
+    # hand-labelled issue carrying it is in `hand-labels.json`'s
     # `screened_only` list, i.e. accepted as a correct (non-bug) drop.
     "refactoring",
 }
 
-# `needs design` and `roadmap` were also named by the corpus-v2 finding as
-# label-vocabulary candidates, but are deliberately NOT in DROP_LABELS:
-# `hand-labels.json` records `#1109` as a real bug (`label: true`) carrying
-# `roadmap` alone, and `fixtures/issues/2639.json` -- the one hypothesis this
-# whole project has ever confirmed reproduces end-to-end
-# (`spike-step-4/2639/RESULT.md`) -- carries *both* `needs design` and
-# `roadmap`. Both labels mark a triage/planning state, not bug-vs-not-bug;
-# adding either would false-drop a hand-verified real bug and the project's
-# one validated success case. `next release` is excluded for the same reason:
-# `#1775` is a hand-labelled real bug (`ops fails when a charm has no config
-# options`) carrying only that label -- it marks scheduling, not scope.
+# `needs design` and `roadmap` are also label-vocabulary candidates, but are
+# deliberately NOT in DROP_LABELS: `hand-labels.json` records `#1109` as a real
+# bug (`label: true`) carrying `roadmap` alone, and `fixtures/issues/2639.json`
+# -- a hypothesis confirmed to reproduce end-to-end -- carries *both* `needs
+# design` and `roadmap`. Both labels mark a triage/planning state, not
+# bug-vs-not-bug; adding either would false-drop a hand-verified real bug and a
+# validated end-to-end reproduction. `next release` is excluded for the same
+# reason: `#1775` is a hand-labelled real bug (`ops fails when a charm has no
+# config options`) carrying only that label -- it marks scheduling, not scope.
 
 TITLE_DROP_PATTERNS = [
     (re.compile(r"^\s*RFC[:\s]", re.I), "title RFC marker"),
@@ -62,12 +56,12 @@ RUNNABLE_MARKERS = re.compile(
     re.I,
 )
 
-# Approach §3 delta: github.com/canonical/<repo>/actions/runs/<id> --
-# load-bearing for the third-branch trigger heuristic and the commit-sha
-# fallback for stale test selectors (spike-step-4/2484/RESULT.md).
+# github.com/canonical/<repo>/actions/runs/<id> -- load-bearing for the
+# third-branch trigger heuristic and the commit-sha fallback for stale test
+# selectors (e.g. #2484).
 CI_RUN_URL_RE = re.compile(r"https?://github\.com/[\w.-]+/[\w.-]+/actions/runs/(\d+)")
 
-# v1 target list, PLAN.md "Where it lives" > "Target repos, v1".
+# v1 target repos.
 V1_ALLOWLIST = {"canonical/operator", "canonical/charmlibs", "canonical/charm-ubuntu"}
 
 
@@ -106,9 +100,9 @@ def classify_issue(issue: Issue, issue_type: str | None = None) -> tuple[str, st
     """Return (KEEP|DROP, reason).
 
     `issue_type` defaults to `issue.issue_type` (the webhook's
-    `issue.type.name`) when not given explicitly, so callers that only have
-    an `Issue` -- which is every real caller, per PLAN.md Approach §2 gap 2 --
-    still get the issue-type drop rule instead of it silently never firing.
+    `issue.type.name`) when not given explicitly, so callers that only have an
+    `Issue` -- which is every real caller -- still get the issue-type drop rule
+    instead of it silently never firing.
     """
     if issue.repo not in V1_ALLOWLIST:
         return "DROP", f"repo={issue.repo} not in v1 allowlist"

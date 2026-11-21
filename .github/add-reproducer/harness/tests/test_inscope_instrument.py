@@ -1,8 +1,7 @@
 """Pins the measured results behind `inscope_second_pass.py`'s ship decision
-(`spike-step-5/inscope-instrument/RESULT.md`) against the recorded runs --
-not a live model, no network, no key. Same pattern as
-`test_inscope_retune.py`: these tests read `spike-step-5/inscope-instrument/
-out/*` fixtures and skip (not fail) if that directory isn't present.
+against the recorded runs -- not a live model, no network, no key. Same
+pattern as `test_inscope_retune.py`: these tests read the recorded `out/*`
+fixtures and skip (not fail) if that directory isn't present.
 """
 
 import json
@@ -16,7 +15,7 @@ _LABELS_PATH = Path(__file__).parent.parent.parent / "spike-step-5" / "corpus-v2
 
 @pytest.fixture(autouse=True)
 def _require_run():
-    if not _OUT.is_dir():  # pragma: no cover - spike output not always present
+    if not _OUT.is_dir():  # pragma: no cover - recorded run not always present
         pytest.skip(f"inscope-instrument run not available at {_OUT}")
 
 
@@ -68,7 +67,7 @@ def _repeats_summary(subdir: str, number: int) -> dict:
     return json.loads(path.read_text())
 
 
-# --- step 1: the rationale-instrumented single-pass corpus run -------------
+# --- the rationale-instrumented single-pass corpus run ---------------------
 
 
 def test_rationale_instrumented_corpus_run_precision_holds_recall_drops():
@@ -95,7 +94,7 @@ def test_rationale_run_shows_1790_and_2327_dropped_with_empty_observed():
         assert record["live_extraction"]["observed"] in (None, "")
 
 
-# --- step 3: the two-pass corpus floor, two independent runs ---------------
+# --- the two-pass corpus floor, two independent runs -----------------------
 
 
 @pytest.mark.parametrize("subdir", ["corpus-twopass-run1", "corpus-twopass-run2"])
@@ -107,11 +106,10 @@ def test_twopass_corpus_run_precision_is_perfect(subdir):
 
 @pytest.mark.parametrize("subdir", ["corpus-twopass-run1", "corpus-twopass-run2"])
 def test_twopass_corpus_run_recall_ties_the_established_baseline(subdir):
-    # 11/12 == 0.91666..., the same fraction spike-step-5/corpus-v2/RESULT.md
-    # reports as "recall 92%" for its own out-inscope-v2 baseline run (see
-    # this task's RESULT.md for the full discussion of the rounding vs.
-    # strict->=0.92 nuance). Both runs land on this exact fraction, with the
-    # same sole false drop (#1088) that predates this module.
+    # 11/12 == 0.91666..., the same fraction the single-pass baseline run
+    # reports as "recall 92%" (rounded; strictly it is just under 0.92).
+    # Both runs land on this exact fraction, with the same sole false drop
+    # (#1088) that predates this module.
     score = _score_against_labels(_corpus_run(subdir))
     assert score["recall"] == pytest.approx(11 / 12)
     assert score["false_drops"] == [1088]
@@ -128,8 +126,8 @@ def test_twopass_recovers_1790_and_2327_that_the_single_pass_dropped():
 
 def test_twopass_corpus_runs_are_identical_on_in_scope():
     # Zero variance across two independent runs -- far more stable than any
-    # of the three abandoned single-prompt rewordings in ../inscope-retune/,
-    # which each disagreed with themselves in different ways run to run.
+    # of the three abandoned single-prompt rewordings in
+    # `test_inscope_retune.py`, which each disagreed with themselves in different ways run to run.
     run1 = _corpus_run("corpus-twopass-run1")
     run2 = _corpus_run("corpus-twopass-run2")
     shared = sorted(set(run1) & set(run2))

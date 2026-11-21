@@ -1,15 +1,15 @@
-"""`k8s-clone` never received the abort-at-failed-prerequisite fix.
+"""`k8s-clone` stops at a failed prerequisite, like the scratch branches.
 
-`spike-step-5/first-real-substrate/RESULT.md` Finding 4 fixed the scratch
-branches: `CommandResult.step`, `RunResult.aborted_at_step`/`skipped_steps`,
-and stopping at the first failed prerequisite, with classifier rung 0
-returning `INFRASTRUCTURE_FAILED` for the result. `_run_k8s_clone` kept its
-own loop and got none of it, so a failed `git clone` left every later command
-running in an empty directory and the classifier -- which reaches rung 0 only
-via `aborted_at_step` -- read their exit codes as evidence about the bug.
+The scratch branches record `CommandResult.step` and
+`RunResult.aborted_at_step`/`skipped_steps`, and stop at the first failed
+prerequisite, with classifier rung 0 returning `INFRASTRUCTURE_FAILED` for the
+result. If `_run_k8s_clone` kept its own loop without that, a failed
+`git clone` would leave every later command running in an empty directory and
+the classifier -- which reaches rung 0 only via `aborted_at_step` -- would
+read their exit codes as evidence about the bug.
 
-That matters because `k8s-clone` is the branch both criterion-1 candidate
-issues actually route to (`spike-step-5/gate-substrate/RESULT.md` §1, §5).
+That matters because `k8s-clone` is the branch that any issue linking a CI
+run, with no self-contained snippet, routes to.
 """
 
 from __future__ import annotations
@@ -86,9 +86,9 @@ def test_successful_clone_runs_the_remaining_commands(monkeypatch):
 
 
 def test_plan_and_run_share_one_sequence(monkeypatch):
-    """The reason `_clone_sequence()` exists: `build_plan()` and the real
-    runner each built this branch's commands separately, so a reviewed plan
-    and a real run could diverge."""
+    """The reason `_clone_sequence()` exists: if `build_plan()` and the real
+    runner each built this branch's commands separately, a reviewed plan and
+    a real run could diverge."""
     calls, _result = _run_with(monkeypatch, clone_returncode=0)
     plan = build_plan(
         branch="k8s-clone",

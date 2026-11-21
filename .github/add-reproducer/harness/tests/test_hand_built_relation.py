@@ -1,8 +1,8 @@
-"""An `ops.Relation(...)` built by hand (`spike-step-5/static-retry/RESULT.md` §24).
+"""An `ops.Relation(...)` built by hand.
 
-Live on `#2709` (§23), run 4-0 built `ops.Relation('relation', 1, model)`, a
-`TypeError` on ops 3.8.3 and `main` alike, and passed the check, so the
-catch-and-assert after it never ran. These tests check by running that such
+A live answer for `#2709` built `ops.Relation('relation', 1, model)`, a
+`TypeError` on ops 3.8.3 and `main` alike; without this rule it passes the
+check and the catch-and-assert after it never runs. These tests check by running that such
 calls raise and that what the reason suggests instead works, and cover the
 rule, which checks the call against the installed signature the way
 `_testing_names()` checks `ops.testing` keywords.

@@ -1,19 +1,18 @@
 """Runs that are not evidence about the bug must not be scored as though
 they were.
 
-All three cases here are lifted from the first real end-to-end run against
-a live k8s substrate (2026-08-18, multipass `repro-2639` + concierge/juju
-3.6.27/charmcraft 4.3.1), where every one of them fired:
+All three cases here come from real end-to-end runs against a k8s
+substrate (concierge/juju 3.6.27/charmcraft 4.3.1):
 
-- `charmcraft pack` failed on a base/platforms conflict, `juju deploy` then
-  failed for want of a `.charm`, and `juju status`/`juju debug-log` both
-  exited **0** against an empty model. The classifier returned
+- `charmcraft pack` fails on a base/platforms conflict, `juju deploy` then
+  fails for want of a `.charm`, and `juju status`/`juju debug-log` both
+  exit **0** against an empty model. Scored naively, that is
   `did_not_reproduce` -- a verdict about a bug nothing had tested.
-- On the following run, `pack` blew the flat 5-minute per-command timeout
-  (exit 124) fetching its LXD build base, producing the same shape.
-- Live surface inference returned `pebble_service.command: null` on 3 of 3
-  runs, so `_scratch_sequence()` built neither stimulus nor control and the
-  run "reproduced nothing" without ever poking the charm.
+- `pack` blows the flat 5-minute per-command timeout (exit 124) fetching its
+  LXD build base, producing the same shape.
+- Surface inference returns `pebble_service.command: null` (3 of 3 runs for
+  `#2639`), so `_scratch_sequence()` builds neither stimulus nor control and
+  the run "reproduces nothing" without ever poking the charm.
 """
 
 import pytest
@@ -93,8 +92,8 @@ def test_timed_out_pack_is_reported_as_a_timeout():
 
 def test_a_run_that_never_deployed_cannot_reach_the_positive_signal_absent_rung():
     """The dangerous case: `reproduced_positive_signal_absent` composes a
-    comment. Before rung 0 existed, a failed pack plus a control that also
-    failed to do anything landed there and asserted a reproduction."""
+    comment. Without rung 0, a failed pack plus a control that also failed to
+    do anything would land there and assert a reproduction."""
     run = _aborted_run()
     run.control = CommandResult(command="juju ssh ... root", exit_code=0, stdout="", step="control")
     outcome, _ = classify(_hypothesis(), _surface(), run)
@@ -123,8 +122,8 @@ def test_a_clean_run_is_still_classified_normally():
 
 
 def test_null_pebble_command_is_gated_before_the_substrate_spend():
-    """`pebble_service.command: null` -- what live inference actually
-    returned for #2639, 3/3 runs."""
+    """`pebble_service.command: null` -- what inference actually returned for
+    #2639, 3/3 runs."""
     ok, reason = runner_stage.check_stimulus("k8s-scratch", _surface(pebble_service={"command": None}))
     assert not ok
     assert "command" in reason
@@ -214,10 +213,10 @@ ERROR: file or directory not found: tests/test_gone.py
 
 
 def test_missing_dependency_is_infrastructure_not_a_stale_selector():
-    """The real 2026-08-18 `substrate: none` run: the synthesised test
-    imports ops, nothing installed it, and the classifier called it a stale
-    test selector -- a statement about the reproduction, for what is a
-    statement about the machine."""
+    """A real `substrate: none` run: the synthesised test imports ops,
+    nothing installed it, and calling that a stale test selector would be a
+    statement about the reproduction, for what is a statement about the
+    machine."""
     outcome, reason = classify(_hypothesis(), None, _pytest_run(_MISSING_OPS))
     assert outcome is Outcome.INFRASTRUCTURE_FAILED
     assert "ops" in reason
@@ -281,8 +280,9 @@ def _pytest_result(stdout):
 
 
 def test_a_broken_synthesised_test_is_not_a_reproduction():
-    """The real 2026-08-18 false comment: `state.pebble = {...}` on a frozen
-    `State`. The pipeline composed "The bug reproduced." off this."""
+    """A real false comment: `state.pebble = {...}` on a frozen `State`.
+    Scored as a reproduction, the pipeline composes "The bug reproduced." off
+    this."""
     outcome, reason = classify(_synthesised_hypothesis(), None, _pytest_result(_FROZEN_STATE_FAILURE))
     assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
     assert "FrozenInstanceError" in reason
@@ -323,10 +323,10 @@ def test_synthesis_invalid_outcome_is_silent():
 
 
 def test_failed_uv_init_is_infrastructure_not_partial():
-    """40-issue batch, 2026-08-18: every issue shared one workdir, so
+    """A 40-issue batch where every issue shared one workdir, so
     `uv init --bare` exited 2 ("Project is already initialized") for all
-    but the first. Rung 6 scored that `partial` and composed a comment --
-    for issues whose test then *passed*. 5 of 9 comments in that batch."""
+    but the first. Rung 6 alone scores that `partial` and composes a comment
+    -- for issues whose test then *passed*: 5 of 9 comments in that batch."""
     run = RunResult(
         hypothesis_number=2513,
         branch="none",
@@ -375,12 +375,11 @@ def test_a_clean_setup_does_not_trip_the_env_rung():
 
 # -- rung 1c covers the test file the *extraction* wrote, too ------------
 #
-# `spike-step-5/second-dispatch/RESULT.md` §7. Both of that round's live
-# GitHub Actions extractions wrote their test file as a `cat > ... <<
-# 'PYEOF'` heredoc inside the extraction's own `commands[]`, where
-# `synthesized_test_file` stays `None` -- so rung 1c, scoped to that field,
-# treated a model-written test as if the reporter had written it. Run
-# 35219780335's test was invalid `ops.testing` code and stayed silent only
+# Extractions often write their test file as a `cat > ... << 'PYEOF'`
+# heredoc inside the extraction's own `commands[]`, where
+# `synthesized_test_file` stays `None` -- so a rung 1c scoped to that field
+# would treat a model-written test as if the reporter had written it. Invalid
+# `ops.testing` code that raises `AttributeError` would stay silent only
 # because `AttributeError` happens to be in rung 4's regex. The cases below
 # are the ones that regex does not cover.
 
@@ -423,11 +422,11 @@ def _heredoc_run(stdout):
 
 
 def test_a_broken_heredoc_test_would_have_composed_a_false_reproduction():
-    """The failure §7 argued from the code, run. With the heredoc removed
-    from `commands[]` the hypothesis carries no model-written test file by
-    either measure, which is exactly what rung 1c used to see on every one
-    of these runs -- and the ladder falls through to rung 6, whose outcome
-    composes a comment that says "Reproduced"."""
+    """With the heredoc removed from `commands[]` the hypothesis carries no
+    model-written test file by either measure, which is exactly what a rung
+    1c scoped to `synthesized_test_file` sees on every one of these runs --
+    and the ladder falls through to rung 6, whose outcome composes a comment
+    that says "Reproduced"."""
     from composer import compose_template
     from models import Issue
 
@@ -445,8 +444,8 @@ def test_a_broken_heredoc_test_would_have_composed_a_false_reproduction():
 
 
 def test_a_broken_heredoc_test_is_now_caught():
-    """Same run, same output, with the heredoc where the live extractions
-    actually put it: rung 1c fires and the pipeline stays silent."""
+    """Same run, same output, with the heredoc where the extractions actually
+    put it: rung 1c fires and the pipeline stays silent."""
     hyp = _heredoc_hypothesis()
     outcome, reason = classify(hyp, None, _heredoc_run(_FROZEN_STATE_FAILURE))
     assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
@@ -484,8 +483,8 @@ E   RuntimeError: no ops.main() call found
 @pytest.mark.parametrize("stdout", [_FROZEN_STATE_FAILURE, _KEY_ERROR_FAILURE, _RUNTIME_ERROR_FAILURE])
 def test_the_exceptions_rung_4_does_not_match_are_all_caught(stdout):
     """`FrozenInstanceError`, `KeyError` and `RuntimeError` are none of them
-    in `_API_SHAPE_ERROR_RE`, so before this widening each of them reached
-    rung 6 and composed."""
+    in `_API_SHAPE_ERROR_RE`, so without rung 1c covering heredoc tests each
+    of them would reach rung 6 and compose."""
     outcome, _ = classify(_heredoc_hypothesis(), None, _heredoc_run(stdout))
     assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
 
@@ -499,12 +498,12 @@ E       AttributeError: 'function' object has no attribute 'action'
 
 
 def test_run_35219780335s_near_miss_is_now_caught_on_purpose():
-    """The measured case from `second-dispatch/RESULT.md` §7: invalid
-    `ops.testing` code (the event *function* where the event is expected).
-    It was silent before, via rung 4, because `AttributeError` is in that
-    regex -- the right answer for an accidental reason. It is still silent,
-    now via the rung built for it, and the reason names the generator rather
-    than claiming the extraction is pinned to an older API surface."""
+    """Invalid `ops.testing` code from a real run (the event *function* where
+    the event is expected). Rung 4 would keep it silent, because
+    `AttributeError` is in that regex -- the right answer for an accidental
+    reason. Rung 1c keeps it silent on purpose, and the reason names the
+    generator rather than claiming the extraction is pinned to an older API
+    surface."""
     outcome, reason = classify(_heredoc_hypothesis(), None, _heredoc_run(_ATTRIBUTE_ERROR_FAILURE))
     assert outcome is Outcome.UNRUNNABLE_SYNTHESIS_INVALID
     assert "AttributeError" in reason
@@ -520,9 +519,9 @@ def test_a_heredoc_test_failing_its_assertion_is_still_a_reproduction():
 
 
 def test_an_exception_the_reporter_quoted_is_still_evidence():
-    """"That exception may well be the bug" was the original scoping's
-    reason, and it survives -- checked now rather than assumed. When the
-    exception carries a substring the reporter quoted in `observed`, rung 2
+    """"That exception may well be the bug" is why rung 1c was scoped to
+    model-written tests, and it still holds -- checked rather than assumed.
+    When the exception carries a substring the reporter quoted in `observed`, rung 2
     still gets to call it a reproduction."""
     hyp = _heredoc_hypothesis(observed='the call dies with "KeyError: 7" instead of returning None')
     outcome, _ = classify(hyp, None, _heredoc_run(_KEY_ERROR_FAILURE))
@@ -540,10 +539,10 @@ def test_a_hypothesis_with_no_test_file_at_all_is_untouched():
 
 # -- rung 1a: a model-written test that fails during collection -----------
 #
-# First `#2045` dispatch at `6853d40e` (2026-10-01): the extraction wrote the
-# `testing.Context` run at module level, the charm's assertion fired while
-# pytest imported the file, and rung 1 called the "collected 0 items" a stale
-# test selector. Trimmed from the run's own pytest output.
+# On `#2045` the extraction wrote the `testing.Context` run at module level,
+# so the charm's assertion fired while pytest imported the file, and rung 1
+# would call the "collected 0 items" a stale test selector. Trimmed from a
+# real run's pytest output.
 
 _MODULE_LEVEL_TEST = (
     "cat > test_cwd.py << 'PYEOF'\n"

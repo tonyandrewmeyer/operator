@@ -81,9 +81,8 @@ def test_choose_branch_k8s_scratch_for_2639():
 
 @pytest.mark.parametrize("substrate", [None, "kubernetes", ""])
 def test_choose_branch_refuses_to_guess_a_branch(substrate):
-    # Previously fell through to "k8s-scratch", silently provisioning a
-    # cluster for an extraction that never named one
-    # (`spike-step-5/live-llm/RESULT.md` Finding 1). validate() rejects these
+    # Falling through to "k8s-scratch" would silently provision a cluster
+    # for an extraction that never named one. validate() rejects these
     # first; this is the belt-and-braces for any path that skips validation.
     hyp = Hypothesis.from_dict(
         1,
@@ -104,7 +103,7 @@ def test_2107_skipped_stale_repo_version_null_and_closed():
     # The one real substrate:lxd extraction in the corpus (see
     # fixtures/extractions/2107.json's _provenance) is also CLOSED with
     # repo_version null, same 2/2-plus-one pattern as #2341/#2327 --
-    # meaning this real case never actually reaches choose_branch()/the new
+    # meaning this real case never actually reaches choose_branch()/the
     # lxd-scratch runner via the full pipeline. Recorded plainly rather than
     # routed around: see test_choose_branch_lxd_scratch_for_2107 below and
     # test_seams_runner.py for how lxd-scratch dispatch is actually
@@ -119,9 +118,8 @@ def test_2107_skipped_stale_repo_version_null_and_closed():
 
 def test_choose_branch_lxd_scratch_for_2107():
     # Bypassing the stale gate on purpose (as the test above's docstring
-    # explains) to confirm branch dispatch itself -- this is the extraction
-    # that used to crash the pipeline with `ValueError: unknown branch
-    # 'lxd-scratch'` before seams/runner.py grew `_run_lxd_scratch`.
+    # explains) to confirm branch dispatch itself, and that
+    # seams/runner.py has a `_run_lxd_scratch` for it to reach.
     assert runner_stage.choose_branch(_load_hypothesis(2107)) == "lxd-scratch"
 
 
@@ -150,8 +148,8 @@ def test_choose_branch_k8s_clone_for_2484_third_branch_heuristic():
 
 def test_choose_branch_does_not_misfire_clone_on_self_contained_snippet():
     # A hypothesis with both a ci_run_url and a self-contained repro
-    # snippet should NOT route to the clone branch (spike-step-4's
-    # trigger heuristic: ci_run_url AND no snippet).
+    # snippet should NOT route to the clone branch (the trigger heuristic is
+    # ci_run_url AND no snippet).
     hyp = Hypothesis.from_dict(
         1,
         {
@@ -221,8 +219,8 @@ class _AbstainingRunnerSeam:
 def test_a_seam_that_cannot_resolve_the_anchor_does_not_skip():
     """The gate is a silent skip with no appeal, so it fires on a positive
     finding that the symbol is gone and on nothing else. Reported as absence,
-    "I could not look" skipped every anchor-carrying hypothesis on GHA before
-    it reached a runner -- `spike-step-5/second-dispatch/RESULT.md` §2."""
+    "I could not look" would skip every anchor-carrying hypothesis on GHA
+    before it reached a runner."""
     stale, reason = runner_stage.is_stale(
         _anchored_hypothesis("ops.testing._runtime"), _open_issue(), _AbstainingRunnerSeam(), {}
     )

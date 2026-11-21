@@ -17,7 +17,7 @@ already-composed comment is delivered or merely printed -- so a run with
 `--post` off exercises the identical pipeline and shows exactly what would
 have been said.
 
-Usage (from `add-reproducer/harness/`, so that the harness modules and their
+Usage (from `.github/add-reproducer/harness/`, so that the harness modules and their
 one dependency are importable):
 
     uv run python ../run.py --repo canonical/operator --issue 2639 \

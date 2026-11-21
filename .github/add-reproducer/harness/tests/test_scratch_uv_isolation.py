@@ -7,10 +7,10 @@ forward unobserved for a second round. `fourth-dispatch/RESULT.md` §2
 reproduced it: the branch's first command is the extraction's own `uv init
 --bare .`, uv walks *up* from the working directory looking for a workspace
 root, and the shipped layout (`--out-dir "$PWD/out"` from
-`add-reproducer/harness`) hands it the harness itself. Measured consequences,
+`.github/add-reproducer/harness`) hands it the harness itself. Measured consequences,
 all three from one run of `#2045`'s real four commands:
 
-  - `add-reproducer/harness/pyproject.toml`, a tracked file, gains a
+  - `.github/add-reproducer/harness/pyproject.toml`, a tracked file, gains a
     `[tool.uv.workspace] members` entry naming the scratch directory;
   - the issue's `ops` is installed into the harness's own `.venv`, so two
     issues in one batch share a dependency resolution -- and the second of

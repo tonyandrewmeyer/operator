@@ -10,11 +10,11 @@ None of this is part of `ops`. Nothing here is imported by the library, the
 test suite, or any charm; it is a tool that reads this repository's issues.
 
 ```
-add-reproducer/
+.github/add-reproducer/
   run.py            the workflow's entry point: fetch one issue, run the
                     pipeline, optionally post the comment it composes
   harness/          the pipeline itself, and its test suite
-  spike-step-3/     the parameterised scratch charm the runner deploys
+  scratch-charm/    the parameterised scratch charm the runner deploys
 ```
 
 `harness/README.md` is the detailed description: the stages, what each one

@@ -1,6 +1,6 @@
 """Scratch-charm scaffolding (PLAN.md Approach §4's k8s-scratch branch).
 
-Thin wrapper around `spike-step-3/charm/render.py`, invoked exactly as its
+Thin wrapper around `scratch-charm/charm/render.py`, invoked exactly as its
 own docstring documents (`render.py params/<name>.yaml out/<name>/`) --
 deliberately *not* reimplemented here. render.py carries three real
 charmcraft/juju bugfixes (Steps §3, landed 2026-07-22: `platforms:` shape,
@@ -21,7 +21,7 @@ import yaml
 from models import SurfaceInference
 
 HERE = Path(__file__).parent
-SPIKE3_RENDER = HERE.parent / "spike-step-3" / "charm" / "render.py"
+RENDER_SCRIPT = HERE.parent / "scratch-charm" / "charm" / "render.py"
 
 
 class ScaffoldError(RuntimeError):
@@ -45,11 +45,11 @@ def expected_signal_for(surface: SurfaceInference) -> str | None:
 
 
 def _render_module():
-    """Import `spike-step-3/charm/render.py` as a module, so its constants
+    """Import `scratch-charm/charm/render.py` as a module, so its constants
     are read from the one file that defines them."""
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("_add_reproducer_render", SPIKE3_RENDER)
+    spec = importlib.util.spec_from_file_location("_add_reproducer_render", RENDER_SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -72,8 +72,8 @@ def render_charm(surface: SurfaceInference, out_dir: Path, *, source_issue: int 
     `ScaffoldError` on any render.py failure (e.g. a rejected identifier --
     render.py treats every params.yaml value as untrusted LLM output, see
     its module docstring)."""
-    if not SPIKE3_RENDER.exists():
-        raise ScaffoldError(f"render.py not found at {SPIKE3_RENDER}")
+    if not RENDER_SCRIPT.exists():
+        raise ScaffoldError(f"render.py not found at {RENDER_SCRIPT}")
 
     out_dir = Path(out_dir)
     params = surface_to_params(surface, source_issue)
@@ -82,7 +82,7 @@ def render_charm(surface: SurfaceInference, out_dir: Path, *, source_issue: int 
         params_path = Path(f.name)
     try:
         proc = subprocess.run(
-            [sys.executable, str(SPIKE3_RENDER), str(params_path), str(out_dir)],
+            [sys.executable, str(RENDER_SCRIPT), str(params_path), str(out_dir)],
             capture_output=True,
             text=True,
             timeout=120,

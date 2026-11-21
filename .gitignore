@@ -49,4 +49,4 @@ juju-crashdump*.tar.xz
 .statefile.yaml
 
 # add-reproducer scratch runs
-/add-reproducer/harness/out/
+/.github/add-reproducer/harness/out/

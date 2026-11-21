@@ -115,8 +115,8 @@ def _scratch_root(work_dir: Path) -> Path:
     extraction's own `uv init --bare .`, run with `cwd` set to the issue's
     scratch directory. uv walks *up* from that directory looking for a
     workspace root, and the shipped layout gives it one: the workflow passes
-    `--out-dir "$PWD/out"` from `add-reproducer/harness`, so the scratch
-    directory is `add-reproducer/harness/out/work/issue-N` -- inside the
+    `--out-dir "$PWD/out"` from `.github/add-reproducer/harness`, so the scratch
+    directory is `.github/add-reproducer/harness/out/work/issue-N` -- inside the
     harness's own project. uv therefore
 
       - appends `out/work/issue-N` to the harness's tracked `pyproject.toml`

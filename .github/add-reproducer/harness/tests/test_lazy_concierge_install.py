@@ -34,7 +34,7 @@ from models import (
 )
 from seams.runner import INSTALL_CONCIERGE_COMMAND, PREREQUISITE_STEPS, SubprocessRunnerSeam
 
-WORKFLOW = Path(__file__).resolve().parents[3] / ".github" / "workflows" / "add-reproducer.yaml"
+WORKFLOW = Path(__file__).resolve().parents[4] / ".github" / "workflows" / "add-reproducer.yaml"
 
 
 def _hypothesis(substrate: str, commands: list[str] | None = None, **moving_parts) -> Hypothesis:

@@ -1,7 +1,7 @@
 # Tries to reproduce a newly-opened bug report, and comments with the
 # reproducer when it succeeds.
 #
-# The pipeline lives in `add-reproducer/`; `add-reproducer/README.md`
+# The pipeline lives in `.github/add-reproducer/`; `.github/add-reproducer/README.md`
 # describes it. In outline: a deterministic filter drops issues that are not
 # bug-shaped or already carry a reproducer, a model extracts a hypothesis
 # (versions, substrate, commands) from the issue body and its comments and
@@ -135,7 +135,7 @@ jobs:
       # 408 before any harness code ran
       # (`spike-step-5/seventh-dispatch/RESULT.md` §2.2, §5).
       - name: Try to reproduce the issue
-        working-directory: add-reproducer/harness
+        working-directory: .github/add-reproducer/harness
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -166,5 +166,5 @@ jobs:
           name: add-reproducer-run
           if-no-files-found: ignore
           path: |
-            add-reproducer/harness/out/*.json
-            add-reproducer/harness/out/*.md
+            .github/add-reproducer/harness/out/*.json
+            .github/add-reproducer/harness/out/*.md

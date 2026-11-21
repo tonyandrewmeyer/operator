@@ -2,14 +2,14 @@
 
 Two implementations:
 
-- `SubprocessRunnerSeam` — shells out to `concierge`/`charmcraft`/`juju`
+- `SubprocessRunnerSeam` -- shells out to `concierge`/`charmcraft`/`juju`
   for real. Never exercised against the real tools by the test suite (no
-  juju, no concierge, no network) — the code path live runs use.
+  juju, no concierge, no network) -- the code path live runs use.
   `tests/test_seams_runner.py` does exercise its command-building logic
   with `subprocess.run` mocked, which pins the *decisions* (sequence,
   substitutions, non-zero/timeout handling) without proving the commands
   themselves work against real infrastructure.
-- `FixtureRunnerSeam` — replays captured command output, recorded as
+- `FixtureRunnerSeam` -- replays captured command output, recorded as
   `fixtures/runs/<n>.json`. What
   the pipeline actually runs against here.
 """
@@ -388,7 +388,7 @@ class RunnerSeam(Protocol):
     def resolve_symbol(self, symbol_anchor: str, context: dict) -> bool:
         """False only when `symbol_anchor` (e.g.
         "ops.model.Model.get_relation") is positively *absent* from the
-        target repo's checked-out `main` — the skip-when-stale gate's second
+        target repo's checked-out `main` -- the skip-when-stale gate's second
         trigger, and the only thing that trips it.
 
         True when the symbol resolves, and also true when the implementation

@@ -259,7 +259,7 @@ derives from the substrate flag. The verdict a single channel produces
 names the juju version it was produced on, so it is a stated claim about
 one version rather than a silent claim about all of them.
 
-> **Known limitation — CI-run-only bug reports produce no comment.**
+> **Known limitation: CI-run-only bug reports produce no comment.**
 >
 > An issue that links a GitHub Actions run and gives no local reproduction
 > steps (no commands, no self-contained snippet) is routed to the
@@ -272,7 +272,7 @@ one version rather than a silent claim about all of them.
 >
 > This is a deliberate limitation, not an oversight. Building a
 > reproduction from a CI run would mean re-reading CI output the reporter
-> has already seen — a triage summariser rather than a reproducer — and the
+> has already seen - a triage summariser rather than a reproducer - and the
 > alternative, guessing the failing invocation and handing it to a shell,
 > is the shape this pipeline's runnability gate exists to stop.
 >

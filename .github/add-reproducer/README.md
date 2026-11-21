@@ -23,15 +23,17 @@ open.
 
 ## Trying it by hand
 
-The workflow has a `workflow_dispatch` trigger that takes an issue number,
-so a single issue can be put through the pipeline from the Actions tab. It
-defaults to **not** posting anything: the run does everything else, and the
-comment it would have posted appears in the job summary and in the run's
-artifact. Turning `post_comment` on for that one run is how you let it
-speak.
+An `issues.opened` run posts its comment when the outcome is
+comment-worthy. Setting `POST_COMMENTS` at the top of the workflow to
+`false` turns that off: the composed text then goes only to the job summary
+and the run's artifact.
 
-`POST_COMMENTS` at the top of the workflow is the same switch for the
-automatic `issues.opened` trigger, and starts at `false`.
+The workflow also has a `workflow_dispatch` trigger that takes an issue
+number, so a single issue can be put through the pipeline from the Actions
+tab. It defaults to **not** posting anything: the run does everything else,
+and the comment it would have posted appears in the job summary and in the
+run's artifact. Turning `post_comment` on for that one run is how you let it
+speak.
 
 ## What it costs to run
 

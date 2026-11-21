@@ -199,7 +199,7 @@ PREREQUISITE_STEPS = ("install-concierge", "prepare", "pack", "deploy", "wait", 
 INSTALL_CONCIERGE_COMMAND = "which concierge >/dev/null 2>&1 || sudo snap install --classic concierge"
 
 # A k8s scratch charm declares an `oci-image` resource per container (see
-# spike-step-3/charm/render.py), and `juju deploy` refuses a local charm
+# scratch-charm/charm/render.py), and `juju deploy` refuses a local charm
 # whose OCI resources aren't supplied: "ERROR local charm missing OCI
 # images for: workload-image". The scratch charm doesn't care what the
 # image *is* -- juju injects pebble as pid 1 and the stimulus runs
@@ -1014,7 +1014,7 @@ class SubprocessRunnerSeam:
         # imports and the rest of the path is not on it", and only the second
         # is reported as a symbol that has gone away. On a GHA runner the
         # first is the *normal* case and says nothing about the target repo:
-        # the workflow runs this under `uv run` in `add-reproducer/harness`,
+        # the workflow runs this under `uv run` in `.github/add-reproducer/harness`,
         # whose venv holds pyyaml and pytest and no `ops` at all, so
         # `import ops` fails there for every anchor any extraction can carry
         # (measured directly, 2026-09-17,

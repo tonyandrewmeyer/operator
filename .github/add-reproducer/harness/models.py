@@ -328,7 +328,7 @@ class SurfaceInference:
     """Approach §3's "distinct surface inference pass" output.
 
     Consumed by `scaffold.py` (relation/storage/pebble_service/ops_api_surface,
-    matching spike-step-3/charm/render.py's params.yaml shape) plus
+    matching scratch-charm/charm/render.py's params.yaml shape) plus
     `expected_signal`, which the classifier's *positive-signal-absent* rung
     needs (Approach §5 / spike-step-4/2639/RESULT.md) and which has no home
     in render.py's params schema since it's a classification concern, not a

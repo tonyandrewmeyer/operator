@@ -163,7 +163,7 @@ uv run pytest              # the whole suite: no key, no juju, no network
 
 The repository's own `tox -e unit` collects this suite as well, so it runs in
 `canonical/operator` CI alongside the library's tests. Only the scratch charms
-under `../spike-step-3/charm/examples/` are ignored there, because their three
+under `../scratch-charm/charm/examples/` are ignored there, because their three
 `src/charm.py` files share a basename and pytest can import one at a time.
 
 That reports 378 passed and 58 skipped here, and the skips are the expected

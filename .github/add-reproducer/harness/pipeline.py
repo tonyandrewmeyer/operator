@@ -31,7 +31,7 @@ import static_test_check
 from composer import Composer
 from extraction import ExtractionInvalid
 from inscope_second_pass import TwoPassExtractor
-from models import Issue, Outcome, RunResult, SurfaceInference
+from models import Comment, Hypothesis, Issue, MovingParts, Outcome, RunResult, SurfaceInference, TestFile
 from scaffold import ScaffoldError, expected_signal_for, render_charm
 from seams.llm import FixtureLLM, LiveOpenRouterLLM, LLMSeam
 from seams.runner import FixtureRunnerSeam, RunnerSeam, SubprocessRunnerSeam
@@ -65,6 +65,47 @@ class PipelineResult:
     # "faked_hook_tools": [...]}`. `None` for every other run, a native
     # `none` included, so an overridden run can be told from one.
     substrate_override: dict | None = None
+
+
+@dataclass
+class RunPlan:
+    """Everything `Pipeline.execute_plan()` needs, as decided by
+    `Pipeline.plan_for_issue()`. It goes through JSON (`to_dict()` /
+    `from_dict()`) because the workflow runs the two halves in separate jobs.
+    """
+
+    issue: Issue
+    branch: str
+    hypothesis: Hypothesis
+    surface: SurfaceInference | None
+    run_id: str
+    timestamp: str
+    extraction_record: dict | None = None
+    substrate_override: dict | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> RunPlan:
+        # Not `Issue.from_dict()` / `Hypothesis.from_dict()`: those read the
+        # `gh` and model-output shapes, which `asdict()` does not write.
+        issue = dict(d["issue"])
+        issue["comments"] = [Comment(**c) for c in issue.get("comments") or []]
+        hypothesis = dict(d["hypothesis"])
+        hypothesis["moving_parts"] = MovingParts(**hypothesis["moving_parts"])
+        if hypothesis.get("synthesized_test_file") is not None:
+            hypothesis["synthesized_test_file"] = TestFile(**hypothesis["synthesized_test_file"])
+        return cls(
+            issue=Issue(**issue),
+            branch=d["branch"],
+            hypothesis=Hypothesis(**hypothesis),
+            surface=SurfaceInference(**d["surface"]) if d.get("surface") is not None else None,
+            run_id=d["run_id"],
+            timestamp=d["timestamp"],
+            extraction_record=d.get("extraction_record"),
+            substrate_override=d.get("substrate_override"),
+        )
 
 
 def override_substrate(hypothesis):
@@ -200,25 +241,23 @@ class Pipeline:
         run_id: str | None = None,
         timestamp: str | None = None,
     ) -> PipelineResult:
-        """`calibration_mode` bypasses the confidence gate, so every
+        """`plan_for_issue()`, then `execute_plan()` if there is anything to run.
+
+        `calibration_mode` bypasses the confidence gate, so every
         `in_scope: true` extraction is run regardless of confidence, to
         calibrate the runner/classifier. Production runs leave it False."""
-        # Cleared per issue: a batch run reuses one `Pipeline`, and a filter
-        # drop must not inherit the previous issue's extraction record.
-        self._extraction_record = None
-        self._substrate_override = None
-        result = self._run_for_issue(
+        planned = self.plan_for_issue(
             issue,
             calibration_mode=calibration_mode,
             ignore_in_scope=ignore_in_scope,
             run_id=run_id,
             timestamp=timestamp,
         )
-        result.extraction_record = extraction_record.refresh_calls(self._extraction_record, self.llm)
-        result.substrate_override = self._substrate_override
-        return result
+        if isinstance(planned, PipelineResult):
+            return planned
+        return self.execute_plan(planned)
 
-    def _run_for_issue(
+    def plan_for_issue(
         self,
         issue: Issue,
         *,
@@ -226,10 +265,46 @@ class Pipeline:
         ignore_in_scope: bool = False,
         run_id: str | None = None,
         timestamp: str | None = None,
-    ) -> PipelineResult:
-        run_id = run_id or str(uuid.uuid4())
-        timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+    ) -> PipelineResult | RunPlan:
+        """Every stage up to the runner: the filter, every model call, and
+        every pre-run gate. Returns a `PipelineResult` when a gate stops the
+        issue, and otherwise the `RunPlan` that `execute_plan()` runs.
 
+        Nothing here executes a command taken from the issue, which is what
+        lets the workflow run this half with the API key and the other half
+        without it."""
+        # Cleared per issue: a batch run reuses one `Pipeline`, and a filter
+        # drop must not inherit the previous issue's extraction record.
+        self._extraction_record = None
+        self._substrate_override = None
+        planned = self._plan_for_issue(
+            issue,
+            calibration_mode=calibration_mode,
+            ignore_in_scope=ignore_in_scope,
+            run_id=run_id or str(uuid.uuid4()),
+            timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
+        )
+        planned.extraction_record = extraction_record.refresh_calls(self._extraction_record, self.llm)
+        planned.substrate_override = self._substrate_override
+        return planned
+
+    def execute_plan(self, plan: RunPlan) -> PipelineResult:
+        """Lay out the scratch directory, render the charm, run the commands,
+        classify what they did and compose the comment. Makes no model call."""
+        result = self._execute_plan(plan)
+        result.extraction_record = plan.extraction_record
+        result.substrate_override = plan.substrate_override
+        return result
+
+    def _plan_for_issue(
+        self,
+        issue: Issue,
+        *,
+        calibration_mode: bool,
+        ignore_in_scope: bool,
+        run_id: str,
+        timestamp: str,
+    ) -> PipelineResult | RunPlan:
         verdict, reason = filter_stage.classify_issue(issue)
         if verdict == "DROP":
             return PipelineResult(issue.number, "filter", None, reason, None)
@@ -329,6 +404,76 @@ class Pipeline:
                     hypothesis=hypothesis,
                 )
 
+        # Skip-when-stale gate first: cheapest possible
+        # drop, before spending any time on surface inference or a
+        # scratch-charm render for a hypothesis that's going nowhere.
+        context = {"issue_number": issue.number, "repo": issue.repo}
+        stale, stale_reason = runner_stage.is_stale(hypothesis, issue, self.runner, context)
+        if stale:
+            return PipelineResult(issue.number, "runner:skipped_stale", Outcome.SKIPPED_STALE, stale_reason, None)
+
+        surface: SurfaceInference | None = None
+        if branch == "none":
+            # A `substrate: none` hypothesis with no runnable pytest
+            # invocation gets a synthesised test file instead of staying
+            # un-runnable. `execute_plan()` writes it to disk.
+            hypothesis = runner_stage.synthesize_test_file_if_needed(hypothesis, issue, self.llm)
+        # Surface inference is substrate-agnostic (render.py picks a machine-
+        # vs k8s-shaped charm from whether `pebble_service.container` is set),
+        # so both scratch-charm branches share it.
+        if branch in runner_stage.SCRATCH_BRANCHES:
+            try:
+                surface = self.surface_inferrer.infer(issue, hypothesis)
+            except SurfaceInferenceInvalid as exc:
+                return PipelineResult(issue.number, "surface_inference", None, f"invalid surface inference: {exc}", None)
+            # `expected_signal` is decided by the charm template, not by the
+            # model: `scaffold.expected_signal_for()` reads render.py's own
+            # table. A guessed string can only match by luck: an invented one
+            # is scored against a charm that emits something else entirely.
+            # Applied before the gates below so they see the real value.
+            surface = dataclasses.replace(surface, expected_signal=expected_signal_for(surface))
+            # Before rendering or packing anything: a scratch branch with no
+            # stimulus deploys a charm, pokes nothing, and produces a verdict
+            # about an experiment that never happened. Checked here rather
+            # than after the run, so it costs an LLM call instead of a
+            # substrate bootstrap.
+            has_stimulus, no_stimulus_reason = runner_stage.check_stimulus(branch, surface)
+            if not has_stimulus:
+                return PipelineResult(
+                    issue.number,
+                    "runner:no_stimulus",
+                    Outcome.UNRUNNABLE_NO_STIMULUS,
+                    no_stimulus_reason,
+                    None,
+                    surface=surface,
+                    branch=branch,
+                    hypothesis=hypothesis,
+                )
+
+        # Pre-run gate: commands[] that aren't shell exit 127 on contact with one, and
+        # the classifier reads that as evidence of a reproduction. Checked
+        # after synthesis, which can repair the sequence.
+        runnable, unrunnable_reason = runner_stage.check_runnable(hypothesis, branch)
+        if not runnable:
+            return PipelineResult(
+                issue.number,
+                "runner:unrunnable_commands",
+                Outcome.UNRUNNABLE_COMMANDS_NOT_SHELL,
+                unrunnable_reason,
+                None,
+            )
+
+        return RunPlan(
+            issue=issue,
+            branch=branch,
+            hypothesis=hypothesis,
+            surface=surface,
+            run_id=run_id,
+            timestamp=timestamp,
+        )
+
+    def _execute_plan(self, plan: RunPlan) -> PipelineResult:
+        issue, branch, hypothesis, surface = plan.issue, plan.branch, plan.hypothesis, plan.surface
         # Per-issue scratch dir. With one shared workdir, a batch would run
         # `uv init` in an already-initialised project for all but the first
         # issue (exit 2, "Project is already initialized"), which the
@@ -361,52 +506,12 @@ class Pipeline:
             # `seams/runner.py:scratch_command_env()`.
             context["uv_project_environment"] = str(scratch_environment)
 
-        # Skip-when-stale gate first: cheapest possible
-        # drop, before spending any time on surface inference or a
-        # scratch-charm render for a hypothesis that's going nowhere.
-        stale, stale_reason = runner_stage.is_stale(hypothesis, issue, self.runner, context)
-        if stale:
-            return PipelineResult(issue.number, "runner:skipped_stale", Outcome.SKIPPED_STALE, stale_reason, None)
-
-        surface: SurfaceInference | None = None
-        if branch == "none":
-            # A `substrate: none` hypothesis with no runnable pytest
-            # invocation gets a synthesised test file instead of staying
-            # un-runnable.
-            hypothesis = runner_stage.write_synthesized_test_file_if_needed(hypothesis, issue, self.llm, context)
+        if hypothesis.synthesized_test_file is not None:
+            runner_stage.write_test_file(hypothesis.synthesized_test_file, issue_dir)
         # Both scratch-charm branches need a rendered charm before the
-        # runner seam can pack/deploy it. Surface inference
-        # and `scaffold.render_charm()` are substrate-agnostic (render.py
-        # picks a machine- vs k8s-shaped charm from whether
-        # `pebble_service.container` is set), so nothing else here changes.
-        if branch in ("k8s-scratch", "lxd-scratch"):
-            try:
-                surface = self.surface_inferrer.infer(issue, hypothesis)
-            except SurfaceInferenceInvalid as exc:
-                return PipelineResult(issue.number, "surface_inference", None, f"invalid surface inference: {exc}", None)
-            # `expected_signal` is decided by the charm template, not by the
-            # model: `scaffold.expected_signal_for()` reads render.py's own
-            # table. A guessed string can only match by luck: an invented one
-            # is scored against a charm that emits something else entirely.
-            # Applied before the gates below so they see the real value.
-            surface = dataclasses.replace(surface, expected_signal=expected_signal_for(surface))
-            # Before rendering or packing anything: a scratch branch with no
-            # stimulus deploys a charm, pokes nothing, and produces a verdict
-            # about an experiment that never happened. Checked here rather
-            # than after the run, so it costs an LLM call instead of a
-            # substrate bootstrap.
-            has_stimulus, no_stimulus_reason = runner_stage.check_stimulus(branch, surface)
-            if not has_stimulus:
-                return PipelineResult(
-                    issue.number,
-                    "runner:no_stimulus",
-                    Outcome.UNRUNNABLE_NO_STIMULUS,
-                    no_stimulus_reason,
-                    None,
-                    surface=surface,
-                    branch=branch,
-                    hypothesis=hypothesis,
-                )
+        # runner seam can pack/deploy it.
+        if branch in runner_stage.SCRATCH_BRANCHES:
+            assert surface is not None
             charm_dir = self.work_dir / f"charm-{issue.number}"
             try:
                 render_charm(surface, charm_dir, source_issue=issue.number)
@@ -414,23 +519,10 @@ class Pipeline:
                 return PipelineResult(issue.number, "scaffold", None, f"render failed: {exc}", None)
             context["charm_dir"] = str(charm_dir)
 
-        # Pre-run gate: commands[] that aren't shell exit 127 on contact with one, and
-        # the classifier reads that as evidence of a reproduction. Checked
-        # after synthesis, which can repair the sequence.
-        runnable, unrunnable_reason = runner_stage.check_runnable(hypothesis, branch)
-        if not runnable:
-            return PipelineResult(
-                issue.number,
-                "runner:unrunnable_commands",
-                Outcome.UNRUNNABLE_COMMANDS_NOT_SHELL,
-                unrunnable_reason,
-                None,
-            )
-
         run_result: RunResult = self.runner.run(branch=branch, hypothesis=hypothesis, surface=surface, context=context)
         outcome, class_reason = classifier.classify(hypothesis, surface, run_result)
         comment = self.composer.compose(
-            hypothesis, issue, run_result, outcome, class_reason, run_id=run_id, timestamp=timestamp
+            hypothesis, issue, run_result, outcome, class_reason, run_id=plan.run_id, timestamp=plan.timestamp
         )
         return PipelineResult(
             issue.number,

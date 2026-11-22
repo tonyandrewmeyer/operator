@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 import runnability
-from models import Hypothesis, Issue, RunResult, SurfaceInference
+from models import Hypothesis, Issue, RunResult, SurfaceInference, TestFile
 from seams.llm import LLMSeam
 from seams.runner import RunnerSeam, scratch_command_env
 from surface_inference import TestFileSynthesizer, is_pytest_invocation, needs_test_file
@@ -259,10 +259,29 @@ def check_stimulus(branch: str, surface: SurfaceInference | None) -> tuple[bool,
 def write_synthesized_test_file_if_needed(
     hypothesis: Hypothesis, issue: Issue, llm: LLMSeam, context: dict
 ) -> Hypothesis:
+    """`synthesize_test_file_if_needed()`, then write the file it made (if
+    any) into `context["workdir"]`."""
+    hypothesis = synthesize_test_file_if_needed(hypothesis, issue, llm)
+    if hypothesis.synthesized_test_file is not None:
+        write_test_file(hypothesis.synthesized_test_file, Path(context.get("workdir", ".")))
+    return hypothesis
+
+
+def write_test_file(test_file: TestFile, workdir: Path) -> None:
+    """Write a synthesised test file where the run's commands expect it."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / test_file.path).write_text(test_file.body)
+
+
+def synthesize_test_file_if_needed(hypothesis: Hypothesis, issue: Issue, llm: LLMSeam) -> Hypothesis:
     """For `substrate: none` hypotheses with no runnable pytest invocation in
-    `commands[]`, synthesise a test file, write it into the scratch working
-    directory, and swap in the pytest invocation that runs it. Returns
-    `hypothesis` unchanged when no synthesis is needed.
+    `commands[]`, synthesise a test file and swap in the pytest invocation
+    that runs it, without writing anything to disk. Returns `hypothesis`
+    unchanged when no synthesis is needed.
+
+    The model call and the file write are separate so that they can happen
+    in different jobs: the model call where the API key is, the write where
+    the commands run, which holds no secrets.
 
     `llm` is threaded through to `TestFileSynthesizer`: synthesis is an LLM
     call, not a fixed template, so this stage needs the same seam
@@ -278,9 +297,6 @@ def write_synthesized_test_file_if_needed(
     if not needs_test_file(hypothesis):
         return hypothesis
     test_file = TestFileSynthesizer(llm).synthesize(issue, hypothesis)
-    workdir = Path(context.get("workdir", "."))
-    workdir.mkdir(parents=True, exist_ok=True)
-    (workdir / test_file.path).write_text(test_file.body)
     # Keep only genuinely executable setup; drop comment placeholders, the
     # broken pytest invocation being replaced, and prose and bare code
     # fragments. Prose kept as a "setup command" would exit 127 mid-sequence,

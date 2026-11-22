@@ -1,7 +1,7 @@
 """Tests for `../run.py`, the GitHub Actions entry point.
 
-Only one thing in it is worth pinning and easy to get wrong: the REST API
-and the shape `models.Issue.from_dict` reads disagree about nearly every
+Mostly the field mapping, which is easy to get wrong: the REST API and the
+shape `models.Issue.from_dict` reads disagree about nearly every
 field name. `created_at` vs `createdAt`, a nested `user.login` vs a bare
 `author`, lower-case `open` vs upper-case `OPEN` -- and a mistake in any of
 them is silent, because `from_dict` fills a default rather than raising. An
@@ -155,7 +155,7 @@ def gate_stop(run, monkeypatch, tmp_path):
     )
 
     class _Pipeline:
-        def run_for_issue(self, issue, **kwargs):
+        def plan_for_issue(self, issue, **kwargs):
             return _gate_stop_result()
 
     monkeypatch.setattr(run, "fetch_issue", lambda repo, number, token: issue)
@@ -165,7 +165,7 @@ def gate_stop(run, monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     out_dir = tmp_path / "out"
     monkeypatch.setattr(
-        sys, "argv", ["run.py", "--repo", "canonical/operator", "--issue", "2484", "--out-dir", str(out_dir)]
+        sys, "argv", ["run.py", "plan", "--repo", "canonical/operator", "--issue", "2484", "--out-dir", str(out_dir)]
     )
     return out_dir, summary
 
@@ -198,3 +198,56 @@ def test_a_gate_stop_puts_the_record_in_the_job_summary(run, gate_stop):
     text = summary.read_text()
     assert "second pass: ran" in text
     assert "provider=DeepSeek" in text
+
+
+# -- one subcommand per job ----------------------------------------------
+
+
+def test_execute_refuses_to_start_with_a_secret_set(run, monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "execute", "--plan", str(tmp_path / "plan.json"), "--out-dir", str(tmp_path)]
+    )
+    with pytest.raises(SystemExit, match="OPENROUTER_API_KEY"):
+        run.main()
+
+
+def test_plan_writes_the_plan_and_says_so(run, monkeypatch, tmp_path):
+    from pipeline import RunPlan
+    from test_plan_execute_split import _plan
+
+    planned = _plan(tmp_path, 2045)
+
+    class _Pipeline:
+        def plan_for_issue(self, issue, **kwargs):
+            return planned
+
+    monkeypatch.setattr(run, "fetch_issue", lambda repo, number, token: planned.issue)
+    monkeypatch.setattr(run, "build_pipeline", lambda **kwargs: _Pipeline())
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "plan", "--repo", "canonical/operator", "--issue", "2045", "--out-dir", str(out_dir)]
+    )
+    assert run.main() == 0
+    import json as _json
+
+    assert RunPlan.from_dict(_json.loads((out_dir / "2045-plan.json").read_text())) == planned
+    assert output.read_text() == "planned=true\n"
+
+
+def test_post_with_no_comment_posts_nothing(run, monkeypatch, tmp_path):
+    def _no_network(*args, **kwargs):
+        raise AssertionError("post reached the network with nothing to post")
+
+    monkeypatch.setattr(run, "_request", _no_network)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run.py", "post", "--repo", "canonical/operator", "--issue", "2045", "--comment", str(tmp_path / "2045.md")],
+    )
+    assert run.main() == 0

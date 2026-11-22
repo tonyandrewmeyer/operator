@@ -183,6 +183,17 @@ class LiveOpenRouterLLM:
             ) from exc
 
 
+class NoLLM:
+    """The seam for `Pipeline.execute_plan()`, which runs without the key and
+    should never reach a model. A call is a bug, so it raises."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def complete_json(self, *, purpose: str, prompt: str, context: dict) -> dict:
+        raise LLMError(f"{purpose}: no model calls are allowed after planning")
+
+
 class FixtureLLM:
     """Replays recorded LLM outputs. No network, no key required."""
 

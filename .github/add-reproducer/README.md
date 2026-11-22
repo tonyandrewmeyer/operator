@@ -11,8 +11,8 @@ test suite, or any charm; it is a tool that reads this repository's issues.
 
 ```
 .github/add-reproducer/
-  run.py            the workflow's entry point: fetch one issue, run the
-                    pipeline, optionally post the comment it composes
+  run.py            the workflow's entry point, one subcommand per job:
+                    plan, execute, post
   harness/          the pipeline itself, and its test suite
   scratch-charm/    the parameterised scratch charm the runner deploys
 ```
@@ -20,6 +20,23 @@ test suite, or any charm; it is a tool that reads this repository's issues.
 `harness/README.md` is the detailed description: the stages, what each one
 can and cannot do, how to run the whole thing locally, and what is still
 open.
+
+## Who can see what
+
+The reproduction runs commands derived from the issue body, so anyone who
+can open an issue can choose what runs. The workflow is split into three
+jobs so that the job running those commands has nothing worth taking:
+
+- `plan` fetches the issue and makes every model call. It has the
+  OpenRouter key and read access to issues, and runs nothing from the
+  issue. Its output is a JSON plan.
+- `reproduce` runs the plan, classifies what happened, and composes the
+  comment. It has no secrets, no write access and no uv cache, and
+  `run.py execute` refuses to start if either secret is in its environment.
+- `post` posts the composed comment. It has `issues: write` and nothing
+  else, and posts only to the issue the run was triggered for. The comment
+  itself comes out of `reproduce`, so the most the issue's author can do
+  through it is put words in a comment on their own issue.
 
 ## Trying it by hand
 
@@ -55,3 +72,11 @@ when the commands it produced are not runnable shell, or when the attempt
 ran and did not reproduce anything. A wrong comment on a maintainer's issue
 costs more than a missing one, so every gate in the pipeline is built to
 fail towards saying nothing.
+
+One shape is always silent: a report whose only evidence is a link to a
+failed CI run, with no local steps. It routes to the `k8s-clone` branch and
+is dropped there with `commands[] is empty`. Building a reproduction from a
+CI run would mean either re-reading output the reporter has already seen,
+or guessing the failing invocation and running it, which is what the
+runnability gate exists to stop. Adding local reproduction steps to the
+issue is the way to get a comment on one of these.

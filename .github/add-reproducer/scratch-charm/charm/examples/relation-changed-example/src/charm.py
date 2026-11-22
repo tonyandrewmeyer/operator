@@ -13,7 +13,18 @@ class ReproducerCharm(ops.CharmBase):
 
     def __init__(self, framework: ops.Framework):
         super().__init__(framework)
+        framework.observe(self.on.start, self._ready)
         framework.observe(self.on.db_relation_changed, self._observe)
+
+    def _ready(self, event: ops.EventBase) -> None:
+        """Mark the unit up and observing.
+
+        Nothing else sets a status before the surface fires, so without
+        this a runner cannot tell a charm that is ready from one still
+        installing -- and stimulating too early records the event before
+        the observer is listening.
+        """
+        self.unit.status = ops.ActiveStatus("reproducer ready")
 
     def _observe(self, event: ops.EventBase) -> None:
         """Surface whatever the reported bug is about, for inspection.

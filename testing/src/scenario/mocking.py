@@ -908,6 +908,7 @@ class _MockPebbleClient(_TestingPebbleClient):
                 self._changes[check.change_id] = change
 
     def get_plan(self) -> pebble.Plan:
+        self._check_connection()
         return self._container.plan
 
     def _update_state_check_infos(self):

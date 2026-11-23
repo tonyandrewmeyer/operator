@@ -1824,6 +1824,38 @@ def test_check_failure_shutdown_needs_the_check_to_go_down():
     assert state_out.get_container('foo').can_connect
 
 
+def test_get_plan_raises_connection_error_when_container_cannot_connect():
+    container = Container('foo', can_connect=False, layers={'layer1': CHECK_FAILURE_LAYER})
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        with pytest.raises(ops.pebble.ConnectionError):
+            workload.get_plan()
+
+
+def test_get_plan_raises_connection_error_after_shutdown():
+    container = Container(
+        'foo',
+        can_connect=True,
+        layers={'layer1': _check_shutdown_layer('shutdown')},
+        service_statuses={
+            'guarded': ops.pebble.ServiceStatus.ACTIVE,
+            'restarted': ops.pebble.ServiceStatus.ACTIVE,
+        },
+        check_infos=frozenset({CheckInfo('chk1')}),
+        check_behaviours=frozenset({
+            CheckBehaviour('chk1', statuses=[ops.pebble.CheckStatus.DOWN])
+        }),
+    )
+    ctx = Context(Charm, meta={'name': 'foo', 'containers': {'foo': {}}})
+    with ctx(ctx.on.start(), State(containers={container})) as mgr:
+        workload = mgr.charm.unit.get_container('foo')
+        assert 'guarded' in workload.get_plan().services
+        assert workload.get_check('chk1').status == ops.pebble.CheckStatus.DOWN
+        with pytest.raises(ops.pebble.ConnectionError):
+            workload.get_plan()
+
+
 def test_charm_invoked_ops_have_no_cause():
     """A charm's own restart is recorded with caused_by unset."""
 

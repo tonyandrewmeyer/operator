@@ -14,6 +14,20 @@ packages rewritten (to the two small stand-ins in `internal/errors` and
 `internal/coreerrors`). `scripts/check-juju-copy.sh /path/to/juju [ref]`
 diffs them, and the starform/starlark pins, against a Juju checkout.
 
+## Licence
+
+The runner is licensed under the GNU Affero General Public License v3.0
+only (`AGPL-3.0-only`); the full text is in `LICENSE`. Unlike the rest of
+this repository, which is Apache-2.0, because the runner contains Juju's
+code: `internal/unitless/` and `internal/domainunitless/` are copies of
+files from [juju/juju](https://github.com/juju/juju) (AGPLv3), taken at the
+commit recorded as `JujuCommit` in `main.go` and named at the top of each
+copied file, and `runner version` reports that commit.
+
+The `ops-testing-scriptlets` wheels bundle the compiled runner as a
+separate program that the Python package starts and talks to over pipes, so
+the wheels are `Apache-2.0 AND AGPL-3.0-only` and carry both licence texts.
+
 ## Build and test
 
 ```

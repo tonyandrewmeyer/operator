@@ -77,6 +77,16 @@ Installed with the package (entry point `pytest11`). It adds:
   succeeded used more than that fraction of the step limit (load or event).
   `scriptlet_measure = true` measures and reports without failing anything.
 
+## Licence
+
+The Python package is Apache-2.0 (`LICENSE.txt`). The runner it bundles is
+a separate program, licensed under the AGPLv3 (`runner/LICENSE`) because it
+contains copies of Juju's code, so the wheels are
+`Apache-2.0 AND AGPL-3.0-only`. The runner's source is in
+[`scriptlets/runner`](https://github.com/canonical/operator/tree/main/scriptlets/runner),
+and `runner version` (also in the pytest report header) names the
+[juju/juju](https://github.com/juju/juju) commit its copies come from.
+
 ## Development
 
 ```

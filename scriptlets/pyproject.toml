@@ -8,7 +8,10 @@ version = "0.0.1.dev0"
 description = "Unit-test Juju scriptlet (unitless) charms with Juju's own executor code."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "Apache-2.0"
+# The Python package is Apache-2.0; the runner binary that the wheels bundle
+# is a separate program under the AGPLv3, because it contains Juju's code.
+license = "Apache-2.0 AND AGPL-3.0-only"
+license-files = ["LICENSE.txt", "runner/LICENSE"]
 authors = [
     {name="The Charm Tech team at Canonical Ltd."},
 ]

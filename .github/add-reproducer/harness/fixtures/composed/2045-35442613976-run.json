@@ -1,0 +1,71 @@
+{
+  "branch": "none",
+  "hypothesis": {
+    "issue_number": 2045,
+    "in_scope": true,
+    "moving_parts": {
+      "repo_version": null,
+      "juju_version": null,
+      "base": null,
+      "substrate": "none",
+      "other": {},
+      "ci_run_url": null,
+      "symbol_anchor": null
+    },
+    "commands": [
+      "uv init --bare .",
+      "uv add 'ops[testing]'",
+      "cat > test_cwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    pass\n\nmeta = {'name': 'my-charm'}\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta=meta)\n    with ctx(ctx.on.update_status(), testing.State()) as mgr:\n        assert os.getcwd() == '/path/to/charm/root'\nPYEOF",
+      "uv run pytest test_cwd.py -v"
+    ],
+    "expected": "The current directory should be the charm root.",
+    "observed": "The current directory is the repository root, not the charm root.",
+    "confidence": "medium",
+    "synthesized_test_file": null
+  },
+  "surface": null,
+  "hypothesis_number": 2045,
+  "commands": [
+    {
+      "command": "uv init --bare .",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "Adding `repro` as member of workspace `/tmp/add-reproducer-scratch-fdj0_72u/issue-2045`\nInitialized project `repro` at `/tmp/add-reproducer-scratch-fdj0_72u/issue-2045/repro`\n",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.008
+    },
+    {
+      "command": "uv add 'ops[testing]'",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "Resolved 16 packages in 217ms\nInstalled 6 packages in 3ms\n + opentelemetry-api==1.44.0\n + ops==3.8.2\n + ops-scenario==8.8.2\n + pyyaml==6.0.3\n + typing-extensions==4.16.0\n + websocket-client==1.9.2\n",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.275
+    },
+    {
+      "command": "cat > test_cwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    pass\n\nmeta = {'name': 'my-charm'}\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta=meta)\n    with ctx(ctx.on.update_status(), testing.State()) as mgr:\n        assert os.getcwd() == '/path/to/charm/root'\nPYEOF",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.003
+    },
+    {
+      "command": "uv run pytest test_cwd.py -v",
+      "exit_code": 1,
+      "stdout": "============================= test session starts ==============================\nplatform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /tmp/add-reproducer-scratch-fdj0_72u/issue-2045/.venv/bin/python\ncachedir: .pytest_cache\nrootdir: /tmp/add-reproducer-scratch-fdj0_72u/issue-2045/repro\nconfigfile: pyproject.toml\ncollecting ... collected 1 item\n\ntest_cwd.py::test_cwd_is_charm_root FAILED                               [100%]\n\n=================================== FAILURES ===================================\n____________________________ test_cwd_is_charm_root ____________________________\n\n    def test_cwd_is_charm_root():\n        ctx = testing.Context(MyCharm, meta=meta)\n        with ctx(ctx.on.update_status(), testing.State()) as mgr:\n>           assert os.getcwd() == '/path/to/charm/root'\nE           AssertionError: assert '/tmp/add-rep...ue-2045/repro' == '/path/to/charm/root'\nE             \nE             - /path/to/charm/root\nE             + /tmp/add-reproducer-scratch-fdj0_72u/issue-2045/repro\n\ntest_cwd.py:14: AssertionError\n------------------------------ Captured log call -------------------------------\nDEBUG    root:_main.py:340 ops 3.8.2 up and running.\nDEBUG    root:storage.py:70 Initializing SQLite local storage: :memory:.\nDEBUG    root:_main.py:476 Emitting Juju event update_status.\n=========================== short test summary info ============================\nFAILED test_cwd.py::test_cwd_is_charm_root - AssertionError: assert '/tmp/add-rep...ue-2045/repro' == '/path/to/charm/root'\n  \n  - /path/to/charm/root\n  + /tmp/add-reproducer-scratch-fdj0_72u/issue-2045/repro\n============================== 1 failed in 0.33s ===============================\n",
+      "stderr": "",
+      "log_records": [],
+      "step": null,
+      "elapsed_s": 0.772
+    }
+  ],
+  "control": null,
+  "aborted_at_step": null,
+  "skipped_steps": [],
+  "observed_juju_version": null,
+  "observed_ops_version": "3.8.2"
+}

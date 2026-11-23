@@ -1,0 +1,191 @@
+[
+  {
+    "source": "retry-2709.json",
+    "run": 0,
+    "test_file": {
+      "path": "test_gone_relation.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        for relation in self.model.relations.keys():\n            captured[relation] = self.model.relations[relation].data\n\ndef test_gone_relation_loads_empty():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    state = testing.State(relations={\n        'db': testing.Relation(endpoint='db', interface='db', remote_apps={'provider': None})\n    })\n    ctx.run(ctx.on.start(), state)\n    for relation in captured:\n        assert captured[relation] == {}"
+    }
+  },
+  {
+    "source": "retry-2709.json",
+    "run": 1,
+    "test_file": {
+      "path": "test_relation_error_handling.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        self.framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        relation = self.model.get_relation('db')\n        if relation:\n            _ = relation.data[relation.app]\n\ncaptured = {}\n\ndef test_relation_error_handling():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    state = testing.State(relations=[('db', {'db:2': {'app': 'provider'}})])\n    ctx.run(ctx.on.start(), state)\n    assert captured == {}  # Expect no crash, databags should read as empty"
+    }
+  },
+  {
+    "source": "retry-2709.json",
+    "run": 2,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        self.framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.framework.model.get_relation('db').data[self.app]['foo'] = 'bar'\n\ndef test_relation_get_raises_relation_not_found():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'},\n                          state=testing.State(relations=[('db', {'provider'})]))\n    with pytest.raises(ops.RelationNotFoundError):\n        ctx.run(ctx.on.start())"
+    }
+  },
+  {
+    "source": "retry-2709.json",
+    "run": 3,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\nfrom ops.model import ModelError, RelationNotFoundError\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        try:\n            self.model._backend.relation_get(1, 'unit/0', False)\n        except ModelError as e:\n            if 'permission denied' in str(e).lower():\n                raise RelationNotFoundError('relation 1')\n\n\ncaptured = {}\n\nclass MyProxyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        try:\n            self.model._backend.relation_get(1, 'unit/0', False)\n        except ModelError as e:\n            captured['error'] = e\n\n\ndef test_relation_get_raises_relation_not_found():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    with pytest.raises(RelationNotFoundError):\n        ctx.run(ctx.on.update_status(), testing.State())\n\n\ndef test_relation_get_raises_model_error():\n    ctx = testing.Context(MyProxyCharm, meta={'name': 'my-proxy-charm'})\n    ctx.run(ctx.on.update_status(), testing.State())\n    assert isinstance(captured['error'], ModelError)\n    assert 'permission denied' in str(captured['error']).lower()"
+    }
+  },
+  {
+    "source": "retry-2709.json",
+    "run": 4,
+    "test_file": {
+      "path": "test_gone_relation.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        # Simulate a relation that exists but is gone\n        captured['relation_data'] = self.model.get_relation('db', 1).data[self.model.app]\n\ndef test_gone_relation_returns_empty_dict():\n    ctx = testing.Context(\n        MyCharm,\n        meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}},\n        actions={},\n        relations={'db': {'providers': [{'name': 'provider', 'units': {}}]}}\n    )\n    ctx.run(ctx.on.start(), testing.State(relations={'db': {}}))\n    assert captured['relation_data'] == {}"
+    }
+  },
+  {
+    "source": "retry-2709.json",
+    "run": 5,
+    "test_file": {
+      "path": "test_gone_relation.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        try:\n            captured['data'] = self.model.relations['db'][0].data[self.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n\ndef test_gone_relation_raises_relation_not_found():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    state = testing.State([\n        testing.StateRelation('db', 0, 'provider'),\n        testing.StateRelation('db', 1, 'provider')\n    ])\n    ctx.run(ctx.on.start(), state)\n    assert 'permission denied' in captured.get('error', '').lower()"
+    }
+  },
+  {
+    "source": "retry-2709.json",
+    "run": 6,
+    "test_file": {
+      "path": "test_stuck_relation.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        # Accessing a stuck relation's databag\n        try:\n            self.model.get_relation('dbc').data[self.model.app]\n        except ops.ModelError as e:\n            self.captured_error = e\n\ncaptured_error = {}\n\ndef test_stuck_relation_error_is_relation_not_found():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'dbc': {'interface': 'dbc'}}})\n    state = testing.State(relations=[{'dbc': {'active': True}}])\n    ctx.run(ctx.on.update_status(), state)\n    assert isinstance(captured_error.get('error'), ops.RelationNotFoundError)"
+    }
+  },
+  {
+    "source": "retry-2709.json",
+    "run": 7,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        for relation in self.model.relations['db']:\n            _ = relation.data[relation.app]\n\ncaptured = {}\n\nclass FakeJujuError(Exception):\n    pass\n\ndef test_relation_error_mapping():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    state = testing.State()\n    state.relations['db'] = {'2': {'app': 'provider', 'units': {}}}\n    ctx.hook_tools['relation-get'] = lambda *a, **k: exec('raise FakeJujuError(\"ERROR permission denied\")')\n    ctx.hook_tools['relation-list'] = lambda *a, **k: 'provider'\n    ctx.run(ctx.on.start(), state)"
+    }
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 0,
+    "test_file": null
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 1,
+    "test_file": {
+      "path": "test_relation_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        try:\n            relation = self.model.get_relation('db')\n            captured['data'] = relation.data[self.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n\ndef test_relation_data_loads_empty_on_permission_denied():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    ctx.run(ctx.on.update_status(), testing.State(relations={'db': {'provider': {}}}))\n    assert captured.get('data', {}) == {}"
+    }
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 2,
+    "test_file": {
+      "path": "test_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        for relation in self.model.relations['db']:\n            captured[relation.id] = relation.data[relation.app]\n\n\ndef test_permission_denied_handling():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}}),\n    state = testing.State(relations={'db': [(2, 'provider')]}),\n    ctx.run(ctx.on.update_status(), state)\n    assert captured[2] == {}"
+    }
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 3,
+    "test_file": {
+      "path": "test_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        try:\n            rel = self.model.get_relation('db')\n            captured['data'] = rel.data[self.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n\ndef test_permission_denied_maps_to_relation_not_found():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured.get('error') == 'relation not found', f\"Expected 'relation not found', got {captured.get('error')}\""
+    }
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 4,
+    "test_file": {
+      "path": "test_relation_gone.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        try:\n            relation = self.model.get_relation(\"db\")\n            captured[\"relation_data\"] = relation.data[self.app]\n        except ops.ModelError as e:\n            captured[\"error\"] = str(e)\n\ndef test_relation_gone_raises_relation_not_found_error():\n    ctx = testing.Context(MyCharm, meta={\"name\": \"my-charm\", \"requires\": {\"db\": {\"interface\": \"mysql\"}}})\n    ctx.run(ctx.on.start(), testing.State(relations=[\n        {\"db\": {\"active\": False, \"requires\": {\"my-charm\": {}}, \"provides\": {\"provider\": {}}}}\n    ]))\n    assert captured.get(\"error\", \"\").lower() == \"relation not found\""
+    }
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 5,
+    "test_file": {
+      "path": "test_relation_gone.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        for relation in self.model.relations['db']:\n            _ = relation.data[relation.app]\n\ndef test_relation_gone_permission_denied():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'dummy'}}})\n    state = testing.State(relations=[{'db': {'remote_app': 'provider', 'active': False}}])\n\n    ctx.hook_tool_output = lambda *_: 'ERROR permission denied', 1\n\n    with ctx(ctx.on.update_status(), state) as mgr:\n        with pytest.raises(ops.ModelError):\n            mgr.run()"
+    }
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 6,
+    "test_file": {
+      "path": "test_relation_get.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        try:\n            self.model.get_relation('relation-that-does-no-exist').data[self.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n        except Exception as e:\n            captured['error'] = str(e)\n\ndef test_relation_get_raises_model_error():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.update_status(), testing.State())\n    assert 'ModelError' in captured['error']"
+    }
+  },
+  {
+    "source": "retry-testing-names-2709.json",
+    "run": 7,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        # Attempt to read from a relation that no longer exists\n        try:\n            relation = self.model.get_relation('does-not-exist')\n            if relation:\n                captured['data'] = relation.data[self.app]\n        except ops.model.RelationNotFoundError:\n            captured['error'] = 'RelationNotFoundError'\n        except ops.model.ModelError:\n            captured['error'] = 'ModelError'\n\ndef test_relation_error_handling():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'does-not-exist': {'interface': 'http'}}})\n    ctx.run(ctx.on.start(), testing.State(relations={'does-not-exist': {'app': None}}))\n    assert captured.get('error') == 'RelationNotFoundError', f\"Expected RelationNotFoundError, got {captured.get('error')}\""
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 0,
+    "test_file": {
+      "path": "test_relation_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        try:\n            captured['data'] = self.model.get_relation('db').data[self.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n\n\n\ndef test_relation_permission_denied_returns_empty_dict():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    ctx.run(ctx.on.update_status(), testing.State(relations=['db']))\n    assert captured.get('data') == {}"
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 1,
+    "test_file": {
+      "path": "test_relation_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        for relation in self.model.relations.get('db', []):\n            captured['data'] = relation.data.get(relation.app, {})\n\n\ndef test_relation_permission_denied():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    state = testing.State(relations=[{'name': 'db', 'relation_id': 2, 'app': 'provider', 'units': {}}])\n    ctx.run(ctx.on.start(), state)\n    assert captured.get('data', {}) == {}"
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 2,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.config_changed, self._on_config_changed)\n\n    def _on_config_changed(self, event):\n        try:\n            relation = self.model.get_relation('db')\n            captured['relation_data'] = relation.data[self.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n\ndef test_permission_denied_mapped_to_relation_not_found_error():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    state = testing.State(relations={'db': {}})\n    ctx.run(ctx.on.config_changed(), state)\n    assert 'error' not in captured, f\"Expected no error, got {captured['error']}\""
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 3,
+    "test_file": {
+      "path": "test_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        relation = self.model.get_relation('db')\n        if relation:\n            relation.data[self.app]\n\ndef test_permission_denied_maps_to_relation_not_found_error():\n    ctx = testing.Context(\n        MyCharm,\n        meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}}\n    )\n    state = testing.State(\n        relations=[\n            {\n                'name': 'db',\n                'interface': 'db',\n                'remote_app_name': 'provider',\n                'stray': True\n            }\n        ]\n    )\n    ctx.run(ctx.on.update_status(), state)\n    assert True"
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 4,
+    "test_file": {
+      "path": "test_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        try:\n            captured['data'] = self.model.get_relation('db').data[self.model.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n\ndef test_permission_denied_maps_to_relation_not_found():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert 'permission denied' in captured['error'].lower()"
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 5,
+    "test_file": {
+      "path": "test_relation_permission_denied.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.update_status, self._on_update_status)\n\n    def _on_update_status(self, event):\n        relation = self.model.get_relation('db')\n        if relation:\n            captured['data'] = relation.data[relation.app]\n\n\ndef test_relation_get_permission_denied():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    state = testing.State(relations=[[]])\n    ctx.run(ctx.on.update_status(), state)\n    assert captured.get('data', {}) == {}"
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 6,
+    "test_file": {
+      "path": "test_relation_permission_denied.py",
+      "body": "import pytest\nfrom ops import testing\nfrom ops.charm import CharmBase\nfrom ops.model import ModelError, RelationNotFoundError\n\ncaptured = {}\n\nclass MyCharm(CharmBase):\n    def __init__(self, *args):\n        super().__init__(*args)\n        self.framework.observe(self.on.start, self._on_start)\n    \n    def _on_start(self, event):\n        try:\n            relation = self.model.get_relation('db')\n            captured['relation_data'] = relation.data[relation.app]\n        except ModelError as e:\n            captured['error'] = str(e)\n\ndef test_permission_denied_is_relation_not_found():\n    ctx = testing.Context(\n        MyCharm,\n        meta={'name': 'my-charm', 'requires': {'db': {'interface': 'database'}}}\n    )\n    relation_id = 2\n    ctx.run(\n        ctx.on.start(),\n        testing.State(relations=[('db', relation_id, {'remote_app_name': 'provider'})])\n    )\n    assert 'error' in captured\n    assert 'permission denied' in captured['error'].lower()"
+    }
+  },
+  {
+    "source": "retry-gate-2709.json",
+    "run": 7,
+    "test_file": {
+      "path": "test_relation_error.py",
+      "body": "import pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.config_changed, self._on_config_changed)\n\n    def _on_config_changed(self, event):\n        relation = self.model.get_relation('db')\n        try:\n            captured['data'] = relation.data[relation.app]\n        except ops.ModelError as e:\n            captured['error'] = str(e)\n\n\ndef test_permission_denied_mapped_to_relation_not_found():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm', 'requires': {'db': {'interface': 'db'}}})\n    ctx.run(ctx.on.config_changed(), testing.State(relations={'db': {'provider': {}}}))\n    assert captured.get('error', '').lower() == 'relation not found'"
+    }
+  }
+]

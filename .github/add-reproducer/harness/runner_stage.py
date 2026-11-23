@@ -1,0 +1,317 @@
+"""Reproduction runner orchestration.
+
+Three deterministic pieces, none of which need an LLM call:
+
+- the skip-when-almost-certainly-stale gate (two triggers, both yield
+  `skipped_stale`, never reaching the runner seam at all);
+- the third-branch trigger heuristic (route to the clone-repo branch iff
+  `ci_run_url` is set and there's no self-contained repro snippet);
+- dispatch to the runner seam for whichever branch was chosen.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import re
+import subprocess
+from pathlib import Path
+
+import runnability
+from models import Hypothesis, Issue, RunResult, SurfaceInference, TestFile
+from seams.llm import LLMSeam
+from seams.runner import RunnerSeam, scratch_command_env
+from surface_inference import TestFileSynthesizer, is_pytest_invocation, needs_test_file
+
+_SNIPPET_MARKERS = ("import ops", "import scenario")
+
+
+def has_self_contained_snippet(commands: list[str]) -> bool:
+    """A self-contained Python repro snippet in `commands` (the #2327/#2341/
+    #2639 shape) vs. no such snippet, only a CI-run reference (#2484's
+    shape)."""
+    joined = "\n".join(commands)
+    return any(marker in joined for marker in _SNIPPET_MARKERS)
+
+
+def is_stale(hypothesis: Hypothesis, issue: Issue, runner_seam: RunnerSeam, context: dict) -> tuple[bool, str | None]:
+    """The skip-when-almost-certainly-stale gate.
+
+    Both triggers yield the same `skipped_stale` verdict -- distinct from
+    `did_not_reproduce` so the composer never composes a "could not
+    reproduce" comment for either case.
+
+    "Almost certainly" is the whole of the second trigger's licence. It is a
+    silent skip with no downstream appeal, so `resolve_symbol()` returning
+    `False` has to be a positive finding that the symbol is gone; a seam that
+    could not look answers `True` and the hypothesis goes to the runner. See
+    `SubprocessRunnerSeam.resolve_symbol()` for why that distinction
+    matters on GHA.
+    """
+    mp = hypothesis.moving_parts
+    if mp.repo_version is None and issue.state == "CLOSED":
+        return True, "repo_version is null and issue is CLOSED (#2341, #2327 -- 2/2 on this pattern)"
+    if mp.symbol_anchor and not runner_seam.resolve_symbol(mp.symbol_anchor, context):
+        return (
+            True,
+            f"symbol_anchor {mp.symbol_anchor!r} does not resolve against target main "
+            "(extraction is pinned to an API surface that no longer exists)",
+        )
+    return False, None
+
+
+def choose_branch(hypothesis: Hypothesis) -> str:
+    """The substrate/third-branch dispatch.
+
+    Dispatch is explicit on all three substrates: an unrecognised or absent
+    value raises rather than falling through. Falling through to
+    `k8s-scratch` would mean a `substrate: null` extraction silently
+    provisioned a cluster it had no use for. `extraction.validate()` rejects
+    such extractions up front, so reaching this raise means a `Hypothesis`
+    was built by some path that bypassed validation.
+    """
+    mp = hypothesis.moving_parts
+    if mp.substrate == "none":
+        return "none"
+    if mp.substrate not in ("lxd", "k8s"):
+        raise ValueError(
+            f"cannot choose a runner branch for substrate {mp.substrate!r} "
+            "(expected 'none', 'lxd' or 'k8s'); the extraction should have "
+            "been rejected by extraction.validate()"
+        )
+    if mp.ci_run_url and not has_self_contained_snippet(hypothesis.commands):
+        return "k8s-clone"
+    if mp.substrate == "lxd":
+        return "lxd-scratch"
+    return "k8s-scratch"
+
+
+# Branches whose runner executes `hypothesis.commands` through a shell, and so
+# need the runnability gate. The scratch branches build their own sequence
+# from the rendered scaffold and `surface`, so `commands[]` isn't the recipe
+# there; if they ever run it, its `<unit>`-style placeholders need templating
+# first.
+COMMAND_EXECUTING_BRANCHES = frozenset({"none", "k8s-clone"})
+
+
+@dataclasses.dataclass
+class RunnerStageResult:
+    branch: str | None
+    skipped_stale: bool
+    skip_reason: str | None
+    run_result: RunResult | None
+    unrunnable_reason: str | None = None
+
+
+def check_runnable(hypothesis: Hypothesis, branch: str) -> tuple[bool, str | None]:
+    """Pre-run gate: are `commands[]` executable shell at all?
+
+    Returns `(ok, reason)`. Called after test-file synthesis, which can
+    legitimately repair an otherwise un-runnable `commands[]`, and only for
+    branches that actually shell out to `commands[]`.
+    """
+    if branch not in COMMAND_EXECUTING_BRANCHES:
+        return True, None
+    report = runnability.assess(hypothesis.commands)
+    return report.runnable, None if report.runnable else report.reason
+
+
+# Branches that build their command sequence from `surface`, not from
+# `hypothesis.commands`, and whose whole point is the stimulus.
+SCRATCH_BRANCHES = frozenset({"k8s-scratch", "lxd-scratch"})
+
+# The private uv workspace root each `none`-branch issue gets, one directory
+# above where its commands run. uv walks up looking for a workspace root, so
+# without one the extraction's `uv init --bare .` would adopt the harness
+# project and install into its venv. This keeps the command strings unchanged.
+# It carries pytest because most extractions install only `ops[testing]` and
+# relied on the harness venv for pytest.
+_SCRATCH_PROJECT_PYPROJECT = """\
+[project]
+name = "add-reproducer-scratch"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest"]
+"""
+
+# Where an issue's commands run, relative to its private workspace root.
+SCRATCH_WORK_SUBDIR = "repro"
+
+
+def prepare_scratch_project(issue_dir: Path) -> Path:
+    """Lay out `issue_dir` as a private uv workspace root and return the
+    directory the issue's commands should run in.
+
+    `issue_dir/pyproject.toml` is the root, `issue_dir/repro` is the working
+    directory, and the root's environment is synced ahead of the run so the
+    dev `pytest` is there before the extraction's own `uv add` populates the
+    same venv alongside it. Sync order matters: `uv add` from a member syncs
+    that member only, so a pytest that is not already present when it runs
+    never arrives.
+
+    Best-effort by design, like every other environment probe in this
+    harness. No uv on PATH, no network, a sync that fails or hangs -- all
+    leave the working directory in place and let the run proceed to say
+    something true about what happened, rather than aborting over scratch
+    setup."""
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    workdir = issue_dir / SCRATCH_WORK_SUBDIR
+    workdir.mkdir(parents=True, exist_ok=True)
+    pyproject = issue_dir / "pyproject.toml"
+    if not pyproject.exists():
+        pyproject.write_text(_SCRATCH_PROJECT_PYPROJECT)
+    try:
+        subprocess.run(
+            ["uv", "sync"],
+            cwd=str(issue_dir),
+            capture_output=True,
+            timeout=300,
+            text=True,
+            env=scratch_command_env(str(scratch_environment(issue_dir))),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return workdir
+
+
+def scratch_environment(issue_dir: Path) -> Path:
+    """The virtualenv an issue's scratch project owns.
+
+    Named rather than left to uv's directory walk, and passed to every uv
+    command this branch runs, because the walk is not the only thing that
+    decides the answer -- see `seams/runner.py:scratch_command_env()`."""
+    return issue_dir / ".venv"
+
+# Does a setup command actually establish a Python environment to run in?
+# `uv init`/`uv venv` create one; `uv add`/`uv pip install` populate one.
+# Anything else (a `cd`, a `git clone`, an `export`) does not.
+_ESTABLISHES_ENVIRONMENT_RE = re.compile(r"\buv\s+(init|venv|add|pip\s+install)\b|\bpip\s+install\b")
+
+
+def check_stimulus(branch: str, surface: SurfaceInference | None) -> tuple[bool, str | None]:
+    """Pre-run gate: a scratch-charm branch with no stimulus to run.
+
+    `seams/runner.py`'s `_scratch_sequence()` builds the stimulus only when
+    surface inference hands over both a pebble `user` and a pebble
+    `command`, and the control only when there is a stimulus to control
+    against. When either is missing it silently builds neither -- and the
+    run would go on to `concierge prepare`, `charmcraft pack` and `juju
+    deploy` (13+ minutes), poke the deployed charm with nothing at all, then
+    hand the classifier a run whose "expected signal absent" is a statement
+    about an experiment that was never performed.
+
+    Live surface inference returns `pebble_service.command: null` for
+    `#2639` repeatably, so this is the common case rather than a corner.
+    Gated here, next to `check_runnable`, so it costs nothing instead of
+    costing a substrate bootstrap.
+
+    Keyed on `expected_signal`, matching the rung it protects: only
+    `classifier.py`'s positive-signal-absent rung reasons from a signal's
+    absence, and it fires only when `expected_signal` is set. A hypothesis
+    with no expected signal is a deploy-only experiment -- `#2107`, a
+    machine charm that errors during update-status with `pebble_service:
+    {}`, is the real corpus case -- and gating that would reject a run
+    whose stimulus *is* the deploy.
+    """
+    if branch not in SCRATCH_BRANCHES:
+        return True, None
+    if not (surface and surface.expected_signal):
+        return True, None
+    pebble = dict(surface.pebble_service) if surface else {}
+    missing = [field for field in ("user", "command") if not pebble.get(field)]
+    if not missing:
+        return True, None
+    return False, (
+        f"surface inference promised the signal {surface.expected_signal!r} but gave no "
+        f"pebble {' or '.join(missing)}, so the {branch} sequence would deploy a charm, "
+        "stimulate nothing, and then check whether the signal appeared"
+    )
+
+
+def write_synthesized_test_file_if_needed(
+    hypothesis: Hypothesis, issue: Issue, llm: LLMSeam, context: dict
+) -> Hypothesis:
+    """`synthesize_test_file_if_needed()`, then write the file it made (if
+    any) into `context["workdir"]`."""
+    hypothesis = synthesize_test_file_if_needed(hypothesis, issue, llm)
+    if hypothesis.synthesized_test_file is not None:
+        write_test_file(hypothesis.synthesized_test_file, Path(context.get("workdir", ".")))
+    return hypothesis
+
+
+def write_test_file(test_file: TestFile, workdir: Path) -> None:
+    """Write a synthesised test file where the run's commands expect it."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / test_file.path).write_text(test_file.body)
+
+
+def synthesize_test_file_if_needed(hypothesis: Hypothesis, issue: Issue, llm: LLMSeam) -> Hypothesis:
+    """For `substrate: none` hypotheses with no runnable pytest invocation in
+    `commands[]`, synthesise a test file and swap in the pytest invocation
+    that runs it, without writing anything to disk. Returns `hypothesis`
+    unchanged when no synthesis is needed.
+
+    The model call and the file write are separate so that they can happen
+    in different jobs: the model call where the API key is, the write where
+    the commands run, which holds no secrets.
+
+    `llm` is threaded through to `TestFileSynthesizer`: synthesis is an LLM
+    call, not a fixed template, so this stage needs the same seam
+    `Extractor`/`SurfaceInferrer`/`Composer` use.
+
+    Genuine setup commands (`uv venv`/`uv init`/`uv add`/`uv pip install`)
+    are kept; comment-only placeholders and any pytest invocation are
+    dropped before appending the real one -- #2045's actual extraction has
+    both a `# write test_cwd.py: ...` comment *and* a `pytest test_cwd.py`
+    invocation that would fail outright (no such file exists) if run
+    as-is, since `test_cwd.py` was never anything but a comment.
+    """
+    if not needs_test_file(hypothesis):
+        return hypothesis
+    test_file = TestFileSynthesizer(llm).synthesize(issue, hypothesis)
+    # Keep only genuinely executable setup, dropping comment placeholders, prose,
+    # code fragments and the pytest invocation being replaced: prose would exit
+    # 127 mid-sequence and be scored as `partial`. `is_pytest_invocation()` rather
+    # than a substring check, so `uv add 'ops[testing]' pytest` is kept.
+    setup_commands = [
+        c
+        for c in hypothesis.commands
+        if not is_pytest_invocation(c) and runnability.classify_command(c) is runnability.Shape.SHELL
+    ]
+    # ...and if the extraction supplied no environment setup, build one, or
+    # `uv run pytest` would walk up to the harness's project and fail to import
+    # `ops`. A synthesised test is always an `ops.testing` scaffold, so the
+    # dependencies are known.
+    if not any(_ESTABLISHES_ENVIRONMENT_RE.search(c) for c in setup_commands):
+        setup_commands = [*setup_commands, "uv init --bare", "uv add 'ops[testing]' pytest"]
+    commands = [*setup_commands, f"uv run pytest {test_file.path} -v"]
+    return dataclasses.replace(hypothesis, commands=commands, synthesized_test_file=test_file)
+
+
+def run_hypothesis(
+    hypothesis: Hypothesis,
+    issue: Issue,
+    surface: SurfaceInference | None,
+    runner_seam: RunnerSeam,
+    llm: LLMSeam,
+    context: dict,
+) -> RunnerStageResult:
+    stale, reason = is_stale(hypothesis, issue, runner_seam, context)
+    if stale:
+        return RunnerStageResult(branch=None, skipped_stale=True, skip_reason=reason, run_result=None)
+    branch = choose_branch(hypothesis)
+    if branch == "none":
+        hypothesis = write_synthesized_test_file_if_needed(hypothesis, issue, llm, context)
+    ok, unrunnable_reason = check_runnable(hypothesis, branch)
+    if not ok:
+        return RunnerStageResult(
+            branch=branch,
+            skipped_stale=False,
+            skip_reason=None,
+            run_result=None,
+            unrunnable_reason=unrunnable_reason,
+        )
+    run_result = runner_seam.run(branch=branch, hypothesis=hypothesis, surface=surface, context=context)
+    return RunnerStageResult(branch=branch, skipped_stale=False, skip_reason=None, run_result=run_result)

@@ -1,0 +1,351 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from models import CommandResult, Outcome, RunResult
+from pipeline import Pipeline, build_pipeline
+
+FIXTURES = Path(__file__).parent.parent / "fixtures"
+
+
+def _load_issue(number: int):
+    from models import Issue
+
+    return Issue.from_dict(json.loads((FIXTURES / "issues" / f"{number}.json").read_text()))
+
+
+@pytest.fixture
+def pipeline(tmp_path) -> Pipeline:
+    return build_pipeline(fixture_mode=True, fixtures_dir=FIXTURES, work_dir=tmp_path)
+
+
+def test_9001_dropped_at_filter(pipeline):
+    result = pipeline.run_for_issue(_load_issue(9001))
+    assert result.stage_reached == "filter"
+    assert result.outcome is None
+    assert result.comment is None
+
+
+def test_2304_dropped_at_extraction_in_scope_false(pipeline):
+    result = pipeline.run_for_issue(_load_issue(2304))
+    assert result.stage_reached == "extraction"
+    assert result.outcome is None
+    assert "in_scope" in result.reason
+
+
+def test_2341_skipped_stale_full_pipeline(pipeline):
+    # confidence=high, so it clears the confidence gate and reaches the
+    # skip-when-stale gate on its own (repo_version null + CLOSED).
+    result = pipeline.run_for_issue(_load_issue(2341))
+    assert result.outcome == Outcome.SKIPPED_STALE
+    assert result.comment is None
+
+
+def test_2327_skipped_stale_full_pipeline(pipeline):
+    # confidence=medium, clears the gate the same way.
+    result = pipeline.run_for_issue(_load_issue(2327))
+    assert result.outcome == Outcome.SKIPPED_STALE
+    assert result.comment is None
+
+
+def test_2484_low_confidence_stays_silent_in_production_mode(pipeline):
+    # #2484 routes to `k8s-clone`, which does execute `commands[]`, so the
+    # confidence gate still applies: the scratch-branch exemption must not
+    # cover every k8s hypothesis.
+    result = pipeline.run_for_issue(_load_issue(2484))
+    assert result.stage_reached == "extraction"
+    assert result.outcome is None
+    assert "confidence=low" in result.reason
+
+
+def test_2484_calibration_mode_reaches_classifier(pipeline):
+    result = pipeline.run_for_issue(_load_issue(2484), calibration_mode=True)
+    assert result.outcome == Outcome.UNRUNNABLE_TEST_SELECTOR_STALE
+    assert result.comment is None
+
+
+def test_2639_confidence_gate_exempt_on_scratch_branch(pipeline):
+    # #2639 routes to `k8s-scratch`, which builds from `surface`, not
+    # `commands[]`, so low confidence must not silence it.
+    result = pipeline.run_for_issue(_load_issue(2639), run_id="test-run", timestamp="2026-07-23T00:00:00Z")
+    if result.stage_reached == "scaffold":
+        pytest.skip(f"scratch-charm render needs network access for `uv lock`, unavailable here: {result.reason}")
+    assert result.outcome == Outcome.REPRODUCED_POSITIVE_SIGNAL_ABSENT
+    assert result.comment is not None
+    assert "add-reproducer:issue=2639:run=test-run" in result.comment
+
+
+def test_2639_calibration_mode_reproduces(pipeline):
+    result = pipeline.run_for_issue(_load_issue(2639), calibration_mode=True, run_id="test-run", timestamp="2026-07-23T00:00:00Z")
+    if result.stage_reached == "scaffold":
+        pytest.skip(f"scratch-charm render needs network access for `uv lock`, unavailable here: {result.reason}")
+    assert result.outcome == Outcome.REPRODUCED_POSITIVE_SIGNAL_ABSENT
+    assert result.comment is not None
+    assert "add-reproducer:issue=2639:run=test-run" in result.comment
+
+
+def test_confidence_gate_still_silences_none_substrate(pipeline, monkeypatch):
+    # A `substrate: none` hypothesis, where `commands[]` is the whole
+    # reproduction, must still stay silent at `confidence: low`.
+    from models import Hypothesis
+
+    hyp = Hypothesis.from_dict(
+        2304,
+        {
+            "in_scope": True,
+            "moving_parts": {"substrate": "none", "other": {}},
+            "commands": [],
+            "expected": "x",
+            "observed": "y",
+            "confidence": "low",
+        },
+    )
+    monkeypatch.setattr(pipeline.extractor, "extract", lambda issue: hyp)
+    result = pipeline.run_for_issue(_load_issue(2304))
+    assert result.stage_reached == "extraction"
+    assert result.outcome is None
+    assert "confidence=low" in result.reason
+
+
+def test_2045_calibration_mode_composed_comment_includes_synthesized_test_file(pipeline):
+    # #2045's commands[] has no runnable pytest invocation, so a test file is
+    # synthesised. The composed comment must show that file's body, not just
+    # its name.
+    result = pipeline.run_for_issue(_load_issue(2045), calibration_mode=True, run_id="test-run", timestamp="2026-07-30T00:00:00Z")
+    assert result.comment is not None
+    assert "test_issue_2045_repro.py" in result.comment
+    assert "Synthesized test file" in result.comment
+    assert result.comment.index("Synthesized test file") < result.comment.index("Commands run:")
+
+
+def test_2107_skipped_stale_full_pipeline(pipeline):
+    # #2107 is substrate:lxd but CLOSED with repo_version null, so the stale
+    # gate stops it before branch dispatch, as it does for other substrates.
+    result = pipeline.run_for_issue(_load_issue(2107), calibration_mode=True)
+    assert result.outcome == Outcome.SKIPPED_STALE
+    assert result.comment is None
+
+
+class _StaticLLM:
+    """Minimal LLMSeam stub returning the same canned dict regardless of
+    prompt -- lets a test drive `Pipeline.run_for_issue()` through the
+    lxd-scratch branch with a synthetic (not a real GitHub) issue, without
+    adding a new on-disk issue fixture."""
+
+    def __init__(self, extraction: dict, surface: dict):
+        self._extraction = extraction
+        self._surface = surface
+
+    def complete_json(self, *, purpose: str, prompt: str, context: dict) -> dict:
+        return self._extraction if purpose == "extraction" else self._surface
+
+
+class _StaticRunner:
+    def __init__(self, result: RunResult):
+        self._result = result
+
+    def resolve_symbol(self, symbol_anchor: str, context: dict) -> bool:
+        return True
+
+    def run(self, **kwargs) -> RunResult:
+        return self._result
+
+
+def test_lxd_scratch_reaches_classifier_via_full_pipeline(tmp_path):
+    # A substrate:lxd hypothesis must dispatch to `lxd-scratch`. Issue 1 is
+    # synthetic, OPEN, and has repo_version set, so it clears the stale gate.
+    llm = _StaticLLM(
+        extraction={
+            "in_scope": True,
+            "moving_parts": {"substrate": "lxd", "repo_version": "main"},
+            "commands": [],
+            "expected": "the charm reacts to the reported condition",
+            "observed": "it does not",
+            "confidence": "high",
+        },
+        # A complete `pebble_service`, so the no-stimulus gate doesn't stop the
+        # run before the dispatch this test is about.
+        surface={
+            "charm_name": "repro-i1-x",
+            "pebble_service": {"service": "workload", "user": "ubuntu", "command": "pebble notify x"},
+        },
+    )
+    run_result = RunResult(
+        hypothesis_number=1,
+        branch="lxd-scratch",
+        commands=[
+            CommandResult(command="sudo concierge prepare -p lxd", exit_code=0, stdout="ready"),
+            CommandResult(command="juju status repro/0", exit_code=0, stdout="Workload: active"),
+        ],
+    )
+    pipeline = Pipeline(llm, _StaticRunner(run_result), work_dir=tmp_path)
+    from models import Issue
+
+    issue = Issue(
+        number=1, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator"
+    )
+
+    result = pipeline.run_for_issue(issue, calibration_mode=True)
+
+    if result.stage_reached == "scaffold":
+        pytest.skip(f"scratch-charm render needs network access for `uv lock`, unavailable here: {result.reason}")
+    assert result.stage_reached == "classifier"
+    assert result.outcome == Outcome.DID_NOT_REPRODUCE
+
+
+def test_ignore_in_scope_runs_an_out_of_scope_hypothesis(tmp_path):
+    """`--ignore-in-scope` is a measurement tool: production drops these,
+    and a pipeline that composes nothing cannot be measured for false
+    comments."""
+    extraction = {
+        "in_scope": False,
+        "moving_parts": {"substrate": "none", "repo_version": "main"},
+        "commands": ["uv venv", "cat > t.py << 'EOF'\nimport ops\n\ndef test_x():\n    pass\nEOF", "uv run pytest t.py -v"],
+        "expected": "x",
+        "observed": "y",
+        "confidence": "high",
+    }
+
+    class _OutOfScopeLLM:
+        """First pass says out of scope; the second pass agrees
+        (`concrete_defect: False`), which is the shape production drops."""
+
+        def complete_json(self, *, purpose, prompt, context):
+            if purpose == "inscope_second_pass":
+                return {**extraction, "concrete_defect": False}
+            return extraction
+
+    llm = _OutOfScopeLLM()
+    run_result = RunResult(
+        hypothesis_number=1,
+        branch="none",
+        commands=[CommandResult(command="uv run pytest t.py -v", exit_code=0, stdout="1 passed")],
+    )
+    from models import Issue
+
+    issue = Issue(
+        number=1, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator"
+    )
+    pipeline = Pipeline(llm, _StaticRunner(run_result), work_dir=tmp_path)
+
+    dropped = pipeline.run_for_issue(issue, calibration_mode=True)
+    assert dropped.stage_reached == "extraction"
+    assert "in_scope=false" in dropped.reason
+
+    forced = pipeline.run_for_issue(issue, calibration_mode=True, ignore_in_scope=True)
+    assert forced.stage_reached == "classifier"
+
+
+def test_each_issue_gets_its_own_scratch_dir(tmp_path):
+    """A shared workdir made `uv init` collide across issues and put every
+    synthesised test in one pytest rootdir."""
+    p = build_pipeline(fixture_mode=True, fixtures_dir=FIXTURES, work_dir=tmp_path)
+    p.run_for_issue(_load_issue(2045), calibration_mode=True)
+    p.run_for_issue(_load_issue(2484), calibration_mode=True)
+    assert (tmp_path / "issue-2045").is_dir()
+    assert (tmp_path / "issue-2484").is_dir()
+
+
+def test_fixture_llm_splits_the_seams(tmp_path):
+    """`--fixture-llm` is how a substrate measurement runs the real runner
+    without spending an OpenRouter call on an extraction already recorded in
+    `fixtures/`. Neither `fixture_mode` nor `--live` can express that on its
+    own -- both set the two seams together."""
+    from seams.llm import FixtureLLM
+    from seams.runner import SubprocessRunnerSeam
+
+    p = build_pipeline(fixture_mode=False, fixtures_dir=FIXTURES, work_dir=tmp_path, fixture_llm=True)
+    assert isinstance(p.llm, FixtureLLM)
+    assert isinstance(p.runner, SubprocessRunnerSeam)
+
+
+def test_fixture_llm_defaults_off_for_live(tmp_path, monkeypatch):
+    """Without the flag, `--live` still means live on both seams -- the split
+    must never be something a production run can fall into by accident."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-not-a-real-key")
+    from seams.llm import LiveOpenRouterLLM
+
+    p = build_pipeline(fixture_mode=False, fixtures_dir=FIXTURES, work_dir=tmp_path)
+    assert isinstance(p.llm, LiveOpenRouterLLM)
+
+
+_CHARM_ROOT_TEST = (
+    "import os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\n"
+    "class MyCharm(ops.CharmBase):\n"
+    "    def __init__(self, framework):\n"
+    "        super().__init__(framework)\n"
+    "        framework.observe(self.on.start, self._on_start)\n\n"
+    "    def _on_start(self, event):\n"
+    "        captured['cwd'] = os.getcwd()\n\n"
+    "def test_cwd():\n"
+    "    ctx = testing.Context(MyCharm, meta={'name': 'x'})\n"
+    "    ctx.run(ctx.on.start(), testing.State())\n"
+    "    assert captured['cwd'] == str(ctx.charm_root)\n"
+)
+
+
+class _RecordingRunner(_StaticRunner):
+    def __init__(self, result: RunResult):
+        super().__init__(result)
+        self.runs = 0
+
+    def run(self, **kwargs) -> RunResult:
+        self.runs += 1
+        return super().run(**kwargs)
+
+
+def _gate_pipeline(tmp_path, commands):
+    """Both extraction answers identical, so the re-ask changes nothing and
+    the hypothesis reaching the gate is the one under test."""
+    extraction = {
+        "in_scope": True,
+        "moving_parts": {"substrate": "none", "repo_version": "main"},
+        "commands": commands,
+        "expected": "cwd is the charm root",
+        "observed": "it is not",
+        "confidence": "high",
+    }
+    failed = RunResult(
+        hypothesis_number=1,
+        branch="none",
+        commands=[CommandResult(command=commands[-1], exit_code=1, stdout="AssertionError")],
+    )
+    runner = _RecordingRunner(failed)
+    from models import Issue
+
+    issue = Issue(
+        number=1, title="t", body="b", labels=[], state="OPEN", created_at="", author="a", repo="canonical/operator"
+    )
+    pipeline = Pipeline(_StaticLLM(extraction, {}), runner, work_dir=tmp_path)
+    return pipeline.run_for_issue(issue, calibration_mode=True), runner
+
+
+def test_a_test_that_fails_the_static_check_is_not_run(tmp_path):
+    """A re-ask's answer is kept whatever its check says; one comparing with
+    an unset `ctx.charm_root` fails on an assertion with or without the fix,
+    and would otherwise reach rung 6 as `reproduced_weaker`."""
+    commands = [
+        "uv init --bare .",
+        f"cat > test_cwd.py << 'PYEOF'\n{_CHARM_ROOT_TEST}PYEOF",
+        "uv run pytest test_cwd.py -v",
+    ]
+    result, runner = _gate_pipeline(tmp_path, commands)
+    assert runner.runs == 0
+    assert result.stage_reached == "extraction:test_check_failed"
+    assert result.outcome == Outcome.UNRUNNABLE_SYNTHESIS_INVALID
+    assert result.comment is None
+    assert "`ctx.charm_root` is `None`" in result.reason
+
+
+def test_a_reporter_script_run_with_python_is_not_gated(tmp_path):
+    """The check is about pytest files; a script with no test function, run
+    with `python`, still goes to the runner."""
+    commands = [
+        "uv init --bare .",
+        "cat > repro.py << 'PYEOF'\nimport ops\nprint(ops.__version__)\nPYEOF",
+        "uv run python repro.py",
+    ]
+    result, runner = _gate_pipeline(tmp_path, commands)
+    assert runner.runs == 1
+    assert result.stage_reached == "classifier"

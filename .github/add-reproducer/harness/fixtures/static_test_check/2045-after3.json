@@ -1,0 +1,194 @@
+[
+ {
+  "label": "after3",
+  "run": 0,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\ncaptured = {}\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == str(ctx.charm_dir)\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\ncaptured = {}\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == str(ctx.charm_dir)",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.0014078
+ },
+ {
+  "label": "after3",
+  "run": 1,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = self.framework.charm_dir\n\ndef test_cwd_is_charm_dir():\n    meta = {'name': 'my-charm'}\n    ctx = testing.Context(MyCharm, meta=meta)\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == str(captured['charm_dir'])\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = self.framework.charm_dir\n\ndef test_cwd_is_charm_dir():\n    meta = {'name': 'my-charm'}\n    ctx = testing.Context(MyCharm, meta=meta)\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == str(captured['charm_dir'])",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.0014345
+ },
+ {
+  "label": "after3",
+  "run": 2,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = str(self.framework.charm_dir)\n\ndef test_cwd_is_charm_dir():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == captured['charm_dir']\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport pytest\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = str(self.framework.charm_dir)\n\ndef test_cwd_is_charm_dir():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == captured['charm_dir']",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.00143539
+ },
+ {
+  "label": "after3",
+  "run": 3,
+  "in_scope": true,
+  "confidence": "high",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        self.framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert ctx.charm.cwd == str(ctx.charm.framework.charm_dir)\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        self.framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert ctx.charm.cwd == str(ctx.charm.framework.charm_dir)",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.00141403
+ },
+ {
+  "label": "after3",
+  "run": 4,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert ctx.charm.cwd == str(ctx.charm_dir)\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert ctx.charm.cwd == str(ctx.charm_dir)",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.0014078
+ },
+ {
+  "label": "after3",
+  "run": 5,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.config_changed, self._on_config_changed)\n\n    def _on_config_changed(self, event):\n        self.cwd = os.getcwd()\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.config_changed(), testing.State())\n    expected_cwd = str(ctx.charm_dir)\n    assert ctx.charm.cwd == expected_cwd\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.config_changed, self._on_config_changed)\n\n    def _on_config_changed(self, event):\n        self.cwd = os.getcwd()\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.config_changed(), testing.State())\n    expected_cwd = str(ctx.charm_dir)\n    assert ctx.charm.cwd == expected_cwd",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.00143005
+ },
+ {
+  "label": "after3",
+  "run": 6,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\ndef test_cwd_is_charm_dir():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    with ctx(ctx.on.start(), testing.State()) as mgr:\n        mgr.run()\n        assert mgr.charm.cwd == str(ctx.charm_dir)\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        self.cwd = os.getcwd()\n\ndef test_cwd_is_charm_dir():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    with ctx(ctx.on.start(), testing.State()) as mgr:\n        mgr.run()\n        assert mgr.charm.cwd == str(ctx.charm_dir)",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.00141225
+ },
+ {
+  "label": "after3",
+  "run": 7,
+  "in_scope": true,
+  "confidence": "medium",
+  "commands": [
+   "uv init --bare .",
+   "uv add 'ops[testing]'",
+   "cat > test_cwd.py << 'PYEOF'\nimport os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = str(self.framework.charm_dir)\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == captured['charm_dir']\nPYEOF",
+   "uv run pytest test_cwd.py -v"
+  ],
+  "test_file": {
+   "path": "test_cwd.py",
+   "body": "import os\nimport ops\nfrom ops import testing\n\ncaptured = {}\n\nclass MyCharm(ops.CharmBase):\n    def __init__(self, framework):\n        super().__init__(framework)\n        framework.observe(self.on.start, self._on_start)\n\n    def _on_start(self, event):\n        captured['cwd'] = os.getcwd()\n        captured['charm_dir'] = str(self.framework.charm_dir)\n\n\ndef test_cwd_is_charm_root():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    ctx.run(ctx.on.start(), testing.State())\n    assert captured['cwd'] == captured['charm_dir']",
+   "parses": true,
+   "test_funcs": 1,
+   "module_level_runs": 0,
+   "asserts_in_tests": 1,
+   "asserts_in_charm": 0,
+   "path_literal_compares": [],
+   "uses_charm_dir": true
+  },
+  "cost": 0.00143005
+ }
+]

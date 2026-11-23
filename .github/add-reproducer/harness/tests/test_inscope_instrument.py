@@ -1,0 +1,142 @@
+"""Pins the measured results behind `inscope_second_pass.py`'s ship decision
+against the recorded runs -- not a live model, no network, no key. Same
+pattern as `test_inscope_retune.py`: these tests read the recorded `out/*`
+fixtures and skip (not fail) if that directory isn't present.
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+_OUT = Path(__file__).parent.parent.parent / "spike-step-5" / "inscope-instrument" / "out"
+_LABELS_PATH = Path(__file__).parent.parent.parent / "spike-step-5" / "corpus-v2" / "hand-labels.json"
+
+
+@pytest.fixture(autouse=True)
+def _require_run():
+    if not _OUT.is_dir():  # pragma: no cover - recorded run not always present
+        pytest.skip(f"inscope-instrument run not available at {_OUT}")
+
+
+def _corpus_run(subdir: str) -> dict[int, dict]:
+    run_dir = _OUT / subdir
+    if not run_dir.is_dir():
+        pytest.skip(f"{run_dir} not recorded")
+    out = {}
+    for path in sorted(run_dir.glob("*.json")):
+        if path.stem == "summary":
+            continue
+        record = json.loads(path.read_text())
+        if record.get("status") == "ok":
+            out[int(path.stem)] = record
+    return out
+
+
+def _score_against_labels(run: dict[int, dict]) -> dict:
+    labels = json.loads(_LABELS_PATH.read_text())["labels"]
+    tp = fp = fn = 0
+    false_keeps, false_drops = [], []
+    for key, entry in labels.items():
+        number = int(key)
+        record = run.get(number)
+        if record is None:
+            continue
+        predicted = record["live_extraction"]["in_scope"]
+        actual = entry["label"]
+        if predicted and actual:
+            tp += 1
+        elif predicted and not actual:
+            fp += 1
+            false_keeps.append(number)
+        elif not predicted and actual:
+            fn += 1
+            false_drops.append(number)
+    return {
+        "precision": tp / (tp + fp) if tp + fp else None,
+        "recall": tp / (tp + fn) if tp + fn else None,
+        "false_keeps": sorted(false_keeps),
+        "false_drops": sorted(false_drops),
+    }
+
+
+def _repeats_summary(subdir: str, number: int) -> dict:
+    path = _OUT / subdir / f"{number}.json"
+    if not path.is_file():
+        pytest.skip(f"{path} not recorded")
+    return json.loads(path.read_text())
+
+
+# --- the rationale-instrumented single-pass corpus run ---------------------
+
+
+def test_rationale_instrumented_corpus_run_precision_holds_recall_drops():
+    # The rationale field alone keeps precision but loses recall.
+    score = _score_against_labels(_corpus_run("corpus-instrumented"))
+    assert score["precision"] == pytest.approx(1.0)
+    assert score["false_keeps"] == []
+    assert 1088 in score["false_drops"]
+
+
+def test_rationale_run_shows_1790_and_2327_dropped_with_empty_observed():
+    # These real bugs were dropped with an empty `observed`, which is why the
+    # second-pass gate covers every drop rather than keying on `observed`.
+    run = _corpus_run("corpus-instrumented")
+    for number in (1790, 2327):
+        record = run[number]
+        assert record["live_extraction"]["in_scope"] is False
+        assert record["live_extraction"]["observed"] in (None, "")
+
+
+# --- the two-pass corpus floor, two independent runs -----------------------
+
+
+@pytest.mark.parametrize("subdir", ["corpus-twopass-run1", "corpus-twopass-run2"])
+def test_twopass_corpus_run_precision_is_perfect(subdir):
+    score = _score_against_labels(_corpus_run(subdir))
+    assert score["precision"] == pytest.approx(1.0)
+    assert score["false_keeps"] == []
+
+
+@pytest.mark.parametrize("subdir", ["corpus-twopass-run1", "corpus-twopass-run2"])
+def test_twopass_corpus_run_recall_ties_the_established_baseline(subdir):
+    # Matches the single-pass baseline's recall, with the same sole false drop.
+    score = _score_against_labels(_corpus_run(subdir))
+    assert score["recall"] == pytest.approx(11 / 12)
+    assert score["false_drops"] == [1088]
+
+
+def test_twopass_recovers_1790_and_2327_that_the_single_pass_dropped():
+    # Both were false drops (empty observed) in the rationale-instrumented
+    # single-pass run above; the second pass recovers both, in both runs.
+    for subdir in ("corpus-twopass-run1", "corpus-twopass-run2"):
+        run = _corpus_run(subdir)
+        for number in (1790, 2327):
+            assert run[number]["live_extraction"]["in_scope"] is True
+
+
+def test_twopass_corpus_runs_are_identical_on_in_scope():
+    # The two-pass result is stable across independent runs.
+    run1 = _corpus_run("corpus-twopass-run1")
+    run2 = _corpus_run("corpus-twopass-run2")
+    shared = sorted(set(run1) & set(run2))
+    assert len(shared) == 60
+    diffs = [n for n in shared if run1[n]["live_extraction"]["in_scope"] != run2[n]["live_extraction"]["in_scope"]]
+    assert diffs == []
+
+
+# --- flagship #2639 / #2045, two-pass vs. same-day single-pass baseline ----
+
+
+def test_flagship_2639_false_drop_rate_improves_but_is_not_fixed():
+    baseline = _repeats_summary("repeats", 2639)  # single-pass, same day
+    twopass = _repeats_summary("flagship-twopass", 2639)
+    assert baseline["false_drop_rate"] == pytest.approx(0.75)
+    assert twopass["false_drop_rate"] == pytest.approx(0.625)
+    # Explicitly not a fix: still dropped more often than kept.
+    assert twopass["false_drop_rate"] > 0.5
+
+
+def test_flagship_2045_stays_low_false_drop_with_two_pass():
+    twopass = _repeats_summary("flagship-twopass", 2045)
+    assert twopass["dropped"] == 0

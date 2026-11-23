@@ -137,7 +137,10 @@ aggressive = 3
 line-length = 99
 exclude = ["examples"]
 target-version = "py310"
-extend-exclude = ["docs/conf.py", "docs/_dev/", "docs/tutorial/"]
+# `.github/add-reproducer/` is not part of `ops` -- it is a tool that reads this
+# repository's issues, carried here so a workflow can run it, and it keeps
+# its own style.
+extend-exclude = ["docs/conf.py", "docs/_dev/", "docs/tutorial/", ".github/add-reproducer/"]
 
 # Ruff formatter configuration
 [tool.ruff.format]
@@ -310,5 +313,5 @@ disableBytesTypePromotions = true
 stubPath = ""
 
 [tool.codespell]
-skip = './docs/_build,./docs/_dev,.venv,venv,build,examples,uv.lock'
+skip = './docs/_build,./docs/_dev,.venv,venv,build,examples,uv.lock,./.github/add-reproducer'
 quiet-level = 3

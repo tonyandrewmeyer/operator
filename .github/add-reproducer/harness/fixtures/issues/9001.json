@@ -1,0 +1,10 @@
+{
+  "number": 9001,
+  "title": "Feature request: add ops.testing.Context.run_action() batch mode",
+  "body": "It would be nice to run a batch of actions in one Scenario context without re-creating state each time.",
+  "labels": ["enhancement"],
+  "createdAt": "2026-06-01T00:00:00Z",
+  "state": "OPEN",
+  "author": "someuser",
+  "repo": "canonical/operator"
+}

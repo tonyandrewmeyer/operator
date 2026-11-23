@@ -1,0 +1,19 @@
+{
+  "number": 2045,
+  "title": "os.getcwd() is not the charm root in ops[testing]",
+  "body": "When running in Juju, the current directory is the charm root at the start of a hook. When running in Scenario, the current directory is typically the root directory of the repository.\n\npaas_charm loads the config.yaml file directly rather than using `.config`/`.load_config`. This fails under Scenario because it looks for config.yaml in the current directory, but Scenario carefully creates a temporary directory for executing the tests.\n\nA simple os.chdir() (and restoring the value after the yield) in _runtime.py fixed this for me locally, and should probably be a simple and safe fix. The paas_charm code would be better if it used Framework's charm_dir rather than relying on getcwd(), but it is also reasonable to expect the initial working directory to be the charm dir.\n\n(Trimmed from the real issue body for this fixture -- see spike-step-5/2045/issue.json for the verbatim GitHub API capture. The follow-up comment from james-garner-canonical below is carried verbatim in this fixture's `comments` field.)",
+  "labels": [
+    "rainy day"
+  ],
+  "createdAt": "2025-09-16T23:55:45Z",
+  "state": "OPEN",
+  "author": "tonyandrewmeyer",
+  "repo": "canonical/operator",
+  "comments": [
+    {
+      "author": {"login": "james-garner-canonical"},
+      "body": "I wonder if we should reconsider this. It's timely given the proposed performance related changes in #2361. If we add some friction to charms accessing the files in their charm root during testing, it would encourage better practices in production. But maybe we should have some sort of explicit opt-in for 'create me a directory, copy everything there, and change the working directory. See also #1673",
+      "createdAt": "2026-03-05T03:35:55Z"
+    }
+  ]
+}

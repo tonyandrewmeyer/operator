@@ -1,0 +1,28 @@
+{
+  "hypothesis_number": 2341,
+  "branch": "none",
+  "commands": [
+    {
+      "command": "uv venv",
+      "exit_code": 0,
+      "stdout": "Using CPython 3.14.3\nCreated virtual environment",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "uv pip install ops",
+      "exit_code": 0,
+      "stdout": "Installed ops==3.8.0 ops-scenario==8.8.0",
+      "stderr": "",
+      "log_records": []
+    },
+    {
+      "command": "uv run pytest repro_test.py -v --log-cli-level=DEBUG",
+      "exit_code": 0,
+      "stdout": "repro_test.py::test_remote_unit_zero_explicit PASSED\n1 passed in 0.07s",
+      "stderr": "",
+      "log_records": []
+    }
+  ],
+  "control": null
+}

@@ -1,0 +1,18 @@
+# Speculative example -- NOT corpus-evidenced. None of the 18 calibration
+# KEEPs (in-scope or not) mention storage in any form. Included because
+# storage is one of the four moving_parts axes to support, and to prove
+# render.py's storage stanza actually renders valid-looking YAML -- not
+# because a real hypothesis needed it.
+
+charm_name: repro-storage-example
+source_issue: null
+
+relation: {}
+
+storage:
+  name: scratch
+  type: filesystem
+  location: /srv/data
+
+pebble_service: {}
+ops_api_surface: config-changed

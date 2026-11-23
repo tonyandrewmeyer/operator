@@ -1,0 +1,499 @@
+"""Hypothesis extraction.
+
+One LLM call per in-scope issue, structured output validated against the
+`moving_parts` schema (including `ci_run_url` and `symbol_anchor`).
+Invalid output falls back to stay-silent.
+"""
+
+from __future__ import annotations
+
+import static_test_check
+from filter_stage import extract_ci_run_url
+from models import (
+    Hypothesis,
+    Issue,
+    StaticCheckResult,
+    embedded_test_file,
+    replace_embedded_test_body,
+)
+from seams.llm import LLMSeam
+
+CONFIDENCE_LEVELS = {"high", "medium", "low"}
+SUBSTRATES = {"lxd", "k8s", "none"}
+
+# Bounds prompt size on long comment threads while still fitting a handful
+# of ordinary comments. Configurable via `Extractor(max_comment_chars=...)`.
+DEFAULT_MAX_COMMENT_CHARS = 4000
+
+_SCHEMA_INSTRUCTIONS = """\
+Given the issue below, extract a reproduction hypothesis as JSON matching
+exactly this shape:
+
+{
+  "in_scope": bool,
+  "moving_parts": {
+    "repo_version": str|null,
+    "juju_version": str|null,
+    "base": str|null,
+    "substrate": "lxd"|"k8s"|"none",
+    "other": {str: str}
+  },
+  "commands": [str],
+  "expected": str,
+  "observed": str,
+  "confidence": "high"|"medium"|"low"
+}
+
+moving_parts.substrate is REQUIRED whenever in_scope is true, and must be
+exactly one of these three strings -- never null, never omitted. It decides
+which machinery gets provisioned to run the reproduction, so a wrong or
+absent value is expensive:
+
+- "none"  -- reproduces on the host in a plain directory: a unit test, an
+             ops[testing]/Scenario test, an import-time error. No Juju
+             controller, no cluster, no charm deployment. This is the most
+             common case; prefer it whenever the bug is reachable without
+             deploying anything.
+- "k8s"   -- needs a real Kubernetes substrate and a deployed charm
+             (Pebble behaviour, container/workload interaction, k8s-only
+             Juju surface).
+- "lxd"   -- needs a real machine substrate and a deployed charm.
+
+A bug in what a Juju hook tool returns or how ops handles it
+(`relation-get`, `relation-list`, `relation-ids`, `config-get`,
+`is-leader`, `secret-get`, and so on) is "none" when the issue (or a
+comment) says what the tool printed or how it exited, for example
+`ERROR permission denied`. Test it with fake hook tools, as described
+below, not by deploying a charm.
+
+If in_scope is true and you genuinely cannot tell which of the three
+applies, pick the most likely one and additionally set
+moving_parts.other["substrate_uncertain"] = "yes". Do not omit the field
+and do not send null: an absent substrate is treated as a failed
+extraction and the issue is dropped without comment.
+
+"commands" is a list of POSIX shell commands, run in order, non-interactively,
+by `bash -c` in a fresh empty directory. They are executed literally. The
+directory has python3, uv, git and the usual shell utilities; for
+substrate lxd/k8s it also has juju, charmcraft and concierge.
+
+Each entry MUST be a command a shell can run. Specifically:
+
+- Every entry must start with an executable or a shell builtin.
+- The sequence must be self-contained: create every file it references
+  (with a heredoc), and install every dependency it imports. It starts in
+  an EMPTY directory -- there is no checkout, no test suite, no conftest,
+  and no file from the issue lying around.
+- Substitute real values. Never leave a placeholder like <charm-name> or
+  <unit>: the shell reads angle brackets as redirects and the command dies.
+
+Each entry MUST NOT be any of these (all of them exit non-zero and get
+misread as evidence of the bug):
+
+- An instruction to a human: "Run a charm test that checks ...", "Run the
+  provided test code and observe the warning".
+- A bare test name or selector: "test_relation_broken".
+- A fragment of Python: "rel = self.model.get_relation('db', 1)".
+- A reference to code you have not written into a file in an earlier entry.
+
+Worked example. For an issue reporting that a hypothetical
+`ops.model.Model.get_widget()` returns None instead of raising when the
+widget is absent, on `substrate: none`:
+
+[
+  "uv init --bare .",
+  "uv add 'ops[testing]'",
+  "cat > test_widget.py << 'PYEOF'\nimport pytest\nimport ops\nfrom ops import testing\n\nclass MyCharm(ops.CharmBase):\n    pass\n\ndef test_absent_widget_raises():\n    ctx = testing.Context(MyCharm, meta={'name': 'my-charm'})\n    with ctx(ctx.on.update_status(), testing.State()) as mgr:\n        with pytest.raises(KeyError):\n            mgr.charm.model.get_widget('nope')\nPYEOF",
+  "uv run pytest test_widget.py -v"
+]
+
+Note what that does: sets up a project, installs the dependency, writes the
+test with a heredoc, then runs it. If you cannot produce a sequence like
+that from the issue -- because it does not name a concrete API, error, or
+snippet to build one from -- return an empty commands list and set
+confidence to "low" rather than writing prose. An empty list is handled
+(the harness may synthesise a test); prose is not.
+
+When you write a test file, what it asserts is the whole reproduction, so:
+
+- Put the run and the assertion inside a `def test_...():` function. Code
+  at module level runs while pytest is importing the file, so a failure
+  there is a broken test file, not a reproduction.
+- Assert the EXPECTED behaviour, so the test fails if the bug is real and
+  passes if it is not.
+- Compare against the value the issue says is correct, obtained from the
+  library itself -- never a literal you made up. If the issue says one
+  value should equal another the library knows (a path, a name, a default),
+  read both and compare them. A literal is fine only when the issue itself
+  states it.
+- Some values are only visible from inside the charm (anything on `self`,
+  or process state during a hook). Capture them in an event handler into a
+  module-level dict, and assert on that dict in the test function after
+  `ctx.run(...)` returns. An `assert` inside the charm surfaces as an
+  uncaught charm error rather than a clean test failure.
+- `testing.Context` has no `charm`, `charm_dir`, `framework` or `fs`
+  attribute. The charm instance is only reachable as `mgr.charm` inside
+  `with ctx(...) as mgr:`; anything else on `self` has to be captured.
+- In `with ctx(event, state) as mgr:`, the event handlers have NOT run yet
+  inside the block -- they run when the block exits, or when you call
+  `mgr.run()`. Anything a handler captures is not there until then. Prefer
+  `ctx.run(event, state)` followed by the assertion; use the `with` form
+  only when you need `mgr.charm`, and call `mgr.run()` before reading what
+  a handler set.
+- Compare like with like. `os.getcwd()` and `os.environ` give strings,
+  while `self.charm_dir` is a `pathlib.Path`, and a string never equals a
+  Path, so that assertion would fail whether or not the bug is real.
+  Convert both sides (`str(...)` or `pathlib.Path(...)`) first.
+
+For example, for a hypothetical report that `self.unit.name` in
+ops[testing] does not start with the application name:
+
+  captured = {}
+
+  class MyCharm(ops.CharmBase):
+      def __init__(self, framework):
+          super().__init__(framework)
+          framework.observe(self.on.start, self._on_start)
+
+      def _on_start(self, event):
+          captured["unit"] = self.unit.name
+          captured["app"] = self.app.name
+
+  def test_unit_name_starts_with_app_name():
+      ctx = testing.Context(MyCharm, meta={"name": "my-charm"})
+      ctx.run(ctx.on.start(), testing.State())
+      assert captured["unit"].startswith(captured["app"] + "/")
+
+Some bugs are in how ops handles what a Juju hook tool returns
+(`relation-get`, `config-get`, `secret-get`, and so on): an error message,
+an exit status, or output ops does not expect. ops[testing] cannot show
+those. It replaces the backend that runs hook tools, so no hook tool runs
+and nothing Juju returns can happen, and a test that expects Juju's error
+under `testing.Context` fails whether or not the bug is real. For these
+bugs, on `substrate: none`:
+
+- If the issue (or a comment) says what the hook tool printed or returned,
+  test `ops.model.Model` over the real `ops.model._ModelBackend`, with fake
+  hook tools on PATH that print exactly that. Fake every hook tool the code
+  path calls, not only the failing one. Install `ops` and `pytest`, not
+  `ops[testing]`.
+- If the issue does not say what the hook tool printed or returned, there
+  is nothing to fake and only a real Juju would show it. Return an empty
+  commands list, set confidence to "low", and set
+  moving_parts.other["needs_juju"] to one sentence naming the hook tool and
+  what the issue leaves out.
+
+If the bug shows as an exception, catch it and assert on the value, so the
+test fails on an assertion. When the bug is that ops raises (or raises the
+wrong exception) where the issue says it should not, wrap the access that
+raises in `try:` / `except ops.ModelError as e: result = e`, then
+`assert result == <what the issue says it should be>`: on the buggy version
+the test fails with an `AssertionError`, and on the fixed version it passes.
+Left uncaught, the exception fails the test on the buggy version without an
+assertion failing, and that shows nothing. Use `pytest.raises` only when the
+issue says an exception should be raised, and then only with the exact class
+ops raises. For example, for a hypothetical report that `self.config` raises
+`ModelError` when `config-get` prints `ERROR config not ready`, rather than
+reading as empty:
+
+  import os
+
+  import ops
+  from ops.model import _ModelBackend
+
+  def fake_hook_tool(bin_dir, name, script):
+      path = bin_dir / name
+      path.write_text("#!/bin/sh\\n" + script + "\\n")
+      path.chmod(0o755)
+
+  def test_unready_config_reads_empty(tmp_path, monkeypatch):
+      bin_dir = tmp_path / "bin"
+      bin_dir.mkdir()
+      monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+      monkeypatch.setenv("JUJU_VERSION", "3.6.0")
+      fake_hook_tool(bin_dir, "config-get", "echo 'ERROR config not ready' >&2; exit 1")
+      model = ops.Model(ops.CharmMeta.from_yaml("name: myapp\\n"), _ModelBackend("myapp/0"))
+      # Catch the error the bug raises, so the bug fails the assert below.
+      try:
+          config = dict(model.config)
+      except ops.ModelError as e:
+          config = e
+      assert config == {}
+
+"confidence" is about the reproduction hypothesis as a whole -- whether
+these commands, run on this substrate, would actually show the reported
+failure. It is not a measure of how sure you are about the substrate field
+specifically, so do not raise it just because the substrate is obvious.
+Use "low" when the issue does not really give you enough to reproduce
+from (no concrete charm, no error text, no version), "medium" when you
+have a plausible recipe with gaps you had to fill in, and "high" only
+when the issue hands you a self-contained reproduction you have
+transcribed rather than reconstructed.
+
+"in_scope" is a second opinion on a deterministic pre-filter that already
+dropped the obvious non-bugs. Set it true ONLY if both of these hold:
+
+1. Someone describes a concrete symptom: an error, a traceback, a crash, a
+   hang, a wrong or missing value -- something that happened to a charm (or
+   other code) that uses the library, in production, in its tests or in its
+   CI, and that contradicts what the software promises (its docs, its type
+   hints, its own error messages, or plain expectation).
+2. The issue does not already contain a COMPLETE, RUNNABLE reproducer.
+
+On (1): a reporter who also proposes a fix is still reporting a bug. "This
+hangs, and I think the timeout handling is wrong" is a bug report. Do not
+drop a concrete symptom just because a suggested fix is attached to it.
+
+On (2): read this narrowly. It excludes only issues carrying a
+self-contained recipe someone could run as-is. Partial information -- a CI
+link, a traceback with no setup, a snippet that assumes a charm you don't
+have -- is NOT a complete reproducer, and those issues are exactly the ones
+worth reproducing. Do not reason "there is already some detail here, so a
+reproduction adds nothing".
+
+Set it false otherwise. In particular, false for all of these, even when
+they show code or describe current behaviour:
+
+- A request for behaviour the software never promised -- stricter
+  validation, a new error, a nicer API: "X should fail if Y", "it would be
+  better if Z", "should we warn about W?". The distinguishing test is
+  whether the current behaviour breaks a promise (bug) or merely falls
+  short of what the reporter would prefer (feature request). Showing a
+  passing test to demonstrate today's behaviour does not make it a bug.
+- A proposal to change the codebase: "X can be removed", "we should
+  refactor Y". Someone reading the source and reasoning about it --
+  typically citing a source permalink -- is not someone who hit a bug, and
+  there is nothing to reproduce beyond re-asserting what the code plainly
+  does.
+- A design discussion or an open question about what the right behaviour
+  would be, even a concrete one.
+- A question about how to use the library.
+- A task, chore, epic, tracking issue, or CI/infrastructure note.
+- A failure of this repository's own test suite or CI: one of the repo's
+  own unit or integration tests failing or flaking, a broken workflow, a
+  misconfigured test environment. This project reproduces failures in
+  charms that *use* the library, not failures of the library's own tests,
+  so this holds even when the issue names a concrete failing test and links
+  the CI run where it failed.
+
+When it is genuinely ambiguous -- when you cannot tell whether the reporter
+hit a broken promise or is asking for something better -- set in_scope
+false. A wrongly dropped issue costs little: a human triages it as they
+would have anyway. A wrongly kept one spends a maintainer's attention on a
+comment that should never have been posted. Those costs are not symmetric,
+so do not treat this as a balanced judgement call.
+
+But note what that tie-break is *for*. It applies to the bug-versus-feature
+judgement, not to the presence of a symptom. An issue that plainly states
+something failed is not ambiguous, and this rule is not a reason to drop
+it.
+
+Do not set moving_parts.ci_run_url -- that's filled in deterministically
+before this call, not extracted by you (it's a literal URL in the issue
+body; no interpretation needed).
+
+If the issue body links to a source-line permalink (e.g. a
+github.com/canonical/<repo>/blob/<sha>/<path>#L<n> URL), also set
+moving_parts.symbol_anchor to the dotted symbol the linked line belongs to
+(e.g. "ops.model.Model.get_relation") -- unlike ci_run_url this needs
+interpreting the linked source, so it's part of your extraction, not a
+pre-extraction step.
+
+If comments are listed below the body, read them too: a comment sometimes
+redirects or narrows the scope the body describes (for example, a body
+that says "EDIT: see the first reply for the new scope of this issue")
+rather than merely adding detail. When that happens, extract the current
+(comment-redirected) scope, not the stale body text alone.
+"""
+
+
+class ExtractionInvalid(ValueError):
+    """Raised when the LLM's output doesn't match the extraction schema.
+
+    Output is validated against the schema; invalid output falls back to
+    stay-silent.
+    """
+
+
+def _require(d: dict, key: str, types: tuple) -> None:
+    if key not in d:
+        raise ExtractionInvalid(f"missing key {key!r}")
+    if not isinstance(d[key], types):
+        raise ExtractionInvalid(f"{key!r} must be {types}, got {type(d[key])}")
+
+
+def validate(raw: dict) -> None:
+    _require(raw, "in_scope", (bool,))
+    _require(raw, "moving_parts", (dict,))
+    _require(raw, "commands", (list,))
+    # `expected`/`observed` describe a defect, so they're only required for an
+    # in-scope extraction. Demanding them of a drop would record a clean drop as
+    # a validation failure.
+    if raw["in_scope"]:
+        _require(raw, "expected", (str,))
+        _require(raw, "observed", (str,))
+    else:
+        for key in ("expected", "observed"):
+            if raw.get(key) is not None and not isinstance(raw[key], str):
+                raise ExtractionInvalid(f"{key!r} must be a string or null, got {type(raw[key])}")
+    _require(raw, "confidence", (str,))
+    if raw["confidence"] not in CONFIDENCE_LEVELS:
+        raise ExtractionInvalid(f"confidence must be one of {CONFIDENCE_LEVELS}, got {raw['confidence']!r}")
+    for i, cmd in enumerate(raw["commands"]):
+        if not isinstance(cmd, str):
+            raise ExtractionInvalid(f"commands[{i}] must be a string")
+    mp = raw["moving_parts"]
+    substrate = mp.get("substrate")
+    if raw["in_scope"]:
+        # Required for anything that might reach a runner: `choose_branch`
+        # dispatches on it, and an absent value would fall through to `k8s-scratch`.
+        # Guessing either way is wrong (host vs cluster), so stay silent instead.
+        if substrate not in SUBSTRATES:
+            raise ExtractionInvalid(
+                f"moving_parts.substrate must be one of {sorted(SUBSTRATES)} when "
+                f"in_scope is true, got {substrate!r}"
+            )
+    elif substrate is not None and substrate not in SUBSTRATES:
+        # Dropped issues never reach a runner, so null is fine here; a wrong value
+        # still isn't.
+        raise ExtractionInvalid(f"moving_parts.substrate invalid: {substrate!r}")
+
+
+def _format_comments(issue: Issue, max_chars: int) -> str:
+    """Render `issue.comments` for the extraction prompt.
+
+    Chronological order, each attributed by author and flagged
+    reporter-vs-other (`#2185`'s reporter-redirect case vs `#2045`'s
+    third-party-follow-up case -- both matter, differently, so the label is
+    surfaced rather than left for the model to infer from prose alone).
+
+    Capped at `max_chars` total characters across all but the first comment,
+    to bound prompt size on long threads. The first comment is always
+    included (truncated in place if it alone exceeds the cap) because it is
+    the highest-value one for the exact "EDIT: see the first reply" shape
+    this cap exists to protect against silently dropping. Any further
+    omission is a visible marker line, never silent truncation.
+    """
+    if not issue.comments:
+        return ""
+    lines = [
+        "",
+        "Comments, in chronological order (a later comment may redirect or "
+        "narrow the scope described in the body above):",
+    ]
+    used_chars = 0
+    for i, comment in enumerate(issue.comments):
+        who = "issue author" if comment.author == issue.author else "other"
+        block = f"[{i + 1}] {comment.author} ({who}), {comment.created_at}:\n{comment.body}"
+        if i == 0:
+            if len(block) > max_chars:
+                block = block[: max_chars - 3] + "..."
+            lines.append(block)
+            used_chars += len(block)
+            continue
+        if used_chars + len(block) > max_chars:
+            omitted = len(issue.comments) - i
+            lines.append(
+                f"[... {omitted} further comment(s) omitted, over the "
+                f"{max_chars}-character comment cap ...]"
+            )
+            break
+        lines.append(block)
+        used_chars += len(block)
+    return "\n\n".join(lines)
+
+
+_TEST_CHECK_RETRY = """
+Your previous answer was rejected before anything ran: a static check of the
+test file it wrote found these problems:
+
+{reasons}
+{hints}
+Return the whole extraction again as JSON, with a test file that does not
+have these problems.
+"""
+
+
+class Extractor:
+    def __init__(self, llm: LLMSeam, *, max_comment_chars: int = DEFAULT_MAX_COMMENT_CHARS):
+        self.llm = llm
+        self.max_comment_chars = max_comment_chars
+        # One entry per checked test file, in call order: two when the first
+        # answer failed and was re-asked. Read by `extraction_record.build()`.
+        self.last_test_checks: list[StaticCheckResult] = []
+        # Whether the re-ask was sent. Not the same as `len(last_test_checks)
+        # == 2`: a re-ask whose answer fails schema validation, or comes back
+        # out of scope or without a test file, adds no second check.
+        self.last_test_retried = False
+
+    def extract(self, issue: Issue) -> Hypothesis:
+        """One call, plus one re-ask if the in-scope answer's embedded test
+        file fails `static_test_check`.
+
+        The broken shapes that check catches would otherwise reach the runner
+        and be kept silent by the classifier's rung 1a or 1c, so the re-ask
+        costs nothing in false comments; it is the one chance that issue has
+        of a test that runs. Bounded
+        at one, like `SurfaceInferrer.infer()`'s re-ask, and the second
+        answer is kept whatever its check says: a third attempt is a
+        sampling loop, and the rungs already keep a broken test silent.
+        Out-of-scope answers are not checked, so the check never sends a
+        dropped issue round again.
+        """
+        self.last_test_checks = []
+        self.last_test_retried = False
+        prompt = self._build_prompt(issue, self.max_comment_chars)
+        hypothesis = self._extract_once(issue, prompt, {"issue_number": issue.number})
+        first_check = self._check(hypothesis)
+        if first_check is None or first_check.passed:
+            return hypothesis
+        first_test = embedded_test_file(hypothesis.commands)
+        reasons = "\n".join(f"- {reason}" for reason in first_check.reasons)
+        hints = "".join(f"\n{hint}\n" for hint in static_test_check.retry_hints(first_check))
+        self.last_test_retried = True
+        retried = self._extract_once(
+            issue,
+            prompt + _TEST_CHECK_RETRY.format(reasons=reasons, hints=hints),
+            {"issue_number": issue.number, "retry_after": "static test check failed"},
+        )
+        # Checked for the record only: the answer is kept either way.
+        self._check(retried, donor=first_test.body if first_test else None)
+        return retried
+
+    def _extract_once(self, issue: Issue, prompt: str, context: dict) -> Hypothesis:
+        raw = self.llm.complete_json(purpose="extraction", prompt=prompt, context=context)
+        validate(raw)
+        hypothesis = Hypothesis.from_dict(issue.number, raw)
+        # Deterministic pre-extraction: ci_run_url is
+        # regex-extractable at filter time, not an LLM output.
+        hypothesis.moving_parts.ci_run_url = extract_ci_run_url(issue.body)
+        return hypothesis
+
+    def _check(self, hypothesis: Hypothesis, donor: str | None = None) -> StaticCheckResult | None:
+        """Add any missing imports the harness can supply to the embedded
+        test file (from `donor`, the first answer's test, when there is one),
+        then check it. The imports go into `hypothesis.commands`, so the
+        runner and the composer see the file that was checked."""
+        if not hypothesis.in_scope:
+            return None
+        test_file = embedded_test_file(hypothesis.commands)
+        if test_file is None:
+            return None
+        body, added = static_test_check.add_missing_imports(test_file.body, donor)
+        if added:
+            hypothesis.commands = replace_embedded_test_body(hypothesis.commands, body)
+        result = static_test_check.check(body, path=test_file.path)
+        result.added_imports = added
+        self.last_test_checks.append(result)
+        return result
+
+    @staticmethod
+    def _build_prompt(issue: Issue, max_comment_chars: int) -> str:
+        return (
+            f"{_SCHEMA_INSTRUCTIONS}\n"
+            f"Repo: {issue.repo}\n"
+            f"Title: {issue.title}\n"
+            f"Labels: {', '.join(issue.labels)}\n"
+            f"Body:\n{issue.body}\n"
+            f"{_format_comments(issue, max_comment_chars)}"
+        )

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -26,11 +27,14 @@ from scriptlet_testing import (
     ScriptletSyntaxError,
     StepLimitError,
 )
+from scriptlet_testing._process import WASM_ENV
 from scriptlet_testing._wasm import WasmProcess
 
-from .conftest import TESTDATA, write_charm
+from .conftest import BUNDLED_ENV, TESTDATA, write_charm
 
 pytest.importorskip('wasmtime')
+if os.environ.get(BUNDLED_ENV) and not os.environ.get(WASM_ENV):
+    pytest.skip('testing the bundled runner, and no wasm runner named', allow_module_level=True)
 
 
 def wasm(path: str | pathlib.Path, **kwargs: Any) -> Context:

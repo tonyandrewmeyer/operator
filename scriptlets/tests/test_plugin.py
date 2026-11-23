@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from .conftest import TESTDATA
+from .conftest import TESTDATA, skip_if_bundled
 
 STEP_LIMIT = TESTDATA / 'step_limit'
 SET_STATUS = TESTDATA / 'set_status'
@@ -119,6 +119,7 @@ def test_header_has_versions(pytester: pytest.Pytester):
     ])
 
 
+@skip_if_bundled
 def test_header_without_runner(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv('SCRIPTLET_TESTING_RUNNER')
     pytester.makepyfile('def test_it(): pass')

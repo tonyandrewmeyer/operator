@@ -53,6 +53,22 @@ unit = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/scriptlet_testing"]
 
+# Compiles the runner into the wheel and sets the platform tag; needs Go.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+# Everything the wheel build needs: the Go source as well as the Python.
+include = [
+    "/src",
+    "/tests",
+    "/runner",
+    "/hatch_build.py",
+    "/tox.ini",
+    "/README.md",
+    "/LICENSE.txt",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-p", "pytester"]

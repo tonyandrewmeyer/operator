@@ -15,6 +15,7 @@ import zipfile
 from typing import Any
 
 import pytest
+import scriptlet_testing
 from scriptlet_testing import (
     Context,
     Intent,
@@ -23,9 +24,9 @@ from scriptlet_testing import (
     StepLimitError,
     Versions,
 )
-from scriptlet_testing._process import NativeProcess
+from scriptlet_testing._process import NativeProcess, find_runner
 
-from .conftest import TESTDATA, write_charm
+from .conftest import BUNDLED, TESTDATA, skip_if_bundled, write_charm
 
 
 def event_file(name: str) -> tuple[str, dict[str, Any]]:
@@ -250,6 +251,14 @@ def test_runner_dies(set_status: Context):
         set_status.run_raw('update_status')
 
 
+@pytest.mark.skipif(not BUNDLED, reason='only when testing an installed wheel')
+def test_bundled_runner():
+    path = find_runner()
+    assert path == pathlib.Path(scriptlet_testing.__file__).parent / '_bin' / 'runner'
+    assert os.access(path, os.X_OK)
+
+
+@skip_if_bundled
 def test_no_runner(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv('SCRIPTLET_TESTING_RUNNER')
     with pytest.raises(RunnerError, match='SCRIPTLET_TESTING_RUNNER'):

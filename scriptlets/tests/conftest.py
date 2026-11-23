@@ -1,7 +1,12 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""Build the runner (native and wasip1) once per session unless the environment names one."""
+"""Build the runner (native and wasip1) once per session unless the environment names one.
+
+With ``SCRIPTLET_TESTING_BUNDLED=1`` nothing is built and the tests use the
+runner bundled in the installed wheel, so they check the wheel itself. The
+wasm tests then need ``$SCRIPTLET_TESTING_RUNNER_WASM`` or skip.
+"""
 
 from __future__ import annotations
 
@@ -12,23 +17,37 @@ import subprocess
 import tempfile
 
 import pytest
-from scriptlet_testing._process import RUNNER_ENV, WASM_ENV
+from scriptlet_testing._process import RUNNER_ENV, WASM_ENV, find_runner
 
 HERE = pathlib.Path(__file__).parent
 RUNNER_SRC = HERE.parent / 'runner'
+BUNDLED_ENV = 'SCRIPTLET_TESTING_BUNDLED'
 TESTDATA = RUNNER_SRC / 'testdata'
+
+BUNDLED = bool(os.environ.get(BUNDLED_ENV))
+skip_if_bundled = pytest.mark.skipif(BUNDLED, reason='the installed wheel bundles a runner')
 
 _build_dir: str | None = None
 
 
 def pytest_configure(config: pytest.Config) -> None:
     global _build_dir
+    if BUNDLED:
+        if os.environ.get(RUNNER_ENV):
+            raise pytest.UsageError(f'${BUNDLED_ENV} and ${RUNNER_ENV} are both set')
+        # Fails early, with the reason, if the installed package has no runner.
+        find_runner()
+        return
     # Inner pytester runs inherit the environment, so only the outer session builds.
     if os.environ.get(RUNNER_ENV):
         return
     _build_dir = tempfile.mkdtemp(prefix='scriptlet-runner-')
     out = pathlib.Path(_build_dir) / 'runner'
-    subprocess.run(['go', 'build', '-trimpath', '-o', str(out), '.'], cwd=RUNNER_SRC, check=True)
+    # Built as the wheels build it, without cgo.
+    env = {**os.environ, 'CGO_ENABLED': '0'}
+    subprocess.run(
+        ['go', 'build', '-trimpath', '-o', str(out), '.'], cwd=RUNNER_SRC, check=True, env=env
+    )
     os.environ[RUNNER_ENV] = str(out)
     if not os.environ.get(WASM_ENV):
         wasm = pathlib.Path(_build_dir) / 'runner.wasm'
@@ -36,7 +55,7 @@ def pytest_configure(config: pytest.Config) -> None:
             ['go', 'build', '-trimpath', '-o', str(wasm), '.'],
             cwd=RUNNER_SRC,
             check=True,
-            env={**os.environ, 'GOOS': 'wasip1', 'GOARCH': 'wasm'},
+            env={**env, 'GOOS': 'wasip1', 'GOARCH': 'wasm'},
         )
         os.environ[WASM_ENV] = str(wasm)
 

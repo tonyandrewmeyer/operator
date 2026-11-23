@@ -74,7 +74,7 @@ testpaths = ["tests"]
 addopts = ["-p", "pytester"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "scripts"]
 exclude = [".tox", ".venv"]
 pythonVersion = "3.10"  # Check that no Python > 3.10 features are used.
 pythonPlatform = "All"

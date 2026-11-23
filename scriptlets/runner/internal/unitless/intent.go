@@ -1,0 +1,55 @@
+// Code copied from juju/juju internal/worker/unitless/intent.go at commit 145ae4877aba52e983dd426bf7a5009d7363fd6d.
+// Do not edit: only the import paths of Juju-internal packages are rewritten
+// (see scripts/check-juju-copy.sh). Everything after this header is Juju's.
+
+// Copyright 2026 Canonical Ltd.
+// Licensed under the AGPLv3, see LICENCE file for details.
+
+package unitless
+
+import (
+	"github.com/canonical/starform/starform"
+	"github.com/canonical/starlark/starlark"
+
+	"scriptlet-runner/internal/errors"
+)
+
+// IntentType identifies a type of Intent.
+type IntentType string
+
+// Intent is a declared action resulting from scriptlet execution.
+type Intent struct {
+	// Type identifies the type of intent.
+	Type IntentType
+
+	// Args are arguments to pass to service methods that
+	// are called according to the intent type.
+	Args map[string]any
+}
+
+// IntentCollector accumulates intents during one scriptlet event.
+type IntentCollector struct {
+	intents []Intent
+}
+
+// Intents returns all collected intents.
+func (c *IntentCollector) Intents() []Intent {
+	return c.intents
+}
+
+func (c *IntentCollector) append(thread *starlark.Thread, intent Intent) error {
+	appender := starlark.NewSafeAppender(thread, &c.intents)
+	if err := appender.Append(intent); err != nil {
+		return errors.Errorf("appending intent %q: %w", intent.Type, err)
+	}
+	return nil
+}
+
+func intentCollectorForThread(thread *starlark.Thread) (*IntentCollector, error) {
+	event := starform.Event(thread)
+	collector, ok := event.State.(*IntentCollector)
+	if !ok || collector == nil {
+		return nil, starform.ErrUnavailable
+	}
+	return collector, nil
+}

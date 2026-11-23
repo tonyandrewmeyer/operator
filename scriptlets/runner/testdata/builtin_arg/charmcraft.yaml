@@ -1,0 +1,7 @@
+type: charm
+name: fixture-builtin-arg
+summary: Runner fixture
+description: Runner fixture (builtin_arg).
+assumes:
+  - unitless
+  - juju >= 4.2

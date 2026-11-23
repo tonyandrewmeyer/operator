@@ -1,0 +1,7 @@
+type: charm
+name: fixture-step-limit
+summary: Runner fixture
+description: Runner fixture (step_limit).
+assumes:
+  - unitless
+  - juju >= 4.2

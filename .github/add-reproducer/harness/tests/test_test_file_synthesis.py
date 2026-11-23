@@ -111,10 +111,9 @@ def test_needs_test_file_false_for_non_none_substrate():
 
 
 def test_needs_test_file_true_when_pytest_target_never_written():
-    # #2045's REAL extraction shape (fixtures/extractions/2045.json):
-    # commands[] is non-empty and even names a pytest target, but the file
-    # is only ever mentioned in a `#`-comment, never actually created by a
-    # heredoc. Checking only for an empty commands[] would miss this.
+    # #2045's real extraction (fixtures/extractions/2045.json) names a pytest
+    # target in commands[] but never writes the file, so checking only for an
+    # empty commands[] would miss it.
     hyp = _hypothesis(
         commands=[
             "uv init /tmp/repro-2045-cwd",
@@ -232,10 +231,8 @@ def test_synthesizer_prompt_carries_expected_observed_and_symbol_anchor():
 
 
 def test_fixture_llm_replays_recorded_2045_synthesis():
-    # fixtures/test_file_synthesis/2045.json -- a real-derived, assertion-
-    # bearing body (see that fixture's own _provenance note). Symmetry check
-    # with Extractor/SurfaceInferrer/Composer: a recording present means no
-    # fallback.
+    # A recorded synthesis (fixtures/test_file_synthesis/2045.json) means no
+    # fallback, as with the other fixture-backed stages.
     llm = FixtureLLM(FIXTURES)
     test_file = TestFileSynthesizer(llm).synthesize(_issue(), _hypothesis())
     assert "charm_dir" in test_file.body
@@ -283,14 +280,10 @@ def test_synthesizer_falls_back_on_malformed_or_unusable_response(response):
 
 
 def test_fallback_body_is_syntactically_valid_and_fails_loudly_when_run():
-    # The fallback must itself be real, executable Python that raises --
-    # "fails loudly", not merely un-runnable at the Python level the way a
-    # syntax error would be. `ops` isn't a dependency of this harness's own
-    # test env (it only ever gets installed inside the scratch `uv`
-    # project the real runner builds), so a bare-bones stub module stands
-    # in for it here -- the fallback raises before ever touching
-    # `ops.testing.Context`/`State`, so nothing beyond `ops.CharmBase`
-    # existing as a class needs to work.
+    # The fallback must be valid Python that raises when run, not a syntax
+    # error. `ops` isn't installed in this harness's own test env, so a stub
+    # module stands in; the fallback raises before using anything but
+    # `ops.CharmBase`.
     llm = _StaticLLM(error=LLMError("no key configured"))
     test_file = TestFileSynthesizer(llm).synthesize(_issue(), _hypothesis())
 
@@ -364,11 +357,9 @@ def test_write_synthesized_test_file_if_needed_noop_when_not_needed_never_calls_
 
 
 def test_write_synthesized_test_file_if_needed_keeps_uv_add_pytest_setup_line(tmp_path):
-    # A plain `"pytest" not in c` filter would drop `uv add 'ops[testing]'
-    # pytest` -- a legitimate setup command, not the broken invocation this
-    # filter exists to remove -- silently stripping pytest out of the venv.
-    # `uv add 'ops[testing]' pytest` is the standard modern extraction shape
-    # (uv init -> uv add -> heredoc -> pytest) and must survive this filter.
+    # `uv add 'ops[testing]' pytest` is a setup command, not the broken
+    # invocation this filter removes, so a plain `"pytest" not in c` filter
+    # would be wrong.
     hyp = _hypothesis(commands=["uv init --bare .", "uv add 'ops[testing]' pytest"])
     context = {"workdir": str(tmp_path)}
     updated = write_synthesized_test_file_if_needed(hyp, _issue(), FixtureLLM(FIXTURES), context)
@@ -380,10 +371,9 @@ def test_write_synthesized_test_file_if_needed_keeps_uv_add_pytest_setup_line(tm
 
 
 def test_write_synthesized_test_file_if_needed_drops_broken_pytest_and_comment(tmp_path):
-    # The real #2045 shape: the broken `pytest test_cwd.py` invocation and
-    # the `#`-comment placeholder must both be dropped, genuine setup
-    # commands (uv init/uv add) kept, and the real pytest invocation
-    # appended once.
+    # The #2045 shape: drop the broken `pytest test_cwd.py` invocation and the
+    # `#`-comment placeholder, keep the setup commands, and append the real
+    # pytest invocation once.
     hyp = _hypothesis(
         commands=[
             "uv init /tmp/repro-2045-cwd",
@@ -412,14 +402,9 @@ def test_write_synthesized_test_file_if_needed_falls_back_when_llm_unusable(tmp_
 
 
 def test_run_hypothesis_2045_writes_file_before_dispatching_to_seam(tmp_path):
-    # End-to-end through run_hypothesis(): #2045's real extraction shape
-    # (fixtures/extractions/2045.json, fixtures/issues/2045.json,
-    # fixtures/runs/2045.json, from a real hand-walk of the issue) has
-    # commands[] that names a pytest target but never writes it (see
-    # test_needs_test_file_true_when_pytest_target_never_written above),
-    # so the "none" branch must still synthesise and write a test file
-    # before FixtureRunnerSeam.run() replays the recorded output. Confirms
-    # the wiring, not just the pure function in isolation.
+    # End-to-end through run_hypothesis() with the #2045 fixtures: the "none"
+    # branch must synthesise and write the test file before the seam replays
+    # the recorded output.
     import runner_stage
 
     issue = Issue.from_dict(json.loads((FIXTURES / "issues" / "2045.json").read_text()))

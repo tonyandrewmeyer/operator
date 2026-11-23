@@ -85,16 +85,10 @@ def choose_branch(hypothesis: Hypothesis) -> str:
     return "k8s-scratch"
 
 
-# Branches whose runner actually executes `hypothesis.commands` through a
-# shell, and which therefore need the runnability gate. `k8s-scratch` and
-# `lxd-scratch` are excluded deliberately: `seams/runner.py`'s
-# `_run_k8s_scratch`/`_run_lxd_scratch` synthesise their own sequence
-# (`concierge prepare` -> `charmcraft pack` -> deploy -> stimulus) from the
-# rendered scaffold and `surface.pebble_service`, so `commands[]` is not the
-# recipe there. Note the latent issue that leaves behind: #2639's hand
-# extraction carries unfilled `<k8s-charm-...>`/`<unit>` placeholders, which
-# a shell reads as redirects -- if either scratch branch ever does start
-# running `commands[]`, they need templating against the rendered charm
+# Branches whose runner executes `hypothesis.commands` through a shell, and so
+# need the runnability gate. The scratch branches build their own sequence
+# from the rendered scaffold and `surface`, so `commands[]` isn't the recipe
+# there; if they ever run it, its `<unit>`-style placeholders need templating
 # first.
 COMMAND_EXECUTING_BRANCHES = frozenset({"none", "k8s-clone"})
 
@@ -125,32 +119,12 @@ def check_runnable(hypothesis: Hypothesis, branch: str) -> tuple[bool, str | Non
 # `hypothesis.commands`, and whose whole point is the stimulus.
 SCRATCH_BRANCHES = frozenset({"k8s-scratch", "lxd-scratch"})
 
-# The private uv workspace root each `none`-branch issue gets, written one
-# directory above the directory its commands run in.
-#
-# Why it exists: the branch's first command is the
-# extraction's own `uv init --bare .`, and uv walks *up* from the working
-# directory looking for a workspace root. Given no root of its own it finds
-# whichever project happens to enclose the scratch tree -- in the shipped
-# layout, the harness itself -- and then installs the issue's `ops` into the
-# harness's venv, runs the issue's pytest under the harness's
-# `[tool.pytest.ini_options]`, and appends the scratch directory to the
-# harness's tracked `pyproject.toml`. Handing it a root of its own stops all
-# three at the source, without touching a single command string: `uv init
-# --bare .` stays exactly what the extraction wrote, which matters because
-# `classifier.py`'s rung 0c keys on it and the composed comment tells a
-# reader to paste it.
-#
-# Why it carries pytest, which is the part that is not obvious. The dominant
-# extraction shape writes a pytest test and installs `ops[testing]` -- and
-# nothing else. `#2045`'s four commands are an example: no pytest anywhere in
-# them. Without a root of its own that works only because the harness's own
-# dev group has already put pytest in the venv uv chose, so the contamination
-# is load-bearing, and isolating the scratch project without replacing what
-# it supplied turns a reproduction into `ModuleNotFoundError: No module
-# named 'ops'` at collection.
-# One dev dependency, deliberately: this replaces what the harness was
-# supplying by accident, and nothing more.
+# The private uv workspace root each `none`-branch issue gets, one directory
+# above where its commands run. uv walks up looking for a workspace root, so
+# without one the extraction's `uv init --bare .` would adopt the harness
+# project and install into its venv. This keeps the command strings unchanged.
+# It carries pytest because most extractions install only `ops[testing]` and
+# relied on the harness venv for pytest.
 _SCRATCH_PROJECT_PYPROJECT = """\
 [project]
 name = "add-reproducer-scratch"
@@ -297,30 +271,19 @@ def synthesize_test_file_if_needed(hypothesis: Hypothesis, issue: Issue, llm: LL
     if not needs_test_file(hypothesis):
         return hypothesis
     test_file = TestFileSynthesizer(llm).synthesize(issue, hypothesis)
-    # Keep only genuinely executable setup; drop comment placeholders, the
-    # broken pytest invocation being replaced, and prose and bare code
-    # fragments. Prose kept as a "setup command" would exit 127 mid-sequence,
-    # which the classifier's rung 7 reads as `partial`: another
-    # comment-worthy outcome from a command that never ran.
-    # `is_pytest_invocation()` only matches an actual pytest invocation (bare
-    # or `uv run`), not "pytest" as a trailing package name: a bare
-    # `"pytest" not in c` substring check would drop `uv add 'ops[testing]'
-    # pytest` -- a legitimate setup command, not the broken invocation this
-    # filter exists to remove -- silently stripping pytest out of the venv
-    # before the appended, synthesized-test invocation ever ran.
+    # Keep only genuinely executable setup, dropping comment placeholders, prose,
+    # code fragments and the pytest invocation being replaced: prose would exit
+    # 127 mid-sequence and be scored as `partial`. `is_pytest_invocation()` rather
+    # than a substring check, so `uv add 'ops[testing]' pytest` is kept.
     setup_commands = [
         c
         for c in hypothesis.commands
         if not is_pytest_invocation(c) and runnability.classify_command(c) is runnability.Shape.SHELL
     ]
-    # ...and if the extraction supplied no environment setup at all, build
-    # one. A live extraction can return `commands: []`, with no `uv init`
-    # -> `uv add` prologue at all. With nothing prepended,
-    # `uv run pytest` finds no project in the scratch dir, walks *up* to the
-    # harness's own pyproject, runs against the harness venv (which has no
-    # `ops`), and dies with ModuleNotFoundError at collection. A synthesised
-    # test is always an `ops.testing` scaffold, so the dependency set is
-    # known rather than guessed.
+    # ...and if the extraction supplied no environment setup, build one, or
+    # `uv run pytest` would walk up to the harness's project and fail to import
+    # `ops`. A synthesised test is always an `ops.testing` scaffold, so the
+    # dependencies are known.
     if not any(_ESTABLISHES_ENVIRONMENT_RE.search(c) for c in setup_commands):
         setup_commands = [*setup_commands, "uv init --bare", "uv add 'ops[testing]' pytest"]
     commands = [*setup_commands, f"uv run pytest {test_file.path} -v"]

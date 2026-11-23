@@ -107,9 +107,8 @@ def test_marker_prefix_matches_what_the_composer_appends(run):
 
 # -- the extraction record reaches the artefact, the log and the summary -----
 #
-# A run that stops at the in-scope gate has no `RunResult`, so without the
-# extraction record it would write nothing at all and `upload-artifact`
-# would report `No files were found`.
+# A run that stops at the in-scope gate has no `RunResult`, so the
+# extraction record is all `upload-artifact` has to upload.
 
 
 def _gate_stop_result(number: int = 2484):

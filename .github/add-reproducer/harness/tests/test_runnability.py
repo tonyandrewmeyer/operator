@@ -51,11 +51,8 @@ def test_prose_is_not_a_command(command):
 
 
 def test_python_fragment_is_not_a_command():
-    # Both are real #2327 live output. They fail the check for different
-    # reasons -- the first has parens, so bash rejects it outright; the second
-    # parses as a bare word and fails the first-token check instead. Which of
-    # PROSE/CODE_FRAGMENT they land on isn't meaningful, so assert the thing
-    # the gate actually consumes: neither is runnable.
+    # They fail for different reasons (bash rejects the parens; the other parses
+    # as a bare word), so assert only what the gate consumes: neither runs.
     for fragment in (
         "relation = self.model.get_relation('not-integrated', 1)",
         "relation.data[self.app]",
@@ -65,9 +62,7 @@ def test_python_fragment_is_not_a_command():
 
 
 def test_unfilled_placeholder_is_not_runnable():
-    # The hand extraction for #2639 -- the only hypothesis that has ever
-    # reproduced -- carries these. A shell reads <...> as a redirect, so the
-    # step-4 walk must have filled them in by hand.
+    # A shell reads `<...>` as a redirect, so placeholders aren't runnable.
     assert classify_command("juju deploy <k8s-charm-with-workload>") is Shape.CODE_FRAGMENT
 
 
@@ -107,13 +102,8 @@ def test_assess_accepts_a_real_hand_extraction():
 
 
 def test_hand_corpus_runnability_is_measured_not_assumed():
-    # 5 of the 6 in_scope hand extractions are runnable; #2639 is not,
-    # because of the unfilled placeholders above. #2107 (added alongside
-    # the lxd-scratch branch, see fixtures/extractions/2107.json's
-    # _provenance) is a real live extraction whose commands[] never
-    # actually touch juju/lxd -- runnable here just means "a shell accepts
-    # it", not "this is the right recipe for its substrate". Pinned so a
-    # corpus edit that breaks one of these is visible rather than silent.
+    # Pinned so that a corpus edit changing any of these is visible. Runnable
+    # means only "a shell accepts it", not "the right recipe for its substrate".
     results = {}
     for path in sorted((FIXTURES / "extractions").glob("*.json")):
         raw = json.loads(path.read_text())
@@ -143,20 +133,14 @@ def _in_scope_command_lists(directory: Path) -> list[list[str]]:
 @pytest.mark.parametrize(
     "run_dir,expected",
     [
-        # Original run: prose, bare test names, Python fragments. The one
-        # runnable entry is #2341's `python3 -m pytest tests/test_scenario.py`.
+        # Original run.
         (LIVE_SUBSTRATE, (1, 7)),
-        # After the substrate fix. Unchanged fraction -- that fix
-        # targeted routing, not commands -- though the one runnable issue
-        # changed to #2045.
+        # After the substrate fix.
         (LIVE_COMMANDS, (1, 7)),
-        # After the commands-prompt hardening: five issues emit
-        # uv init -> uv add -> heredoc -> pytest.
+        # After the commands-prompt hardening.
         (LIVE_INSCOPE, (5, 7)),
-        # After the in_scope definition: #2185 and #2304 are now
-        # correctly out of scope, so they leave the denominator rather than
-        # counting as failures, and #2639 gained a runnable recipe. 4/5 = 80%,
-        # over the >=70% bar.
+        # After the in_scope definition, which moves out-of-scope issues out of the
+        # denominator.
         (LIVE_OUT, (4, 5)),
     ],
 )
@@ -281,9 +265,8 @@ def test_gate_blocks_prose_on_the_clone_branch(tmp_path):
 
 
 def test_gate_does_not_apply_to_k8s_scratch():
-    # `_run_k8s_scratch` builds its own sequence from the rendered scaffold,
-    # so commands[] isn't the recipe there -- gating it would kill #2639, the
-    # only hypothesis that has ever reproduced.
+    # The scratch branches build their own sequence from the rendered scaffold,
+    # so `commands[]` isn't the recipe there and isn't gated.
     import runner_stage
 
     hyp = _prose_hypothesis(2639, "Run the thing")

@@ -23,23 +23,16 @@ from seams.llm import LLMError, LLMSeam
 # surface-inference boundary so a regression can never reach render.py.
 _CHARM_NAME_NUMERIC_SEGMENT_RE = re.compile(r"-\d")
 
-# `<workload-container>`, `<unit>` and friends -- the exact shape #2639's
-# own hand extraction carried, which a shell reads as a redirect.
-# `runnability.py` guards `hypothesis.commands` against this; the stimulus
-# is built from `pebble_service.command` instead and had no such guard.
+# Unfilled placeholders such as `<unit>`, which a shell reads as a
+# redirect. The stimulus is built from `pebble_service.command`, which
+# `runnability.py`'s guard on `hypothesis.commands` doesn't cover.
 _PLACEHOLDER_RE = re.compile(r"<[^>]+>")
 
 # `pebble notify --user=...` -- a flag pebble does not have.
 _PEBBLE_USER_FLAG_RE = re.compile(r"--user[= ]")
-# Flags whose value pebble parses as a Go duration. `--user` was an invented
-# flag; this is the next variant along -- a *real* flag with a malformed
-# value. A live call returned `/charm/bin/pebble exec --timeout=1 ls`, which
-# pebble rejects outright:
-#   error: invalid argument for flag `--timeout' (expected time.Duration):
-#   time: missing unit in duration "1"
-# Same end state as the `--user` case: the stimulus never fires and the run
-# reaches a rung having done nothing to the charm. Prompt text alone has
-# failed in this spot more than once, so this is a validation rule.
+# Flags whose value pebble parses as a Go duration. A model can write
+# `--timeout=1`, which pebble rejects ("missing unit in duration"), so the
+# stimulus never fires. Prompt text alone hasn't prevented it.
 _DURATION_FLAGS = ("timeout",)
 _DURATION_FLAG_RE = re.compile(
     r"--(?P<flag>" + "|".join(_DURATION_FLAGS) + r")(?:=|\s+)(?P<value>\S+)"
@@ -127,19 +120,10 @@ def validate(raw: dict) -> None:
     if surface not in (None, "update-status", "config-changed", "relation-changed", "pebble-custom-notice"):
         raise SurfaceInferenceInvalid(f"ops_api_surface invalid: {surface!r}")
 
-    # The stimulus half. Live calls for #2639 can return a null
-    # `pebble_service.command`; unchecked, the run deploys a charm, pokes
-    # nothing, and still gets a verdict. The fixture
-    # (`fixtures/surface/2639.json`) is hand-filled -- its own
-    # `_command_note` says so -- so a fixture run never sees the null.
-    #
-    # Tied to `expected_signal` rather than demanded unconditionally:
-    # that field is what puts the classifier on the
-    # positive-signal-absent rung, so "signal promised, nothing done to
-    # produce it" is exactly the invalid combination. A crash-shaped
-    # hypothesis with no expected_signal (#2107: a machine charm that
-    # errors on update-status, `pebble_service: {}`) is a legitimate
-    # deploy-only experiment and stays valid.
+    # The stimulus half. Without a `pebble_service.command`, the run would
+    # deploy a charm, poke nothing, and still get a verdict. Only required when
+    # `expected_signal` is set: that combination promises a signal with nothing
+    # to produce it, while a crash-shaped, deploy-only hypothesis is valid.
     pebble = raw.get("pebble_service") or {}
     if raw.get("expected_signal"):
         missing = [f for f in ("command", "user") if not (isinstance(pebble.get(f), str) and pebble[f].strip())]
@@ -150,10 +134,8 @@ def validate(raw: dict) -> None:
                 "for a signal it never did anything to produce"
             )
     command = pebble.get("command")
-    # `pebble notify` has no `--user` flag -- `as_user_in_container_command`
-    # exists precisely because the user has to be applied by *running as*
-    # them. Live calls can invent `pebble notify --user=_daemon_ ...`;
-    # pebble rejects the unknown flag, so the stimulus silently never fires.
+    # `pebble notify` has no `--user` flag (the user is applied by running as
+    # them), so pebble would reject it and the stimulus would never fire.
     if isinstance(command, str) and _PEBBLE_USER_FLAG_RE.search(command):
         raise SurfaceInferenceInvalid(
             f"pebble_service.command={command!r} passes a --user flag, which "
@@ -222,27 +204,12 @@ class SurfaceInferrer:
 
 # --- substrate:none test-body synthesis -------------------------------
 #
-# A plain `uv venv` + `pytest` run assumes `commands[]` already contains a
-# runnable pytest invocation. `#2045` (an `ops[testing]`/Scenario
-# `os.getcwd()` bug) is a case where it doesn't -- the extraction has enough
-# `expected`/`observed` text to reason about, but the issue body never gave a
-# self-contained repro snippet, so `commands[]` comes back empty.
-#
-# This synthesises a runnable `ops.testing.Context`/`State` scaffold instead
-# of leaving the hypothesis un-runnable, and does so with an LLM call rather
-# than a fixed template. A fixed template such as
-# `ctx.run(ctx.on.update_status(), state_in)` followed by a `# TODO` comment
-# has no assertion at all and **passes** under `uv add 'ops[testing]' pytest
-# && uv run pytest`, so every `substrate: none` hypothesis routed through it
-# would report `did_not_reproduce` regardless of whether the bug was real.
-# `TestFileSynthesizer` (below) avoids that by asking the model to encode the
-# specific `expected`/`observed` claim as a real assertion, behind the same
-# `LLMSeam` pattern `Extractor`/`SurfaceInferrer`/`Composer` already use. Any
-# failure (no key, transport error, invalid JSON, unusable body) falls back
-# to `_loud_failing_test_file()`, not to an always-passing template -- an
-# unfilled scaffold must fail loudly and be recognisable as such
-# (`classifier.py`'s `UNRUNNABLE_SYNTHESIS_INCOMPLETE` rung), never read as a
-# clean "did not reproduce".
+# When `commands[]` has no runnable pytest invocation, an LLM writes an
+# `ops.testing` test that encodes the `expected`/`observed` claim as a real
+# assertion. A fixed template would have no assertion and always pass,
+# reporting `did_not_reproduce` whether or not the bug is real. Any failure
+# falls back to `_loud_failing_test_file()`, which the classifier's
+# `UNRUNNABLE_SYNTHESIS_INCOMPLETE` rung recognises.
 _PYTEST_TARGET_RE = re.compile(r"pytest\s+(\S+\.py)\b")
 
 
@@ -254,15 +221,9 @@ def _heredoc_writes(filename: str, commands: list[str]) -> bool:
     return any(pattern.search(c) for c in commands)
 
 
-# `write_synthesized_test_file_if_needed()`'s setup-command filter must not
-# drop every command containing the substring "pytest" -- that would also
-# drop `uv add 'ops[testing]' pytest` (the standard modern extraction shape,
-# `uv init` -> `uv add` -> heredoc -> `pytest`), stripping pytest out of the
-# venv entirely before the appended, synthesized-test invocation ever ran.
-# This regex only matches an actual pytest *invocation*
-# (bare `pytest ...` or `uv run pytest ...`, optionally chained with
-# `&&`/`;`/`|`), not "pytest" appearing as a trailing package name to
-# `uv add`/`pip install`.
+# Matches only a pytest invocation (bare or `uv run`, optionally after
+# `&&`/`;`/`|`), not "pytest" as a package name in `uv add ... pytest`, so
+# the setup-command filter doesn't strip pytest out of the venv.
 _PYTEST_INVOCATION_RE = re.compile(r"(?:^|&&|;|\|)\s*(?:uv\s+run\s+)?pytest\b")
 
 
@@ -273,8 +234,7 @@ def is_pytest_invocation(command: str) -> bool:
     return bool(_PYTEST_INVOCATION_RE.search(command))
 
 # The marker `classifier.py`'s `UNRUNNABLE_SYNTHESIS_INCOMPLETE` rung looks
-# for. Public (not `_`-prefixed) because classifier.py imports it directly --
-# the two must never drift out of sync with each other.
+# for. Public because classifier.py imports it, so the two can't drift apart.
 SYNTHESIS_INCOMPLETE_MARKER = "SYNTHESIS_INCOMPLETE"
 
 _LOUD_FAILING_TEMPLATE = '''\

@@ -96,14 +96,8 @@ class LiveOpenRouterLLM:
         self.model = model or os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL)
         self.max_attempts = max_attempts
         self._sleep = sleep  # injectable so tests don't actually wait
-        # One entry per completed call, in call order. `last_raw_content` /
-        # `last_usage` only ever described the *last* call, so a run that made
-        # three calls could say nothing about the first two -- and the fields
-        # that would identify a bad one are exactly the per-call ones:
-        # OpenRouter serves `deepseek/deepseek-chat` from several providers,
-        # routes per account, and reports which it used in the response's own
-        # `provider`/`model`. Without them, provider variance cannot be told
-        # apart from anything else that differs between two runs.
+        # One entry per call, with the provider and model OpenRouter actually
+        # used, so provider variance can be told apart from other differences.
         self.calls: list[dict] = []
 
     def _post(self, body: bytes) -> dict:
@@ -155,11 +149,9 @@ class LiveOpenRouterLLM:
             }
         ).encode()
         payload = self._post(body)
-        # Recorded before the content is read, so a response this seam then
-        # rejects still leaves a record of which provider produced it.
-        # `.get()` throughout: `provider` is not in OpenRouter's documented
-        # response schema for every provider, and a missing field must leave
-        # the entry present with a null rather than lose the whole call.
+        # Recorded before the content is read, so a rejected response still shows
+        # which provider produced it. `.get()` because `provider` isn't guaranteed
+        # in every response.
         self.calls.append(
             {
                 "purpose": purpose,
@@ -169,10 +161,8 @@ class LiveOpenRouterLLM:
             }
         )
         content = payload["choices"][0]["message"]["content"]
-        # Kept so calibration runs can record exactly what the model said,
-        # including when it fails to parse. Both
-        # still describe the last call only; `self.calls` is the per-call
-        # record.
+        # Kept so calibration runs can record what the model said, even when it
+        # fails to parse. These describe the last call only; see `self.calls`.
         self.last_raw_content = content
         self.last_usage = payload.get("usage")
         try:
@@ -199,12 +189,8 @@ class FixtureLLM:
 
     def __init__(self, fixtures_dir: Path):
         self.fixtures_dir = Path(fixtures_dir)
-        # Same attribute and the same shape as `LiveOpenRouterLLM.calls`, so
-        # anything that reads the call record works in fixture mode too --
-        # which is the only mode the test suite has. `model`/`provider`/
-        # `usage` stay `None` here on purpose: nothing was called, and a
-        # record that named a provider for a replayed fixture would be a lie
-        # in exactly the direction this record exists to stop.
+        # Same shape as `LiveOpenRouterLLM.calls`, so call-record readers work in
+        # fixture mode. `model`/`provider`/`usage` stay `None`: nothing was called.
         self.calls: list[dict] = []
 
     def complete_json(self, *, purpose: str, prompt: str, context: dict) -> dict:

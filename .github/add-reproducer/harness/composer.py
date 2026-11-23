@@ -43,12 +43,8 @@ from seams.llm import LLMSeam
 
 _TRIM_CHARS = 1500
 
-#: Prepended verbatim to every composed comment. It mitigates the cost of a
-#: false comment with a visible "reproduced by automation, please verify" line,
-#: since the trailing HTML marker isn't reader-visible. It is worded as an
-#: *attempt* so the one string covers the `partial` rung as honestly as the
-#: reproduced ones, and it is a blockquote so it reads as chrome above the
-#: comment rather than as the comment's first claim.
+# Prepended to every composed comment, since the trailing HTML marker isn't
+# visible to readers. Worded as an attempt so it also fits `partial`.
 AUTOMATION_PREFIX = (
     "> **Automated reproduction attempt.** These steps were produced by a bot "
     "that ran the commands below; please verify before relying on them."
@@ -238,10 +234,8 @@ def _test_file_to_render(hypothesis: Hypothesis, run_result: RunResult) -> TestF
     test_file = _resolved_test_file(hypothesis)
     if test_file is None:
         return None
-    # `CommandResult.command` is the whole command string, heredoc body and
-    # all, and it is what the "Commands run" block renders verbatim -- so a
-    # substring test against it is exactly the question "will the reader see
-    # this body below?", not an approximation of it.
+    # The "Commands run" block renders each command verbatim, heredoc body
+    # included, so this is exactly "will the reader see this body below?".
     if any(test_file.body in c.command for c in run_result.commands):
         return None
     return test_file
@@ -282,12 +276,9 @@ def _control_output(run_result: RunResult) -> str | None:
 
 
 def _reproduced_line(hypothesis: Hypothesis, outcome: Outcome, timestamp: str) -> str:
-    # A one-line "reproduced on <base>/<substrate> at <timestamp>" for both
-    # `reproduced` and `partial` outcomes. The verb is outcome-aware: a
-    # `partial` attempt did not reproduce the bug, so its line says
-    # "Attempted". Where it ran is said in words: a Scenario-only run names
-    # no base or substrate, and an unknown one is left out rather than shown
-    # as `unpinned/unpinned`, which would contradict `substrate=none`.
+    # The verb is outcome-aware because a `partial` attempt did not reproduce
+    # the bug. An unknown base or substrate is left out rather than shown as
+    # `unpinned/unpinned`, which would contradict `substrate=none`.
     verb = "Attempted" if outcome == Outcome.PARTIAL else "Reproduced"
     mp = hypothesis.moving_parts
     if _scenario_only(hypothesis):
@@ -332,10 +323,9 @@ def compose_template(
     blocks.append(f"Versions: {_versions_line(hypothesis, run_result)}")
     test_file = _test_file_to_render(hypothesis, run_result)
     if test_file is not None:
-        # Collapsed: these bodies are long enough that an uncollapsed one
-        # pushes the rest below the fold. GFM only renders markdown inside
-        # <details> when there's a blank line straight after <summary>, so
-        # that blank line isn't cosmetic.
+        # Collapsed so a long body doesn't push the rest below the fold. GFM
+        # only renders markdown inside <details> with a blank line after
+        # <summary>, so that blank line matters.
         blocks.append(
             f"<details>\n<summary>{_test_file_heading(hypothesis, test_file)}</summary>\n\n"
             f"{_fence(test_file.body, 'python')}\n\n</details>"
@@ -358,8 +348,7 @@ def compose_template(
     return "\n\n".join(blocks)
 
 
-#: The renderer under its other names: `pipeline.py` once called it plain
-#: `compose`, and `render` is what it does.
+# Aliases for callers that use the other names.
 compose = compose_template
 render = compose_template
 

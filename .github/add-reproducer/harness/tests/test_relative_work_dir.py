@@ -58,10 +58,8 @@ def _lxd_issue() -> Issue:
 
 @pytest.fixture(autouse=True)
 def _stub_render_charm(monkeypatch):
-    # `scaffold.render_charm()` shells out to `uv lock` for real (network
-    # required); these tests are about work-dir path handling, not about
-    # exercising the real charm render, so stub it to just create the
-    # directory `context["charm_dir"]` is later built from.
+    # `scaffold.render_charm()` runs `uv lock` for real, which needs the network,
+    # so stub it to create only the directory these tests need.
     def _fake_render_charm(surface, out_dir: Path, *, source_issue: int | None = None) -> Path:
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir
@@ -120,10 +118,8 @@ def test_relative_work_dir_produces_an_absolute_charm_dir_and_workdir(tmp_path, 
 
 
 def test_default_cli_out_dir_is_relative_and_pipeline_still_resolves_it(tmp_path, monkeypatch):
-    # `pipeline.py main()`'s own `--out-dir` default is
-    # `Path("add-reproducer-out")` -- relative -- so an invocation with no
-    # `--out-dir` flag at all hits exactly this shape, not only a workflow
-    # that passes one explicitly.
+    # `pipeline.py`'s own `--out-dir` default is relative, so a plain
+    # invocation hits this shape too.
     monkeypatch.chdir(tmp_path)
     default_out_dir = Path("add-reproducer-out")
     assert not default_out_dir.is_absolute()

@@ -100,14 +100,9 @@ def test_choose_branch_refuses_to_guess_a_branch(substrate):
 
 
 def test_2107_skipped_stale_repo_version_null_and_closed():
-    # The one real substrate:lxd extraction in the corpus (see
-    # fixtures/extractions/2107.json's _provenance) is also CLOSED with
-    # repo_version null, same 2/2-plus-one pattern as #2341/#2327 --
-    # meaning this real case never actually reaches choose_branch()/the
-    # lxd-scratch runner via the full pipeline. Recorded plainly rather than
-    # routed around: see test_choose_branch_lxd_scratch_for_2107 below and
-    # test_seams_runner.py for how lxd-scratch dispatch is actually
-    # exercised.
+    # The corpus's real `substrate: lxd` extraction is a closed issue with no
+    # `repo_version`, so it never reaches `choose_branch()` via the full
+    # pipeline; the test below and `test_seams_runner.py` cover lxd dispatch.
     hyp, issue = _load_hypothesis(2107), _load_issue(2107)
     assert issue.state == "CLOSED"
     assert hyp.moving_parts.repo_version is None
@@ -165,9 +160,7 @@ def test_choose_branch_does_not_misfire_clone_on_self_contained_snippet():
 
 
 def test_run_hypothesis_full_flow_2639():
-    # branch is "k8s-scratch", not "none", so test-file synthesis (and
-    # therefore the llm argument) is never touched here -- a stub that
-    # raises if called would prove it, but FixtureLLM is simplest.
+    # The scratch branch never synthesises a test, so the LLM isn't used.
     hyp, issue = _load_hypothesis(2639), _load_issue(2639)
     result = runner_stage.run_hypothesis(hyp, issue, None, _runner(), FixtureLLM(FIXTURES), {})
     assert not result.skipped_stale

@@ -25,10 +25,8 @@ from seams.runner import PlannedCommand, SubprocessRunnerSeam, build_plan
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 ARTEFACT = Path(__file__).parent.parent.parent / "spike-step-5" / "2639-k8s-scratch-dry-run-plan.md"
 
-# A whole bracketed token, e.g. `<unit>` / `<k8s-charm-with-workload>` --
-# #2639's own hand extraction's unfilled-placeholder shape. Deliberately not
-# a bare `<`/`>` check: those characters also appear legitimately in shell
-# redirects (`2>&1`, `/dev/null`), which a real resolved command may contain.
+# A whole bracketed token such as `<unit>`. Not a bare `<`/`>` check, since
+# shell redirects (`2>&1`) legitimately contain those characters.
 _PLACEHOLDER_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9_-]*>")
 
 
@@ -149,11 +147,8 @@ def test_2639_plan_covers_the_whole_branch_including_control():
 
 
 def test_2639_plan_has_no_unfilled_placeholders():
-    # #2639's own hand extraction (fixtures/extractions/2639.json) contains
-    # literal `<k8s-charm-with-workload-running-as-_daemon_>` / `<unit>`
-    # placeholders -- a trap for the plan builder. The plan must not
-    # contain any of that raw text, since it's built from `surface`, not
-    # `hypothesis.commands`.
+    # #2639's hand extraction contains literal `<unit>`-style placeholders in
+    # `commands`. The plan is built from `surface`, so none may appear in it.
     hypothesis = dry_run.load_hypothesis(2639, FIXTURES)
     assert any(_PLACEHOLDER_RE.search(c) for c in hypothesis.commands), (
         "fixture no longer has the placeholder shape to guard against"
@@ -171,10 +166,8 @@ def test_2639_plan_is_runnable():
 
 
 def test_2639_plan_without_a_real_stimulus_omits_stimulus_and_control(tmp_path):
-    # Guard against ever silently *inventing* a stimulus: when surface has no
-    # resolved pebble command (`command: null` in the surface fixture), the
-    # plan must only cover prepare/pack/deploy/status/debug-log, not
-    # fabricate a stimulus/control from nothing.
+    # With no resolved pebble command, the plan must not invent a stimulus or
+    # control step.
     fixtures_dir = tmp_path / "fixtures"
     (fixtures_dir / "extractions").mkdir(parents=True)
     (fixtures_dir / "surface").mkdir(parents=True)

@@ -82,10 +82,8 @@ def generate_plan(
     if charm_dir:
         context["charm_dir"] = charm_dir
     elif branch in ("k8s-scratch", "lxd-scratch"):
-        # A concrete, resolved path -- mirroring `pipeline.py`'s own
-        # `work_dir / f"charm-{issue.number}"` convention -- not a
-        # placeholder. Overridable via --charm-dir for a real dry run
-        # pointed at an actual rendered-charm directory.
+        # A concrete path matching `pipeline.py`'s `charm-<number>` convention, not a
+        # placeholder. Overridable via --charm-dir.
         context["charm_dir"] = f"work/charm-{issue_number}"
 
     plan = build_plan(branch=branch, hypothesis=hypothesis, surface=surface, context=context)

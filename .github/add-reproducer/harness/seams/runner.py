@@ -32,10 +32,8 @@ from models import CommandResult, Hypothesis, RunResult, SurfaceInference
 PER_COMMAND_TIMEOUT_S = 5 * 60
 PER_HYPOTHESIS_TIMEOUT_S = 20 * 60
 
-# How long to wait for the deployed unit's agent to settle before
-# stimulating it. Generous: on a contended box the pod pull plus agent
-# install is minutes, and the cost of waiting is wall-clock while the cost
-# of not waiting is a run that reports a verdict about nothing.
+# How long to wait for the deployed unit to settle before stimulating it.
+# Generous, because not waiting gives a verdict about nothing.
 UNIT_READY_TIMEOUT = "15m"
 UNIT_READY_TIMEOUT_S = 15 * 60
 UNIT_READY_POLL_INTERVAL_S = 10
@@ -46,182 +44,66 @@ UNIT_READY_POLLS = UNIT_READY_TIMEOUT_S // UNIT_READY_POLL_INTERVAL_S
 APP_REMOVAL_POLLS = 60
 APP_REMOVAL_POLL_INTERVAL_S = 5
 
-# Bounded poll for the control's own signal to become visible in `juju status`.
-#
-# The control is a `pebble notify` and a `juju status` read, and it is the
-# one step in the sequence that needs the cluster to catch up. Joined by a
-# bare `;`, the two race: on a real k8s run, notify-to-visible was under a
-# second (the stimulus's `juju ssh` returned, the charm logged the surface
-# firing, the hook completed and `juju status` showed the new message within
-# about half a second), and an immediate read lands in the same window,
-# which is a race rather than a margin.
-#
-# Losing it is rare but expensive: rung 5 reads the control only when
-# `expected_signal` is *absent* from the main run. The only path where the
-# control is load-bearing is
-# `REPRODUCED_POSITIVE_SIGNAL_ABSENT`, and a read that lands too early there
-# turns a comment-worthy outcome into a silent `DID_NOT_REPRODUCE` whose
-# stated reason -- "no control confirmed the observer works at all" -- is the
-# exact opposite of what happened.
-#
-# Two minutes against a sub-second latency, which is the posture the other
-# polls in this module already take (`UNIT_READY_TIMEOUT` is 15m against a
-# unit that typically goes active in about 20s): the control is the last step
-# in the sequence, so the cost of waiting is wall-clock nothing else is
-# queued behind, and the cost of not waiting is a wrong verdict.
+# Bounded poll for the control's own signal to show in `juju status`. An
+# immediate read races the hook that sets it, and losing that race turns
+# `REPRODUCED_POSITIVE_SIGNAL_ABSENT` into a wrong `DID_NOT_REPRODUCE`. The
+# control is the last step, so a generous budget costs nothing.
 CONTROL_SIGNAL_TIMEOUT_S = 2 * 60
 CONTROL_SIGNAL_POLL_INTERVAL_S = 5
 CONTROL_SIGNAL_POLLS = CONTROL_SIGNAL_TIMEOUT_S // CONTROL_SIGNAL_POLL_INTERVAL_S
 
-# Every juju command in a scratch sequence names its controller and model
-# explicitly. Otherwise each runs against whatever `juju switch` last pointed
-# at -- and `concierge prepare` *is* a `juju switch`: a run whose
-# extraction came back `substrate: lxd` bootstraps `concierge-lxd` and makes it
-# current, so the *next* run, however clearly `substrate: k8s`, silently packs
-# a k8s charm and deploys it to LXD. One run's branch choice changing the
-# substrate of the next is not a race; it is the ordinary case once a corpus
-# contains both substrates, and extraction is unstable enough to produce both
-# for one issue.
-#
-# The names are concierge's defaults, which is an assumption about a tool this
-# sequence already shells out to by name. Being wrong here fails loudly on the
-# next command; not naming them does not fail at all.
+# Every juju command names its controller and model explicitly, because
+# `concierge prepare` switches the current controller and one run's substrate
+# would otherwise leak into the next. The names are concierge's defaults; if
+# they change, the next command fails loudly.
 CONTROLLER_BY_PREPARE_FLAG = {"k8s": "concierge-k8s", "machine": "concierge-lxd"}
 CONCIERGE_MODEL = "testing"
 
-# A flat 5 minutes is fine for a `juju status` and hopeless for the two
-# steps that build things. Cold, `concierge prepare -p k8s` can take over
-# 13 minutes, and `charmcraft pack` can blow a 5-minute budget outright
-# (exit 124) fetching its LXD build base. Both would time out on every cold
-# GHA runner. Values are deliberately
-# generous -- the cost of waiting is wall-clock, the cost of timing out is
-# a run that reports a verdict about a bug it never tested.
-#
-# `wait` has to be here: the command it runs is `juju wait-for ...
-# --timeout=15m`, and the flat 5-minute default would kill the subprocess at
-# 5, so juju's own timeout could never be reached and a unit that was merely
-# slow would come back as `'wait' failed (timed out): timed out after 300s`.
-# The budget here has to be *longer* than the timeout embedded in the
-# command, or the inner one is dead code.
-#
-# `cleanup` polls for an asynchronous `juju remove-application` to finish, so
-# it needs the same order of budget as the removal itself.
+# Budgets for steps that a flat 5 minutes cannot cover: a cold `prepare` or
+# `pack` can take much longer. A step that embeds its own timeout (`wait`,
+# `control`) needs a longer budget here, or the inner timeout is dead code.
 STEP_TIMEOUTS_S = {
-    # `snap install` typically takes 14-21s on a GHA runner, with the
-    # occasional outlier near a minute. Ten minutes is a backstop against a
-    # wedged snapd, not a budget: a store error returns in seconds.
+    # A backstop against a wedged snapd; a store error returns in seconds.
     "install-concierge": 10 * 60,
     "prepare": 25 * 60,
     "pack": 20 * 60,
     "cleanup": APP_REMOVAL_POLLS * APP_REMOVAL_POLL_INTERVAL_S + 60,
     "deploy": 15 * 60,
     "wait": UNIT_READY_TIMEOUT_S + 60,
-    # `control` polls for its own signal, so the rule `wait` is listed here
-    # for applies to it too: this budget has to outlast the timeout embedded
-    # in the command, or the inner one is dead code and a slow-but-working
-    # control comes back as `timed out after 300s` instead. Doubled rather
-    # than given a flat margin because each iteration of the poll spends two
-    # `juju status` calls of its own -- one resolving the unit name, one
-    # reading it -- so the loop's real wall clock runs ahead of the sleep
-    # budget it is written to, and by a factor rather than a constant.
+    # Doubled because each poll iteration also spends two `juju status` calls,
+    # so the loop's wall clock runs ahead of its sleep budget.
     "control": 2 * CONTROL_SIGNAL_TIMEOUT_S + 60,
 }
 
-# Steps that have to succeed before anything after them means anything.
-# `juju status` and `juju debug-log` both exit 0 against an empty model,
-# so without this the sequence sails past a failed pack looking healthy.
-#
-# `stimulus` is on this list for the same reason the others are, though it
-# is not "infrastructure" in the ordinary sense: if the one command that
-# provokes the bug did not run, the diagnostics that follow describe a
-# charm nothing was done to: a failed stimulus would otherwise still be
-# classified as `did_not_reproduce`, a verdict drawn from an experiment that
-# never happened.
-# `clone` is here for the same reason: without it, a failed `git clone` --
-# network, rate limit, a renamed or private repo -- leaves every later
-# command running in an empty directory, and the classifier reads their
-# exit codes as evidence about the bug (rung 6 scores a non-zero last
-# command as `reproduced (weaker)`, which composes a comment).
-#
-# `install-concierge` is here because `prepare` is: a run whose concierge
-# never installed has nothing to prepare with, and the point of putting the
-# install in the sequence at all is that a failed one is then recorded as an
-# abandoned prerequisite -- `classifier.py` reads that as
-# `INFRASTRUCTURE_FAILED`, which composes nothing -- instead of failing a
-# workflow step before any harness code runs, as a snap store error would.
-#
-# `cleanup` is deliberately *not* here: removing an application that isn't
-# deployed is the normal case, not a failure.
+# Steps that have to succeed before anything after them means anything:
+# `juju status` and `juju debug-log` exit 0 against an empty model, so a
+# failed pack, stimulus or clone would otherwise be scored as evidence about
+# the bug. `cleanup` is excluded because there is often nothing to remove.
 PREREQUISITE_STEPS = ("install-concierge", "prepare", "pack", "deploy", "wait", "stimulus", "clone")
 
-# Installed here, immediately before the first command that needs it, rather
-# than unconditionally by the workflow before the pipeline runs.
-#
-# Concierge is used by exactly one thing: `sudo concierge prepare`, the first
-# step of `_scratch_sequence()`. The `none` and `k8s-clone` branches never
-# touch it, and neither does a run that stops at the filter or the in-scope
-# gate -- which is most of them. Well under a tenth of runs reach a scratch
-# branch, and installing up front would cost every run 14-21s and fail the
-# whole job on a snap store error.
-#
-# Why here and not as a conditional workflow step: gating a workflow step on
-# "will a scratch branch run?" means knowing the substrate, which is the
-# extraction's output, so the workflow would have to run extraction, stop,
-# install, and then resume -- either paying for the extraction twice or
-# growing a resume mode. Worse, the extraction is not deterministic (the
-# substrate it picks can change between runs), so the second run could
-# choose a branch the first did not install for. Putting it in the sequence
-# costs nothing, keeps one pipeline invocation, and the dependency ends up
-# stated where it exists.
-#
-# Idempotent by the guard, not by snap's own behaviour: a VM or a developer
-# box that already has concierge spends nothing here, and `snap install` on an
-# installed snap exits non-zero ("snap ... is already installed"), which as a
-# prerequisite step would abort the run.
-#
-# `which`, not `command -v`, because `dry_run.generate_plan()` runs the whole
-# plan through `runnability.assess()` and that gate's `_first_token()` treats
-# `command` as a wrapper word, lands on `-v`, and calls the line prose. `which`
-# is in its `RUNNER_TOOLS` allowlist and means the same thing here.
+# Installed in the sequence rather than by the workflow, because only the
+# scratch branches need concierge and the branch isn't known until extraction
+# has run. The guard is needed because `snap install` of an installed snap
+# exits non-zero. `which`, not `command -v`, because `runnability.assess()`
+# treats `command` as a wrapper word.
 INSTALL_CONCIERGE_COMMAND = "which concierge >/dev/null 2>&1 || sudo snap install --classic concierge"
 
-# A k8s scratch charm declares an `oci-image` resource per container (see
-# scratch-charm/charm/render.py), and `juju deploy` refuses a local charm
-# whose OCI resources aren't supplied: "ERROR local charm missing OCI
-# images for: workload-image". The scratch charm doesn't care what the
-# image *is* -- juju injects pebble as pid 1 and the stimulus runs
-# `pebble notify` inside it -- so any maintained base works.
+# `juju deploy` refuses a local k8s charm without its `oci-image` resources.
+# Juju injects Pebble as pid 1 whatever the image, so any maintained base
+# works.
 DEFAULT_WORKLOAD_IMAGE = "ubuntu:24.04"
 
-# juju-version-dependent pebble socket path, for the "run this command as
-# user X inside container Y" primitive.
-#
-# Keyed on the snap **track** `prepare` actually provisions -- a
-# `_juju_track()` result -- not on the hypothesis's raw pin. The two disagree
-# wherever the juju snap has retired a track: a hypothesis pinning
-# `juju_version: "3.4"` selects channel `3/stable`, which installs **juju
-# 3.6**, while a pin-keyed lookup would read `"3.4"`, miss the `"3.6"` entry,
-# fall through to `_PEBBLE_SOCKET_LEGACY` and aim the stimulus at a socket
-# that is not on that substrate. On juju 3.6 the new path records the
-# notice, and the legacy path fails with `cannot communicate with server:
-# ... socket "/var/lib/pebble/default/.pebble.socket" not found`. One lookup
-# off the track keeps the socket and the substrate decided by the same
-# input, so they cannot drift apart.
-#
-# The 3.0-3.5 band is not merely unmeasured, it is **unreachable**: the juju
-# snap publishes no 3.0-3.5 track any more (`snap info juju`: `3/stable` is
-# 3.6), so no pin in that band can put a pre-3.6 juju on the
-# substrate. Below 3.6 the only reachable track is `2.9`.
-#
-# A track not listed here falls through to `_PEBBLE_SOCKET_LEGACY` in
-# `_pebble_socket_path()`, which is a default, not a confirmed data point.
+# Pebble socket path by juju snap track. Keyed on the track `prepare` actually
+# installs (a `_juju_track()` result), not the raw pin, so the socket and the
+# substrate come from the same input: a "3.4" pin installs juju 3.6, which
+# uses the new path. Unlisted tracks fall back to `_PEBBLE_SOCKET_LEGACY`.
 _PEBBLE_SOCKET_NEW = "/charm/container/pebble.socket"
 _PEBBLE_SOCKET_LEGACY = "/var/lib/pebble/default/.pebble.socket"
 _PEBBLE_SOCKET_BY_JUJU_TRACK = {
-    "4": _PEBBLE_SOCKET_NEW,  # seen on 4.0.5, 4.0.12
-    "4.0": _PEBBLE_SOCKET_NEW,  # seen on 4.0.14
-    "3.6": _PEBBLE_SOCKET_NEW,  # seen on 3.6.27
-    "3": _PEBBLE_SOCKET_NEW,  # `3/stable` is 3.6 (seen on 3.6.28)
+    "4": _PEBBLE_SOCKET_NEW,
+    "4.0": _PEBBLE_SOCKET_NEW,
+    "3.6": _PEBBLE_SOCKET_NEW,
+    "3": _PEBBLE_SOCKET_NEW,  # `3/stable` installs 3.6
 }
 
 
@@ -241,18 +123,10 @@ def _pebble_socket_path(juju_track: str) -> str:
     return _PEBBLE_SOCKET_BY_JUJU_TRACK.get(major, _PEBBLE_SOCKET_LEGACY)
 
 
-# The two environment variables that decide which virtualenv a `uv` command
-# writes to, regardless of which directory it is run in.
-#
-# `VIRTUAL_ENV` is set by any activated venv, and `UV_PROJECT_ENVIRONMENT`
-# by, among others, `tox-uv` -- which points it at the tox environment for
-# the whole test run. Inheriting either sends the scratch project's `uv
-# add`/`uv sync` into somebody else's environment, which is the same
-# contamination `runner_stage.prepare_scratch_project()` exists to stop,
-# arriving by a route no amount of workspace layout can close. For example,
-# with `UV_PROJECT_ENVIRONMENT` inherited, a scratch sync empties this
-# repository's own `.tox/unit` down to the scratch project's four packages
-# and `ops`'s tests stop being able to import `websocket`.
+# The variables that decide which virtualenv a `uv` command writes to,
+# whatever directory it runs in. Inheriting either (from an activated venv or
+# from `tox-uv`) would send the scratch project's `uv add`/`uv sync` into
+# someone else's environment.
 _UV_ENVIRONMENT_VARS = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
 
 
@@ -292,28 +166,10 @@ def _observed_juju_version() -> str | None:
     return proc.stdout.strip() or None
 
 
-# The `ops` version `charmcraft pack` actually resolved into the scratch
-# charm, read out of the pack step's own log.
-#
-# The scratch charm's `pyproject.toml` pins `ops~=3.8`, and `charmcraft pack`
-# resolves that from PyPI inside its own managed LXD instance, so the `ops`
-# in the checked-out tree is never under test. Which `ops` was packed
-# survives only as one line of charmcraft's stderr --
-#
-#     :: + ops==3.8.2
-#
-# -- which nothing else reads. `_DEFAULT_JUJU_CHANNEL`'s comment states the
-# principle for juju: "a reproduction on a version the reporter did not
-# mention is disclosed rather than hidden", honoured by
-# `RunResult.observed_juju_version`. This is the equivalent for the library
-# the issue is actually *about*.
-#
-# Requiring the literal `ops==` is already enough to ignore the
-# `ops-scenario==8.8.0` and `ops-testing==...` lines that sit next to it in
-# the same log. The preceding `(?<![\w.-])` covers the case that requirement
-# does not: a package whose *name ends in* `ops` (`charmops==1.2.3`) has
-# `ops==` as a substring, and without the lookbehind its version would be
-# reported as the packed `ops`.
+# The `ops` version `charmcraft pack` resolved into the scratch charm. It
+# comes from PyPI inside charmcraft's build instance, so the pack log line
+# (`:: + ops==3.8.2`) is the only record. The lookbehind stops a name that
+# ends in `ops` (`charmops==1.2.3`) from matching.
 _PACKED_OPS_VERSION_RE = re.compile(r"(?<![\w.\-])ops==(?P<version>[A-Za-z0-9][\w.!+\-]*)")
 
 
@@ -346,18 +202,9 @@ def _packed_ops_version(commands: list[CommandResult]) -> str | None:
     return _ops_version_in([pack])
 
 
-# The commands that can put an `ops` on the `none` branch's PATH, matched
-# against the command *string* because that branch labels no steps at all
-# (`CommandResult.step` is `None` on every one of them -- they are the
-# reporter's or the extractor's own commands, not a sequence this seam
-# planned). This is the `none`-branch analogue of `_packed_ops_version()`'s
-# `step == "pack"` key: both name the one command in the run whose output
-# says which `ops` was resolved.
-#
-# Deliberately not "scan every command's output". A `pytest` failure dump can
-# quote a requirements line or a traceback frame containing `ops==`, and
-# reading that as the resolved version would disclose a number nothing
-# installed. Only an installer's own output is evidence of what is importable.
+# Commands whose output can say which `ops` the `none` branch resolved,
+# matched on the command string because that branch labels no steps. Only
+# installer output counts: a `pytest` failure dump can quote `ops==` too.
 _OPS_RESOLVING_COMMAND_RE = re.compile(r"(?:\buv\s+(?:add|sync|pip\s+install)|\bpip3?\s+install)\b")
 
 
@@ -439,14 +286,9 @@ def as_user_in_container_command(
     inner = f"su - {user} -s /bin/sh -c 'PEBBLE_SOCKET={socket} {pebble_command}'"
     ensure_user = f"id -u {user} >/dev/null 2>&1 || useradd -M {user}"
     if container:
-        # No `--` on the k8s container path. `juju ssh --container c unit --
-        # "cmd"` does not consume the separator the way the machine form
-        # does -- it forwards it into the container's shell, which dies with
-        # `sh: 0: Illegal option --` before running anything. Against a live
-        # k8s unit, the identical command with the `--` removed runs and
-        # records the notice. The machine form keeps
-        # `--`, where it is the documented separator and plain ssh consumes
-        # it; that path is untested here, so it is deliberately left alone.
+        # No `--` on the k8s container path: `juju ssh --container` forwards it into
+        # the container's shell, which fails with `Illegal option --`. The machine
+        # form keeps it, as the documented separator.
         return f'juju ssh{model_flag} --container {container} {unit} "{ensure_user}; {inner}"'
     return f'juju ssh{model_flag} {unit} -- "{ensure_user}; {inner}"'
 
@@ -471,39 +313,14 @@ def _juju_version_key(hypothesis: Hypothesis, default: str = "4") -> str:
     return f"{major}.{minor}" if minor else major
 
 
-# Snap tracks the juju snap actually publishes **at the `stable` risk**, so a
-# pin can only ever select a channel that exists. `_juju_channel()` appends
-# `/stable` and nothing else, so a track is only usable here if it has a
-# populated `stable`; listing one that does not is worse than not listing it,
-# because an unlisted track falls back safely and a listed one is built into
-# a channel that 404s.
-#
-# Source: the snap store itself, `curl -sH 'Snap-Device-Series: 16'
-# https://api.snapcraft.io/v2/snaps/info/juju` (`default-track: 3`). Tracks
-# with a populated `stable`,
-# in aggregate and on `amd64` specifically: `2.9` (2.9.60), `3` (3.6.28),
-# `3.6` (3.6.28), `4` (4.0.14) and `4.0` (4.0.14). `4.1` publishes `beta`
-# (4.1-beta1) and `edge` (4.1-beta3) only; `4.2` and `latest` publish `edge`
-# only.
-#
-# `4.1` is deliberately absent: it has no `stable`, so listing it would turn
-# every `4.1*` pin into `--juju-channel 4.1/stable`, `prepare` would exit
-# non-zero on `commands[0]`, and the run would end at rung 0
-# (`INFRASTRUCTURE_FAILED`, not in `COMMENT_OUTCOMES`): a whole runner slot
-# spent, and silence. Leaving it out lets the fallback handle it, as it does
-# for `4.2` and `latest`. `canonical/operator`'s own CI does drive concierge
-# with `4.1/edge` (`.github/workflows/integration.yaml`), which can make the
-# track look well-attested -- but `edge` is not the risk this constant feeds.
-#
-# Same discipline as `_PEBBLE_SOCKET_BY_JUJU_TRACK` above: only entries with
-# evidence behind them, and an unlisted track falls back rather than being
-# guessed into a `prepare` that fails on a channel the snap has never had.
+# Juju snap tracks with a populated `stable` risk (check with `snap info
+# juju`). `_juju_channel()` only appends `/stable`, so listing a track without
+# one, such as `4.1`, would build a channel that doesn't exist and fail
+# `prepare`, whereas an unlisted track falls back safely.
 _KNOWN_JUJU_TRACKS = ("2.9", "3", "3.6", "4.0")
 
-# The tracks above, as the store reported them, paired with the version each
-# one's `stable` risk carried. Kept beside the tuple so
-# `test_every_known_juju_track_has_a_populated_stable_risk` can assert the two
-# agree: the check that `4.1` would fail.
+# The `stable` version each track above carried when checked, so a test can
+# assert that every listed track has one.
 _KNOWN_JUJU_TRACK_STABLE_VERSIONS = {
     "2.9": "2.9.60",
     "3": "3.6.28",
@@ -511,22 +328,10 @@ _KNOWN_JUJU_TRACK_STABLE_VERSIONS = {
     "4.0": "4.0.14",
 }
 
-# What `prepare` uses when the extraction pins nothing -- the common case in
-# practice.
-#
-# The point of naming it here is that it is *explicit*. Left to concierge's
-# own default, the channel moves when concierge is upgraded (concierge
-# 1.7.0's default is `3/stable`), and a verdict produced on 4.0 can flip to
-# `DID_NOT_REPRODUCE` on 3.6 with nothing in the run record saying why. A
-# constant here cannot move underneath a verdict when concierge is upgraded.
-#
-# The value is forward-looking rather than a claim about where charms are
-# today: `operator` still lists `3/stable` first in its own matrix. An
-# unpinned bug report is most usefully answered against the juju the library
-# is heading towards, and a reproduction on a juju the reporter did not name
-# is still a genuine reproducer -- `RunResult.observed_juju_version` puts the
-# version that produced the verdict in the composed comment, so a mismatch is
-# disclosed to the maintainer rather than hidden.
+# Used when the extraction pins nothing. Explicit so that the substrate can't
+# move when concierge's own default changes. `RunResult.observed_juju_version`
+# puts the version used in the comment, so a mismatch with the reporter's
+# juju is disclosed.
 _DEFAULT_JUJU_TRACK = "4.0"
 _DEFAULT_JUJU_CHANNEL = f"{_DEFAULT_JUJU_TRACK}/stable"
 
@@ -724,12 +529,9 @@ def _control_signal_command(target: str, unit: str, expected_signal: str) -> str
     """
     signal = shlex.quote(expected_signal)
     read = f"juju status -m {target} {unit}"
-    # The timeout message says "the unit status", not "juju status":
-    # `test_scratch_run_isolation.py` splits a planned command on `;` and
-    # asserts every fragment mentioning `juju ` also names the controller and
-    # model, and prose in an `echo` is indistinguishable from a command to
-    # that check. Nothing subtle is being worked around -- the phrasing just
-    # has to stay out of the way of a test that is guarding something else.
+    # "The unit status", not "juju status": a test checks that every
+    # `;`-separated fragment mentioning `juju ` names the controller and model,
+    # and it can't tell an `echo` from a command.
     return (
         f"for _ in $(seq 1 {CONTROL_SIGNAL_POLLS}); do "
         f"{read} 2>/dev/null | grep -qF -- {signal} && break; "
@@ -767,62 +569,38 @@ def _scratch_sequence(
     hand over as concrete strings, never a bracket-shaped placeholder.
     """
     charm_dir = context.get("charm_dir")
-    # Per-issue application name, not a fixed "repro". With one name in one
-    # model and no teardown, the second run to reach `deploy` on a reused
-    # substrate would die with `ERROR cannot add application "repro":
-    # application already exists` -- and, worse, leave the *previous* run's
-    # unit sitting `active` with a signal-bearing status message that the
-    # `status` step would happily read as evidence about this run's bug. A
-    # fresh GHA runner never reuses a substrate, but a long-lived VM or
-    # developer box does, from the second issue onwards.
-    #
-    # `i` prefix for the same reason `render.py` uses one on charm names:
-    # every hyphen-separated segment of a juju application name has to
-    # contain a letter, so a bare issue number is not a legal segment.
+    # A per-issue application name, so that on a reused substrate a previous
+    # run's unit is never mistaken for this one's.
     app = _application_name(hypothesis)
     target = f"{CONTROLLER_BY_PREPARE_FLAG[prepare_flag]}:{CONCIERGE_MODEL}"
-    # Resolved at execution by `_unit_expr()`, never a hardcoded `<app>/0` --
-    # see that helper for what the hardcoded index cost.
+    # Resolved at execution time by `_unit_expr()`: unit indexes change on
+    # redeploy.
     unit = _unit_expr(app, target)
-    # `render.py` emits one `<container>-image` oci-image resource per
-    # container, and keys machine-vs-k8s off exactly this field, so keying
-    # the `--resource` flags off it too keeps the two in step. A machine
-    # charm has no containers and needs none.
+    # `render.py` keys machine-vs-k8s and its `<container>-image` resources off
+    # this field, so the `--resource` flags key off it too.
     pebble_container = (dict(surface.pebble_service) if surface else {}).get("container")
     resource_args = f" --resource {pebble_container}-image={DEFAULT_WORKLOAD_IMAGE}" if pebble_container else ""
     steps = [
         # The only branches that need concierge install it, immediately before
         # using it. See `INSTALL_CONCIERGE_COMMAND`.
         PlannedCommand("install-concierge", INSTALL_CONCIERGE_COMMAND),
-        # `--juju-channel` explicitly, never concierge's own default -- see
-        # `_juju_channel()` for what the implicit default cost.
+        # `--juju-channel` explicitly, never concierge's own default.
         PlannedCommand(
             "prepare",
             f"sudo concierge prepare --juju-channel {_juju_channel(hypothesis)} -p {prepare_flag}",
         ),
-        # `-o` as well as `-p`: `charmcraft pack -p <dir>` writes the
-        # `.charm` into the *current working directory*, not into `<dir>`,
-        # while the deploy step below globs `<dir>/*.charm`. Without `-o`,
-        # pack exits 0, the artefact lands next to whatever cwd the harness
-        # happened to run from, and deploy fails with "no charm was found".
+        # `-o` as well as `-p`: `charmcraft pack -p <dir>` writes the `.charm` to the
+        # current directory, but deploy globs `<dir>/*.charm`.
         PlannedCommand(
             "pack",
-            # `rm -f` first: the deploy step globs `<dir>/*.charm`, so a
-            # stale artefact from an earlier pack into the same work dir
-            # makes the glob match twice and juju fails with `ERROR
-            # unrecognized args: ["repro"]`. Re-running into an existing
-            # out-dir is ordinary during development.
+            # `rm -f` first, so a stale artefact can't make the deploy glob match twice.
             f"rm -f {charm_dir}/*.charm && charmcraft pack -p {charm_dir} -o {charm_dir}"
             if charm_dir
             else "charmcraft pack",
         ),
-        # Idempotence, not infrastructure: re-running the *same* issue on a
-        # substrate that still holds its application is ordinary during
-        # development, and `juju deploy` has no --replace. Removal is async,
-        # so poll for the application to actually disappear rather than
-        # racing the deploy. Always exits 0 -- "there was nothing to remove"
-        # is the common case, which is why `cleanup` is not a prerequisite
-        # step.
+        # Remove a leftover application from an earlier run of the same issue
+        # (`juju deploy` has no `--replace`), polling because removal is async.
+        # Always exits 0, since there is usually nothing to remove.
         PlannedCommand(
             "cleanup",
             f"juju remove-application -m {target} {app} --destroy-storage --no-prompt >/dev/null 2>&1; "
@@ -838,16 +616,9 @@ def _scratch_sequence(
         ),
     ]
 
-    # `juju deploy` returns as soon as the deployment is *requested*; the
-    # unit is still "allocating / installing agent" for a minute or more
-    # afterwards. Without this wait the stimulus lands on a pod that isn't
-    # there yet and fails with `ERROR container for unit "repro/0" is not
-    # ready yet`. Waiting on `workload-status == active`, not on the agent:
-    # an idle agent is reached *before* the install and start hooks run, so
-    # an agent-only wait can stimulate a unit still reporting "(start)
-    # installing charm software", recording the notice before the observer
-    # exists. `render.py` sets ActiveStatus(READY_STATUS) from
-    # `start` precisely so this wait has something sound to wait for.
+    # `juju deploy` returns before the unit is up. Wait for workload status
+    # `active`, which `render.py` sets from `start`; an idle agent is reached
+    # before the install and start hooks run.
     steps.append(PlannedCommand("wait", _wait_command(target, app, unit, pebble_container)))
 
     pebble = dict(surface.pebble_service) if surface else {}
@@ -872,12 +643,9 @@ def _scratch_sequence(
     steps.append(PlannedCommand("debug-log", f"juju debug-log -m {target} --include {unit} --replay"))
 
     if surface is not None and surface.expected_signal and stimulus_user and stimulus_pebble_command:
-        # Same "stimulate as a user known to work, then check status" shape
-        # as #2639's k8s control: a control
-        # rerun as root, which should always produce the signal, is what
-        # distinguishes a real reproduction from a broken observer. Only
-        # built when there's a real pebble command to control against --
-        # no control is invented from nothing.
+        # The control reruns the stimulus as root, which should always produce the
+        # signal, to tell a real reproduction from a broken observer. Only built when
+        # there is a real stimulus to control against.
         control_command = as_user_in_container_command(
             unit=unit,
             container=pebble.get("container"),
@@ -948,41 +716,20 @@ class SubprocessRunnerSeam:
     there -- see `tests/test_seams_runner.py` for what *is* covered
     (command sequencing with `subprocess.run` mocked)."""
 
-    #: `resolve_symbol()`'s probe exits with one of these. Three states, not
-    #: two, because "the symbol is gone" and "there is nothing here to ask"
-    #: are different facts and only the first one is evidence.
+    # `resolve_symbol()`'s probe exit codes. "Gone" and "nothing here to ask"
+    # are different facts, and only the first is evidence.
     _SYMBOL_RESOLVED = 0
     _SYMBOL_ABSENT = 1
     _SYMBOL_UNKNOWABLE = 2
 
     def resolve_symbol(self, symbol_anchor: str, context: dict) -> bool:
-        # Try progressively shorter module prefixes (import the longest
-        # importable dotted prefix, then getattr() the remaining parts) --
-        # `symbol_anchor` mixes module and attribute segments
-        # ("ops.model.Model.get_relation") with no marker for where one
-        # ends and the other begins.
+        # `symbol_anchor` mixes module and attribute segments with no marker, so
+        # import the longest importable prefix and getattr() the rest.
         #
-        # The probe distinguishes "no prefix imports at all" from "a prefix
-        # imports and the rest of the path is not on it", and only the second
-        # is reported as a symbol that has gone away. On a GHA runner the
-        # first is the *normal* case and says nothing about the target repo:
-        # the workflow runs this under `uv run` in `.github/add-reproducer/harness`,
-        # whose venv holds pyyaml and pytest and no `ops` at all, so
-        # `import ops` fails there for every anchor any extraction can carry.
-        # Reported as absence, that would turn `runner_stage.is_stale()`'s
-        # second trigger into "is `ops` importable here", which is always no
-        # -- so every anchor-carrying hypothesis would be skipped as
-        # `skipped_stale` before reaching a runner, silently, whether or not
-        # its API surface still existed. The gate fires on evidence of
-        # absence; absence of evidence is not it.
-        #
-        # Both `except` clauses are broad on purpose. An unhandled exception
-        # in `python3 -c` exits **1**, which is the code that means "gone", so
-        # anything this script lets escape is read as a positive finding the
-        # script never made. A package that raises on import (a missing
-        # transitive dependency, an import-time side effect) says nothing
-        # about whether the symbol exists, and neither does a descriptor that
-        # raises from `getattr`.
+        # Only "a prefix imports but the rest is missing" counts as absent. "Nothing
+        # imports" is the normal case in a venv without `ops`, and reading it as
+        # absence would skip every anchored hypothesis as stale. Both `except` clauses
+        # are broad because an uncaught exception exits 1, the "absent" code.
         script = (
             "import importlib\n"
             f"parts = {symbol_anchor!r}.split('.')\n"
@@ -1008,12 +755,7 @@ class SubprocessRunnerSeam:
                 ["python3", "-c", script], capture_output=True, timeout=30, cwd=context.get("cwd")
             )
         except (OSError, subprocess.TimeoutExpired):
-            # No usable interpreter, or one that hung: the same "cannot tell"
-            # as an unimportable package, and treated the same way. Every
-            # other seam in this module treats infrastructure absence as data
-            # rather than as a crash (`_observed_juju_version()`), and letting
-            # the exception out of a gate whose whole job is to decide whether
-            # to skip would be worse.
+            # No usable interpreter, or one that hung: "cannot tell", so don't skip.
             return True
         return result.returncode != self._SYMBOL_ABSENT
 
@@ -1033,21 +775,15 @@ class SubprocessRunnerSeam:
             return self._run_lxd_scratch(hypothesis, surface, context)
         if branch == "k8s-clone":
             return self._run_k8s_clone(hypothesis, context)
-        # Reachable only if `runner_stage.choose_branch()` grows a branch
-        # this dispatch doesn't know about -- see
-        # `test_seams_runner.test_every_choose_branch_output_is_dispatchable`,
-        # which fails loudly the moment that happens, instead of this
-        # raising in production.
+        # Only reachable if `choose_branch()` grows a branch this doesn't handle,
+        # which `test_every_choose_branch_output_is_dispatchable` catches.
         raise ValueError(f"unknown branch {branch!r}")
 
     def _run_none(self, hypothesis: Hypothesis, context: dict) -> RunResult:
         workdir = context.get("workdir", ".")
-        # These commands are `uv init`/`uv add`/`uv run`, and uv decides which
-        # environment to write to from `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT`
-        # before it ever looks at the working directory. The harness runs
-        # under `uv run` itself, so both can be set to the harness's own
-        # environment when we get here. See `scratch_command_env()`, and
-        # `runner_stage.prepare_scratch_project()` for the other half.
+        # uv picks its environment from `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT` before
+        # the working directory, and the harness's own `uv run` may have set both.
+        # See `scratch_command_env()`.
         env = scratch_command_env(context.get("uv_project_environment"))
         commands = []
         for command in hypothesis.commands:
@@ -1083,12 +819,8 @@ class SubprocessRunnerSeam:
             hypothesis_number=hypothesis.issue_number,
             branch="none",
             commands=commands,
-            # No `observed_juju_version`: this branch never touches a juju
-            # substrate, so there is nothing to ask and a host-wide `juju
-            # version` would attribute one to a run that didn't want it.
-            # `observed_ops_version` is a different matter -- this branch does
-            # resolve an `ops`, and it is the one the test actually imported.
-            # See `_resolved_ops_version()`.
+            # No `observed_juju_version`: this branch never touches juju. It does
+            # resolve an `ops`, the one the test imports.
             observed_ops_version=_resolved_ops_version(commands),
         )
 
@@ -1146,11 +878,7 @@ class SubprocessRunnerSeam:
         juju/concierge/charmcraft/network there) -- see harness/README.md
         for what is and isn't verified.
         """
-        # `-p machine`, not `-p lxd`: concierge 1.7.0's presets are
-        # crafts/dev/k8s/machine/microk8s and there is no `lxd` one, so
-        # `-p lxd` fails with `unknown preset 'lxd'`. Mocked subprocess calls
-        # happily accept a preset that does not exist, so only a live run
-        # can catch this.
+        # `-p machine`: concierge has no `lxd` preset.
         return self._run_scratch_branch(hypothesis, surface, context, prepare_flag="machine", branch="lxd-scratch")
 
     def _run_scratch_branch(
@@ -1182,19 +910,9 @@ class SubprocessRunnerSeam:
             control=control,
             aborted_at_step=aborted_at_step,
             skipped_steps=skipped_steps,
-            # Only the scratch branches provision a juju substrate via
-            # `concierge prepare` -- `none` never touches juju at all, and
-            # `k8s-clone` only ever runs the reporter's own commands against
-            # a checkout, not against anything this seam provisioned, so
-            # recording a host-wide `juju version` there would attribute a
-            # substrate to a run that didn't ask for one.
+            # Only the scratch branches provision juju and pack a charm, so only they
+            # record these versions.
             observed_juju_version=_observed_juju_version(),
-            # Same scoping as `observed_juju_version` above, for the same
-            # reason: only the scratch branches pack a charm, so only they
-            # have a pack log to read a version out of. `k8s-clone` runs the
-            # reporter's own commands against a checkout and `none` never
-            # packs at all, and attributing an `ops` version to either would
-            # name a library neither of them resolved.
             observed_ops_version=_packed_ops_version(commands),
         )
 

@@ -162,12 +162,9 @@ def _is_leader_hint(result: StaticCheckResult) -> list[str]:
 _FAKE_HOOK_TOOL_REASONS = ("before any hook tool runs", "hook tool", "which is not JSON", "where the endpoint name goes")
 
 
-# Left off `retry_hints()`'s list. `charm_root` reads like the charm's
-# directory, but it is only the `Context(charm_root=...)` argument, `None` by
-# default, so a test comparing the cwd with it fails whether or not the bug is
-# real. Listed, the model still takes it in some re-asks, even with a
-# sentence saying what it is. The check still allows it: only the hint
-# leaves it out.
+# Left off `retry_hints()`'s list: `charm_root` is only the
+# `Context(charm_root=...)` argument (`None` by default), but the model reads
+# it as the charm's directory. The check itself still allows it.
 _UNLISTED_CONTEXT_ATTRIBUTES = frozenset({"charm_root"})
 
 
@@ -378,7 +375,7 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
     reasons += _invalid_shell_fake(tree)
     reasons += _missing_charm_meta_attribute(tree)
     reasons += _from_yaml_non_string(tree)
-    # Backstops for `#2045`-like cwd claims: they only speak when no other
+    # Backstops for cwd claims: they only speak when no other
     # rule has, so an answer another rule already rejects gets that rule's
     # (more specific) feedback alone.
     if not reasons:
@@ -386,10 +383,9 @@ def check(source: str, *, path: str | None = None) -> StaticCheckResult:
         # The same, from the cwd side: a value presented as the cwd must be
         # read from the working directory.
         reasons += _cwd_side_not_a_cwd_read(tree)
-    # Several rules can name the same line for the same reason (a nested
-    # scope sees its parent's bindings); the model only needs telling once.
-    # Then in line order, file-wide reasons first, so the feedback reads
-    # top to bottom like the file.
+    # Several rules can flag the same line for the same reason, so dedupe, then
+    # sort by line with file-wide reasons first so the feedback reads top to
+    # bottom.
     reasons = sorted(dict.fromkeys(reasons), key=_line_of)
     return StaticCheckResult(path=path, passed=not reasons, reasons=reasons)
 
@@ -627,11 +623,9 @@ def _context_attributes(tree: ast.Module) -> list[str]:
 
 # -- attribute chains ------------------------------------------------------
 #
-# `ctx.charm_spec.charm_dir` passes `_context_attributes()`, which only looks
-# one attribute deep: `charm_spec` is a real `Context` attribute, and the
-# `AttributeError` is one level down. These helpers follow such a
-# chain through the types the installed `ops` declares, and give up, which
-# lets the test through, at the first step whose type is not certain.
+# `_context_attributes()` only looks one attribute deep. These helpers follow a
+# chain like `ctx.charm_spec.charm_dir` through the types the installed `ops`
+# declares, and let the test through at the first step that is not certain.
 
 
 def _resolve_annotation(annotation: object, namespace: dict, _depth: int = 0) -> type | None:
@@ -829,10 +823,8 @@ def _assigned_type(cls: type, name: str) -> type | None:
 
     found: set[type | None] = set()
     for base in cls.__mro__:
-        # `typing.Generic` assigns nothing to `self`, and from Python 3.12 it
-        # is implemented in C, so it has no source to read: without this,
-        # every generic class (`testing.Context` among them) was unknowable
-        # on 3.12 and later, and the chain rule only worked on 3.11.
+        # `typing.Generic` assigns nothing to `self` and, from Python 3.12, has
+        # no source to read, so skip it.
         if base is object or base is typing.Generic:
             continue
         tree = _class_tree(base)
@@ -2384,14 +2376,10 @@ def faked_hook_tools(source: str) -> list[str]:
 
 # -- the fake hook tool shape -------------------------------------------------
 #
-# A test in the shape the prompt asks for on a hook-tool bug builds
-# `ops.Model(meta, _ModelBackend(...))` with fake hook tools on `PATH`. On
-# `#2709` live tests took that shape and none reached the bug: most asked
-# for an endpoint their `CharmMeta` never declares, one left `relation-ids`
-# unfaked, and one passed `_ModelBackend.relation_get()` keywords it does
-# not take. The rules below
-# reject those shapes. As everywhere in this module, anything they cannot be
-# sure of, they let through.
+# A hook-tool test builds `ops.Model(meta, _ModelBackend(...))` with fake hook
+# tools on `PATH`. The rules below reject shapes that cannot reach the bug (an
+# undeclared endpoint, an unfaked tool, wrong `_ModelBackend` arguments) and
+# let through anything they cannot be sure of.
 
 
 def _plain_import_roots(tree: ast.Module) -> set[str]:
@@ -2971,13 +2959,9 @@ def _endpoints_without_mapping(call: ast.Call, names: _Names) -> list[tuple[str,
 
 # -- `CharmMeta.from_yaml()` given a dict --------------------------------------
 #
-# Live answers on `#2709` have built their meta with
-# `ops.CharmMeta.from_yaml({...})`, a dict where the method takes a YAML
-# string or stream. That raises `TypeError: a string or stream input is
-# required` on ops 3.8.3 and `main`, and nothing else catches it:
-# `_build_meta()` only builds a `from_yaml` meta from string literals, so
-# `_unbuildable_meta()` is silent, and with no meta built the
-# undeclared-endpoint rule is silent too.
+# `ops.CharmMeta.from_yaml()` takes a YAML string or stream, and a dict raises
+# `TypeError`. Nothing else catches this, because with no meta built the
+# undeclared-endpoint rule is silent.
 
 _NON_STRING_KINDS = {ast.Dict: "a dict", ast.List: "a list", ast.Set: "a set", ast.Tuple: "a tuple"}
 
@@ -3103,11 +3087,8 @@ def _from_yaml_non_string_reason(
 
 # -- a fake with no `#!` line, and an attribute `CharmMeta` lacks ------------
 #
-# Both seen in answers the substrate override runs: one wrote its fakes as
-# `path.write_text(script)` with no `#!` line and died on `OSError: [Errno 8]
-# Exec format error: 'relation-ids'`; others built their meta with
-# `CharmMeta.from_yaml_file(...)` or `CharmMeta.from_dict(...)`, neither of
-# which exists. All fail the same way on ops 3.8.3 and `main`.
+# A fake hook tool written without a `#!` line fails with "Exec format error",
+# and `CharmMeta.from_yaml_file()` and `CharmMeta.from_dict()` do not exist.
 
 
 def _fake_writer(func: ast.FunctionDef) -> tuple[int, list, bool] | None:
@@ -3486,9 +3467,8 @@ def _undeclared_endpoints(tree: ast.Module) -> list[str]:
     parents = _parents(tree)
     reasons = _undeclared_in(tree, parents, _Names(tree, counts), list(ast.walk(tree)))
     # Then each test function on its own, with its own names and only the
-    # `CharmMeta`s it can see (its own and those outside every function):
-    # counted across the whole file, two similar tests each assigning
-    # `model` and building a `CharmMeta` would hide both tests' undeclared
+    # `CharmMeta`s it can see, so similar tests in one file can't hide each
+    # other's undeclared endpoints.
     # endpoints.
     tests = _test_functions(tree)
     outside = [
@@ -3612,10 +3592,9 @@ def _tool_output(tool: str, endpoint: str | None, relation_id: int | None) -> st
     return f"`{tool}`"
 
 
-# The hook tools a `_ModelBackend` method runs, every time it is called. Each
-# one is checked by running it against the installed ops
-# (`tests/test_hook_tool_rules.py`). `relation_remote_app_name` is left out:
-# it runs nothing when the test sets `JUJU_RELATION_ID` and `JUJU_REMOTE_APP`.
+# The hook tools each `_ModelBackend` method runs on every call (checked by
+# `tests/test_hook_tool_rules.py`). `relation_remote_app_name` is left out
+# because it runs nothing when `JUJU_RELATION_ID` and `JUJU_REMOTE_APP` are set.
 _BACKEND_METHOD_TOOLS = {
     "relation_ids": ("relation-ids",),
     "relation_list": ("relation-list",),
@@ -4172,10 +4151,9 @@ def _unfaked_hook_tools(tree: ast.Module) -> list[str]:
             return _authz_failure(found[0])
         return None
 
-    # Where `relation-list` printing `[]` certainly makes ops run it again
-    # with `--app`: a declared endpoint that is not a peer one (for a peer
-    # relation the remote app is this charm's own), and nothing in the file
-    # setting `JUJU_RELATION_ID` / `JUJU_REMOTE_APP` (which ops reads instead).
+    # Only where `relation-list` printing `[]` certainly makes ops rerun it with
+    # `--app`: a declared non-peer endpoint, and no `JUJU_RELATION_ID` /
+    # `JUJU_REMOTE_APP` set in the file (ops reads those instead).
     counts = _file_binding_counts(tree)
     remote = _remote_endpoints(tree, _Names(tree, counts)) if counts is not None else frozenset()
     if any(
@@ -5946,10 +5924,9 @@ def _uncaught_reason(access: _Access, code: int, stderr: str) -> str:
         "should be>`, so the buggy version fails that assertion and the fixed version passes"
     )
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _BACKEND_METHOD_TOOLS:
-        # Asserting on the backend call's own result can fail with the fix too:
-        # ops can catch that layer's exception and return a value a layer up.
-        # By hand, a `#2709` test asserting `{}` on `relation_get()` fails on
-        # 3.8.3 and on `main`, a false reproduction.
+        # Asserting on the backend call's own result can fail with the fix too,
+        # because ops can catch that layer's exception and return a value a
+        # layer up.
         reason += (
             f". `{ast.unparse(node.func)}()` is `_ModelBackend`, a layer below what a charm sees, "
             "and ops can catch an exception there and return a value instead, so a test of the "

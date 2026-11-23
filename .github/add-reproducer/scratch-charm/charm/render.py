@@ -31,21 +31,14 @@ import yaml
 IDENT_RE = re.compile(r"^[a-z][a-z0-9-]*$")  # juju endpoint/storage/container names
 SURFACES = {"update-status", "config-changed", "relation-changed", "pebble-custom-notice"}
 
-# The status message the generated charm sets once it is up and observing,
-# before anything has fired. Without it the charm sets no status at all
-# until its surface fires, so there is no way to tell "ready and waiting"
-# from "still installing" -- a k8s run can stimulate a unit that is still
-# running its install hook, recording the notice before the observer
-# exists. `juju wait-for ... active` is meaningful only because of this.
+# The status the generated charm sets once it is up and observing, so the
+# runner can tell "ready and waiting" from "still installing" before it
+# stimulates the unit.
 READY_STATUS = "reproducer ready"
 
-# The literal status-message prefix each surface produces when it fires.
-# This is the single source of truth for the classifier's
-# `expected_signal`: the string is decided *here*, by the template, so
-# asking an LLM to guess it can only ever introduce a mismatch (an
-# invented "Received Pebble custom notice" never matches the charm's
-# "observed notice: ...", so the signal could never be found whatever the
-# bug did).
+# The status-message prefix each surface sets when it fires. This is the
+# single source of truth for the classifier's `expected_signal`, because an
+# LLM's guess at it could only ever mismatch.
 SURFACE_SIGNALS = {
     "update-status": "observed",
     "config-changed": "observed",
@@ -121,10 +114,8 @@ def build_charmcraft_yaml(p):
 
     is_k8s = bool(p["pebble_service"].get("container"))
     if is_k8s:
-        # Bare key form, matching the machine-charm branch's shape below.
-        # No top-level `base`: the platform key already carries it, and
-        # charmcraft rejects declaring both -- "Platform 'ubuntu@24.04:amd64'
-        # declares a base and a top-level base or build-base is declared."
+        # Bare key form, matching the machine-charm branch below. No top-level
+        # `base`: the platform key carries it, and charmcraft rejects both.
         doc["platforms"] = {"ubuntu@24.04:amd64": None}
         container = p["pebble_service"]["container"]
         doc["containers"] = {container: {"resource": f"{container}-image"}}

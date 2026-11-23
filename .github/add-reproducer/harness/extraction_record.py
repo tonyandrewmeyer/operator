@@ -23,11 +23,9 @@ from __future__ import annotations
 
 from typing import Any
 
-# 2: adds `test_check`, the first pass's static check of its embedded test
-# file and whether that check sent the extraction back for one more attempt.
-# 3: adds `substrate_override`, set by the pipeline when a fake-hook-tool
-# test ran as `substrate: none` against the answer's own field
-# (`pipeline.override_substrate()`); `None` otherwise.
+# 2: adds `test_check`, the first pass's static check of its test file and
+# whether it triggered a re-ask.
+# 3: adds `substrate_override` (see `pipeline.override_substrate()`).
 SCHEMA_VERSION = 3
 
 
@@ -53,10 +51,7 @@ def build(
     calls it made are exactly what says why it was invalid.
     """
     first_pass = getattr(extractor, "last_first_pass", None)
-    # Falling back to the returned hypothesis matters for a plain `Extractor`:
-    # it has no `last_first_pass`, and there its own output *is* the first
-    # pass. On a `TwoPassExtractor` recovery the two differ, which is why the
-    # attribute exists.
+    # A plain `Extractor` has no `last_first_pass`; its output is the first pass.
     if first_pass is None:
         first_pass = hypothesis
     second = getattr(extractor, "last_second_pass", None)

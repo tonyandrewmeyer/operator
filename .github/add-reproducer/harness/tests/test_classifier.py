@@ -175,12 +175,8 @@ def test_partial_earlier_command_failed():
         hypothesis_number=3,
         branch="none",
         commands=[
-            # Deliberately NOT an environment-build command: a failed
-            # `uv pip install` lands on rung 0c (INFRASTRUCTURE_FAILED)
-            # instead, because a run whose environment was never built is
-            # not evidence about the bug -- and `partial` composes a comment.
-            # `partial` keeps its meaning for a non-environment step that
-            # failed part-way through the hypothesised sequence.
+            # Not an environment-build command: a failed `uv pip install`
+            # lands on rung 0c instead.
             CommandResult(command="git clone https://github.com/canonical/operator", exit_code=1, stderr="fatal"),
             CommandResult(command="uv run pytest repro_test.py -v", exit_code=0, stdout="did not even run"),
         ],
@@ -212,27 +208,16 @@ def test_did_not_reproduce_all_commands_succeed():
 
 
 def test_2107_lxd_did_not_reproduce_no_quotable_observed_substring():
-    # The one real substrate:lxd extraction in the whole corpus (see
-    # fixtures/extractions/2107.json's _provenance). Its `observed` field
-    # ("Traceback shows ValueError when parsing '0/lxd/4' as an integer") is
-    # prose with no double-quoted substring for `_quoted_snippets()` to match
-    # against -- common for hand-written-style `observed` text.
-    # fixtures/runs/2107.json's (synthetic) captured `juju debug-log` output
-    # contains the real crash verbatim, but every command still exits 0 (juju
-    # CLI reads succeed regardless of what's in the log), so the ladder
-    # correctly lands on `did_not_reproduce` rather than fabricating a match.
-    # Pinned here so this stays a known, expected limitation rather than a
-    # silent surprise.
+    # The `observed` prose has no double-quoted substring to match, and every
+    # command exits 0 even though the debug-log holds the crash, so the ladder
+    # lands on `did_not_reproduce`. Pinned as a known limitation.
     outcome, reason = classify(_load_hypothesis(2107), None, _load_run(2107))
     assert outcome == Outcome.DID_NOT_REPRODUCE
 
 
 def test_lxd_scratch_reproduced_positive_signal_absent_synthetic():
-    # Mirrors test_2639_reproduced_positive_signal_absent, but for the new
-    # lxd-scratch branch -- no real hypothesis in the corpus reaches this
-    # rung via lxd (see the #2107 test above), so this pins the classifier
-    # decision with hand-built-but-realistic data, the same way
-    # test_reproduced_log_only_synthetic etc. do for their rungs.
+    # Mirrors test_2639_reproduced_positive_signal_absent for the lxd-scratch
+    # branch, with hand-built data.
     hypothesis = Hypothesis(
         issue_number=9101,
         in_scope=True,
@@ -264,13 +249,9 @@ def test_lxd_scratch_reproduced_positive_signal_absent_synthetic():
 
 
 def test_unrunnable_synthesis_incomplete_marker_beats_reproduced_weaker():
-    # A test-file-synthesis
-    # fallback stub (surface_inference._loud_failing_test_file) raises an
-    # AssertionError carrying SYNTHESIS_INCOMPLETE_MARKER. Without this rung
-    # checked ahead of rung 6, this exact shape (non-zero exit, no observed
-    # substring match) would misread the fallback stub as `reproduced_weaker`
-    # -- a comment-worthy outcome for a scaffold that never actually
-    # exercised the reported bug.
+    # The synthesis fallback stub raises an AssertionError carrying
+    # SYNTHESIS_INCOMPLETE_MARKER, which must not be read as
+    # `reproduced_weaker`.
     hypothesis = Hypothesis(
         issue_number=2045,
         in_scope=True,
@@ -316,12 +297,9 @@ def test_positive_signal_absent_no_control_stays_silent():
 
 # --- rung 5: a control that did not fire is not a control ---
 #
-# The control's `juju status` read polls for the signal
-# (`seams/runner.py:_control_signal_command()`), so "the control exited
-# non-zero" means "the signal never appeared inside the budget". Rung 5's
-# whole job is telling a reproduced bug apart from a broken observer, and a
-# control that did not fire is evidence for neither -- it must not be read as
-# the confirmation this outcome's entire claim rests on.
+# The control's `juju status` read polls for the signal, so a non-zero exit
+# means the signal never appeared, and that must not count as confirming the
+# observer works.
 
 
 def _absent_signal_case(control: CommandResult | None) -> tuple[Hypothesis, SurfaceInference, RunResult]:

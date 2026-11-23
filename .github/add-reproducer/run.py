@@ -56,10 +56,9 @@ API_ROOT = "https://api.github.com"
 # What `execute` refuses to start with.
 SECRET_VARIABLES = ("OPENROUTER_API_KEY", "GITHUB_TOKEN")
 
-#: The idempotency marker `harness/composer.py` appends to every comment it
-#: composes is `<!-- add-reproducer:issue=<n>:run=<id> -->`. The run id
-#: differs every time, so "have we already commented on this issue?" is a
-#: match on everything up to it.
+# `harness/composer.py` appends `<!-- add-reproducer:issue=<n>:run=<id> -->`
+# to every comment. The run id differs each time, so "already commented?"
+# matches everything up to it.
 MARKER_PREFIX = "<!-- add-reproducer:issue={number}:"
 
 

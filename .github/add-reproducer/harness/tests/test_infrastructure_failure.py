@@ -375,13 +375,9 @@ def test_a_clean_setup_does_not_trip_the_env_rung():
 
 # -- rung 1c covers the test file the *extraction* wrote, too ------------
 #
-# Extractions often write their test file as a `cat > ... << 'PYEOF'`
-# heredoc inside the extraction's own `commands[]`, where
-# `synthesized_test_file` stays `None` -- so a rung 1c scoped to that field
-# would treat a model-written test as if the reporter had written it. Invalid
-# `ops.testing` code that raises `AttributeError` would stay silent only
-# because `AttributeError` happens to be in rung 4's regex. The cases below
-# are the ones that regex does not cover.
+# Extractions often write their test as a heredoc in `commands[]`, leaving
+# `synthesized_test_file` as `None`, and that test is still model-written.
+# These cases are the ones rung 4's regex doesn't already cover.
 
 
 _HEREDOC_TEST = (
@@ -539,10 +535,8 @@ def test_a_hypothesis_with_no_test_file_at_all_is_untouched():
 
 # -- rung 1a: a model-written test that fails during collection -----------
 #
-# On `#2045` the extraction wrote the `testing.Context` run at module level,
-# so the charm's assertion fired while pytest imported the file, and rung 1
-# would call the "collected 0 items" a stale test selector. Trimmed from a
-# real run's pytest output.
+# An assertion that fires at import time gives "collected 0 items", which
+# rung 1 would otherwise call a stale test selector.
 
 _MODULE_LEVEL_TEST = (
     "cat > test_cwd.py << 'PYEOF'\n"

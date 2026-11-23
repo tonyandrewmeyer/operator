@@ -88,10 +88,8 @@ def _score_against_labels(run: dict[int, dict]) -> dict:
 
 
 def test_extraction_prompt_unchanged_after_negative_result():
-    # If a retune can't hold the corpus floor, no prompt change lands. All
-    # three attempts failed it (see below), so extraction.py's in_scope
-    # prompt keeps its original wording -- these phrases (never removed) and
-    # the *absence* of every attempt's added text together pin that.
+    # No retune held the corpus floor, so the in_scope prompt keeps its
+    # original wording and none of the attempts' added text.
     text = _EXTRACTION_PY.read_text()
     assert "But note what that tie-break is *for*" in text
     assert (
@@ -114,13 +112,9 @@ def test_2639_baseline_today_recorded_at_n8_both_variants():
 
 
 def test_2639_baseline_today_drifted_from_yesterdays_recorded_rate():
-    # Worth pinning on its own: the unmodified prompt's false-drop rate
-    # moved from 75%/25% (the earlier recording pinned in
-    # `test_2639_in_scope_repeats.py`) to 25%/25% in this baseline, a day
-    # later: same prompt, same issue, same n. The model is not seeded --
-    # this is real day-to-day drift, not a regression, and it means any
-    # single-run comparison against an older fixture compares against stale
-    # noise rather than a stable target.
+    # The unmodified prompt's false-drop rate differs from the recording in
+    # `test_2639_in_scope_repeats.py`. The model is not seeded, so compare
+    # against a same-day baseline, not an older fixture.
     summary = _summary("2639-baseline")
     assert summary["without_comments"]["dropped"] == 2
     assert summary["with_comments"]["dropped"] == 2
@@ -144,12 +138,9 @@ def test_v1_fixed_2639_and_2045_at_n8():
 
 
 def test_v1_reintroduced_1460_as_a_false_keep_in_both_corpus_runs():
-    # #1460 ("should actions leak deprecation warnings?") is exactly the
-    # false keep the original in_scope refinement fixed. v1's broadened
-    # promise-source list (adding "design, or stated recommended usage")
-    # let the model read the reporter's own design opinion as a promise --
-    # reproduced identically in two independent 60-issue runs, so this is a
-    # systematic regression, not sampling noise.
+    # v1 let the model read the reporter's own design opinion in #1460 as a
+    # promise, in both independent corpus runs: a systematic regression, not
+    # noise.
     for subdir in ("corpus-run1-v1", "corpus-run2-v1"):
         score = _score_against_labels(_corpus_run(subdir))
         assert 1460 in score["false_keeps"]
@@ -189,12 +180,7 @@ def test_v3_improved_2639_and_2045_vs_baseline():
 
 
 def test_v3_never_holds_both_floors_in_the_same_run():
-    # run1: 11/12 recall (91.7%, just under the 92% floor) and 92%
-    # precision (new false keep #1398). run2: precision hits the floor
-    # (100%) but recall doesn't (83%, two false drops). Neither run clears
-    # both floors simultaneously -- the measured basis for calling this a
-    # failed retune rather than landing a prompt that merely "looks fine
-    # on one run".
+    # Each run misses one floor or the other, so v3 is a failed retune.
     run1 = _score_against_labels(_corpus_run("corpus-run1-v3"))
     run2 = _score_against_labels(_corpus_run("corpus-run2-v3"))
     assert run1["recall"] < 0.92

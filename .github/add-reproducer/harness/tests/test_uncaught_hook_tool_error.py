@@ -52,10 +52,10 @@ def _uncaught(source: str) -> list[str]:
 
 # -- the calibration corpus ---------------------------------------------------
 
-# (run, repair) -> phrases the one uncaught-error reason contains, or [] when
-# the file passes the check. The repair labels are the fixture's own: "§17
-# reasons" is a repair made from the fake-hook-tool rules' reasons, and "the
-# §18 reason" one made from this rule's reason.
+# (run, repair) -> phrases the uncaught-error reason contains, or [] when the
+# file passes. The repair labels are the fixture's own: "§17 reasons" is a
+# repair from the fake-hook-tool rules' reasons, "the §18 reason" from this
+# rule's.
 EXPECTED = {
     (0, "§17 reasons"): [_NOTHING_CATCHES, "`try: result = dict(rel.data[rel.app])`"],
     (1, "§17 reasons"): [

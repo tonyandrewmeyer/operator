@@ -171,10 +171,8 @@ def test_the_hand_repairs_pass_the_check(record):
     assert retry_hints(result) == []
 
 
-# What each repair raises on ops 3.8.3: run 0 fails on `assert ModelError(...)
-# == {}`, the bug; run 4's `result` is never bound, on any version; run 6's
-# read lets the `ModelError` out, which the check misses behind the `assert`
-# before it (a known gap, left as it is).
+# What each repair raises on ops 3.8.3. Run 6's `ModelError` is hidden from
+# the check by the `assert` before it, a known gap.
 REPAIRED = {0: AssertionError, 4: UnboundLocalError, 6: "ModelError"}
 
 

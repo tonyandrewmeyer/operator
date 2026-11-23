@@ -273,18 +273,15 @@ def test_template_includes_synthesized_test_file_body():
     assert body.index("<summary>") < body.index("def test_x():") < body.index("</details>")
 
 
-# --- Heredoc-embedded test file (a reviewer needs to see a test file that
-# `synthesized_test_file` alone never covers -- #2341's real extraction
-# writes its own test file via a `cat > ... << 'EOF'` heredoc in
-# commands[], not LLM synthesis, and the executed run's own commands (e.g.
-# a runner that replays only the final pytest invocation) can drop that
-# heredoc before it ever reaches the composer.) --------------------------
+# --- Heredoc-embedded test file ---------------------------------------------
+#
+# Some extractions write their test file with a heredoc in commands[], and the
+# executed run may not include that heredoc, so the composer must show it.
 
 
 def test_template_includes_heredoc_embedded_test_file():
     hyp = _load_hypothesis(2341)  # real extraction; commands[2] is the heredoc
-    # Mirrors composer-scale's 2341-log-only-synthetic RunResult shape: the
-    # executed run replays only the final pytest invocation, not the setup
+    # The executed run replays only the final pytest invocation, not the setup
     # or the heredoc that wrote the file.
     run = RunResult(
         hypothesis_number=2341,
@@ -292,9 +289,8 @@ def test_template_includes_heredoc_embedded_test_file():
         commands=[CommandResult(command="uv run pytest repro_test.py -v", exit_code=0, stdout="1 passed in 0.08s")],
     )
     body = compose_template(hyp, _load_issue(2341), run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
-    # "Commands run" only ever renders run_result.commands (the executed
-    # subset), never hypothesis.commands -- the heredoc line that actually
-    # creates the file is not among them.
+    # "Commands run" renders only run_result.commands, which here lacks the
+    # heredoc that creates the file.
     commands_section = body[body.index("Commands run:") :]
     assert "cat >" not in commands_section
     assert "class DummyCharm(ops.CharmBase):" in body  # the heredoc's actual body, shown elsewhere
@@ -304,11 +300,8 @@ def test_template_includes_heredoc_embedded_test_file():
 
 
 def test_resolved_test_file_prefers_synthesized_over_embedded_heredoc():
-    # If a hypothesis somehow carries both (shouldn't happen in practice --
-    # the two sources are mutually exclusive in the real pipeline -- but the
-    # priority should be principled, not accidental): synthesized_test_file
-    # is a copy of the file actually written to disk for the run that
-    # happened, so it wins.
+    # The two sources shouldn't both be set, but if they are, the synthesised
+    # file wins because it is a copy of what was actually written for the run.
     hyp = _load_hypothesis(2341)
     hyp.synthesized_test_file = TestFile(path="different.py", body="def test_y(): pass\n")
     resolved = _resolved_test_file(hyp)
@@ -319,9 +312,7 @@ def test_template_omits_test_file_section_when_none():
     hyp = _load_hypothesis(2341)
     run = _load_run(2341)
     hyp.observed = 'crashes with "boom"'
-    # #2341's real extraction embeds a test file as a heredoc in commands[]
-    # -- strip it so this
-    # case actually has no test file, which is what the test name claims.
+    # Strip the heredoc so this case really has no test file.
     hyp.commands = ["uv run pytest -v"]
     run.commands[-1] = CommandResult(command="uv run pytest -v", exit_code=1, stderr='"boom"')
     body = compose_template(hyp, _load_issue(2341), run, Outcome.REPRODUCED, "matched", run_id="r1", timestamp="t")
@@ -408,14 +399,10 @@ def test_template_versions_line_omits_observed_ops_version_when_absent():
 
 # --- The `<summary>` contradiction ------------------------------------
 #
-# A comment composed on GitHub Actions for `#2045` can render its
-# fourteen-line test file twice: once inside a `<details>` block whose
-# `<summary>` says it is "not shown in the commands actually run below", and
-# again four lines later as the `cat > test_cwd.py << 'PYEOF'` heredoc that
-# wrote it. The commands and the file body below are transcribed from a real
-# composed comment; the extraction's `expected`/`observed` prose was not
-# recorded, so those two fields are left empty here rather than guessed at.
-# Nothing the assertions below check reads them.
+# A test file shown in `<details>` must not claim to be "not shown in the
+# commands" when the heredoc that wrote it is in the commands block. The
+# commands and body below come from a real composed comment; the empty
+# `expected`/`observed` fields are not read by these assertions.
 
 _DISPATCH_TEST_FILE_BODY = """\
 import os
@@ -602,10 +589,8 @@ def test_a_none_branch_comment_now_discloses_the_ops_it_resolved():
 
 # --- The wrapper is fixed text -----------------------------------------
 #
-# A model-written wrapper is unstable: an unlabelled commands fence, a
-# reworded opening sentence, a closing `Reproduced on unpinned/unpinned`
-# under its own `substrate=none`. The comment is rendered from the run
-# record alone, so these pin the wrapper's exact text.
+# The comment is rendered from the run record alone, so these pin the
+# wrapper's exact text.
 
 
 def _cwd_case(timestamp: str = "2026-11-19T12:46:00.843074+00:00") -> str:

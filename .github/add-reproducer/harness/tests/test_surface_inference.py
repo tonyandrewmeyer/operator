@@ -44,11 +44,9 @@ def test_validate_rejects_bad_surface():
 
 # --- the stimulus half: pebble_service.command ---------------------------
 #
-# Live inference can return `pebble_service.command: null` for #2639; if
-# `validate()` did not look at it, the run would deploy a charm, poke
-# nothing, and still produce a verdict. The fixture is hand-filled --
-# `fixtures/surface/2639.json`'s own `_command_note` records that -- so no
-# fixture run sees the null.
+# Without a command, the run would deploy a charm, poke nothing, and still
+# produce a verdict. The fixture is hand-filled, so only live inference
+# returns the null.
 
 
 def _valid(**overrides):

@@ -21,10 +21,8 @@ from seams.llm import LLMSeam
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
 SUBSTRATES = {"lxd", "k8s", "none"}
 
-# Bounds prompt size on long comment threads (`#2185`). Configurable via
-# `Extractor(max_comment_chars=...)`; this default comfortably fits a
-# handful of ordinary review-style comments (the real #2045 follow-up is
-# ~350 characters) while capping the pathological long-thread case.
+# Bounds prompt size on long comment threads while still fitting a handful
+# of ordinary comments. Configurable via `Extractor(max_comment_chars=...)`.
 DEFAULT_MAX_COMMENT_CHARS = 4000
 
 _SCHEMA_INSTRUCTIONS = """\
@@ -328,14 +326,9 @@ def validate(raw: dict) -> None:
     _require(raw, "in_scope", (bool,))
     _require(raw, "moving_parts", (dict,))
     _require(raw, "commands", (list,))
-    # `expected`/`observed` describe a defect, so they only mean anything for
-    # an in-scope extraction. Requiring them unconditionally turns clean
-    # drops into `ExtractionInvalid` (#1449, #1492: the model returns null
-    # for both, reasonably, having just judged the issue not to be a bug).
-    # Same shape as `substrate` below: a field that is only defined for some
-    # extractions must not be demanded of every one. The outcome was
-    # stay-silent either way, but a drop recorded as a validation failure
-    # pollutes the metrics and would read as an error in production logs.
+    # `expected`/`observed` describe a defect, so they're only required for an
+    # in-scope extraction. Demanding them of a drop would record a clean drop as
+    # a validation failure.
     if raw["in_scope"]:
         _require(raw, "expected", (str,))
         _require(raw, "observed", (str,))
@@ -352,23 +345,17 @@ def validate(raw: dict) -> None:
     mp = raw["moving_parts"]
     substrate = mp.get("substrate")
     if raw["in_scope"]:
-        # Required, and never null, for anything that might reach a runner.
-        # `choose_branch` dispatches the provisioning decision off this field,
-        # so an absent value would fall through to the most expensive branch
-        # (`k8s-scratch`) by accident. A model can return null for host-only
-        # hypotheses and for k8s ones like #2639 alike. Guessing either way is
-        # wrong: "none" strands a k8s bug on the host and reports a false
-        # non-reproduction, while defaulting to k8s buys a cluster for a unit
-        # test. The stay-silent fallback is the honest answer, and matches the
-        # project's bias toward a false drop over a false comment.
+        # Required for anything that might reach a runner: `choose_branch`
+        # dispatches on it, and an absent value would fall through to `k8s-scratch`.
+        # Guessing either way is wrong (host vs cluster), so stay silent instead.
         if substrate not in SUBSTRATES:
             raise ExtractionInvalid(
                 f"moving_parts.substrate must be one of {sorted(SUBSTRATES)} when "
                 f"in_scope is true, got {substrate!r}"
             )
     elif substrate is not None and substrate not in SUBSTRATES:
-        # Dropped issues never reach a runner, so null is fine here (it's what
-        # the hand extraction for #2304 carries); a *wrong* value still isn't.
+        # Dropped issues never reach a runner, so null is fine here; a wrong value
+        # still isn't.
         raise ExtractionInvalid(f"moving_parts.substrate invalid: {substrate!r}")
 
 
@@ -431,10 +418,8 @@ class Extractor:
     def __init__(self, llm: LLMSeam, *, max_comment_chars: int = DEFAULT_MAX_COMMENT_CHARS):
         self.llm = llm
         self.max_comment_chars = max_comment_chars
-        # One entry per extraction whose embedded test file was checked, in
-        # call order: empty when nothing was checked, one when the first
-        # answer passed, two when it failed and the extraction was re-asked.
-        # Read by `extraction_record.build()`.
+        # One entry per checked test file, in call order: two when the first
+        # answer failed and was re-asked. Read by `extraction_record.build()`.
         self.last_test_checks: list[StaticCheckResult] = []
         # Whether the re-ask was sent. Not the same as `len(last_test_checks)
         # == 2`: a re-ask whose answer fails schema validation, or comes back

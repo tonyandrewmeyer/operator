@@ -140,8 +140,8 @@ def test_the_private_root_supplies_the_pytest_the_extraction_does_not(tmp_path):
 
     pyproject = (tmp_path / "issue-2045" / "pyproject.toml").read_text()
     assert "pytest" in pyproject
-    # One dev dependency and no more: this replaces what the harness was
-    # supplying by accident, it is not a place to put a standard environment.
+    # One dev dependency: this replaces what the harness venv was supplying by
+    # accident, nothing more.
     assert 'dev = ["pytest"]' in pyproject
     assert "dependencies = []" in pyproject
 
@@ -226,16 +226,9 @@ def test_the_none_branch_runs_one_level_below_its_private_root(tmp_path):
 
 # --- uv's environment-selection variables ---
 #
-# Giving the scratch project a workspace root of its own closes uv's
-# *directory* walk, and nothing else: `uv` picks its target environment from
-# `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT` before it looks at any directory at
-# all. The harness runs under `uv run`, so both can be set to the harness's own
-# environment by the time a scratch command runs.
-#
-# Inheriting them is not harmless: `tox-uv` sets `UV_PROJECT_ENVIRONMENT` for
-# the whole test run, so a scratch sync would go into this repository's
-# `.tox/unit` and empty it down to the scratch project's four packages, and
-# `ops`'s own tests would then fail to import `websocket`.
+# A workspace root only closes uv's directory walk: uv picks its environment
+# from `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT` first, and `tox-uv` sets the
+# latter for the whole test run.
 
 
 def test_scratch_commands_do_not_inherit_uvs_environment_selection(monkeypatch):

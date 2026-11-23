@@ -71,11 +71,7 @@ def _repeats_summary(subdir: str, number: int) -> dict:
 
 
 def test_rationale_instrumented_corpus_run_precision_holds_recall_drops():
-    # Adding the rationale field alone (no decision-logic change) still held
-    # precision at 100% but landed at 75% recall (9/12) -- within this
-    # project's established day-to-day noise band, and the run that
-    # motivated broadening the second-pass gate to "every drop" rather than
-    # "drops with a populated observed field" (see #1790/#2327 below).
+    # The rationale field alone keeps precision but loses recall.
     score = _score_against_labels(_corpus_run("corpus-instrumented"))
     assert score["precision"] == pytest.approx(1.0)
     assert score["false_keeps"] == []
@@ -83,10 +79,8 @@ def test_rationale_instrumented_corpus_run_precision_holds_recall_drops():
 
 
 def test_rationale_run_shows_1790_and_2327_dropped_with_empty_observed():
-    # The finding that changed the second-pass gate design: these two real
-    # bugs were dropped with observed=="" in the rationale-instrumented run,
-    # so a gate keyed on a populated `observed` field would have missed
-    # them (see inscope_second_pass.py's module docstring).
+    # These real bugs were dropped with an empty `observed`, which is why the
+    # second-pass gate covers every drop rather than keying on `observed`.
     run = _corpus_run("corpus-instrumented")
     for number in (1790, 2327):
         record = run[number]
@@ -106,10 +100,7 @@ def test_twopass_corpus_run_precision_is_perfect(subdir):
 
 @pytest.mark.parametrize("subdir", ["corpus-twopass-run1", "corpus-twopass-run2"])
 def test_twopass_corpus_run_recall_ties_the_established_baseline(subdir):
-    # 11/12 == 0.91666..., the same fraction the single-pass baseline run
-    # reports as "recall 92%" (rounded; strictly it is just under 0.92).
-    # Both runs land on this exact fraction, with the same sole false drop
-    # (#1088) that predates this module.
+    # Matches the single-pass baseline's recall, with the same sole false drop.
     score = _score_against_labels(_corpus_run(subdir))
     assert score["recall"] == pytest.approx(11 / 12)
     assert score["false_drops"] == [1088]
@@ -125,9 +116,7 @@ def test_twopass_recovers_1790_and_2327_that_the_single_pass_dropped():
 
 
 def test_twopass_corpus_runs_are_identical_on_in_scope():
-    # Zero variance across two independent runs -- far more stable than any
-    # of the three abandoned single-prompt rewordings in
-    # `test_inscope_retune.py`, which each disagreed with themselves in different ways run to run.
+    # The two-pass result is stable across independent runs.
     run1 = _corpus_run("corpus-twopass-run1")
     run2 = _corpus_run("corpus-twopass-run2")
     shared = sorted(set(run1) & set(run2))

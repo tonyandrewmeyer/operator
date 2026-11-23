@@ -26,10 +26,8 @@ RUNS = {
 # real change from sampling noise. The model is not seeded.
 REPEATS = sorted((_LIVE_LLM / "repeats").glob("run*")) if (_LIVE_LLM / "repeats").is_dir() else []
 
-# The hand-derived baseline, from harness/fixtures/extractions/. #2185 has no
-# hand extraction (its real comment timeline was not available when the
-# baseline was built), so it has no ground truth to compare against and is
-# excluded.
+# The hand-derived baseline, from harness/fixtures/extractions/. #2185 has
+# no hand extraction, so it is excluded.
 HAND = {
     2045: {"in_scope": True, "substrate": "none", "confidence": "medium"},
     2304: {"in_scope": False, "substrate": None, "confidence": "low"},
@@ -77,13 +75,8 @@ def _require_runs():
 
 @pytest.mark.parametrize(
     "run,expected",
-    # Substrate. The original run returned JSON null for three host-only
-    # hypotheses and for #2639, which `choose_branch` silently routed to
-    # k8s-scratch. Requiring the field took agreement to 5/6; the remaining
-    # gap is #2304, whose hand value is null-because-dropped. The 1 -> 5 jump
-    # is far outside the noise band (repeats of one config score 4-5), so
-    # unlike confidence below this one does support the causal claim; the
-    # difference between a 4 and a 5 does not.
+    # Substrate: requiring the field fixed nulls routed to k8s-scratch. The
+    # remaining gap is #2304, whose hand value is null because it was dropped.
     [("original", 1), ("after_substrate_fix", 5), ("after_commands_fix", 5), ("current", 5)],
 )
 def test_substrate_agreement_progression(run, expected):
@@ -92,9 +85,7 @@ def test_substrate_agreement_progression(run, expected):
 
 @pytest.mark.parametrize(
     "run,expected",
-    # in_scope. #2304 -- a "this code can be removed" cleanup request -- was
-    # kept as in_scope by every run until the in_scope criteria were spelled
-    # out, at which point all six hand-baselined issues agree.
+    # in_scope: spelling out the criteria fixed #2304, a cleanup request.
     [("original", 5), ("after_substrate_fix", 5), ("after_commands_fix", 5), ("current", 6)],
 )
 def test_in_scope_agreement_progression(run, expected):
@@ -103,14 +94,8 @@ def test_in_scope_agreement_progression(run, expected):
 
 @pytest.mark.parametrize(
     "run,expected",
-    # Confidence, and a caution. These numbers are recorded fact, but the
-    # apparent 5 -> 3 drop between the last two runs is NOT evidence that the
-    # in_scope change regressed confidence: four samples of the *current*
-    # config scored 3, 3, 5 and 4 (see `repeats/` and
-    # `test_confidence_agreement_is_noise_dominated`), so the whole range is
-    # sampling noise on n=6 with an unseeded model. Confidence was never
-    # deliberately fixed and this metric cannot support a claim either way at
-    # this sample size.
+    # Confidence: recorded, but not a trend. Repeats of one config vary as
+    # much as these do (see `test_confidence_agreement_is_noise_dominated`).
     [("original", 1), ("after_substrate_fix", 1), ("after_commands_fix", 5), ("current", 3)],
 )
 def test_confidence_agreement_progression(run, expected):

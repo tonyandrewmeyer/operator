@@ -53,8 +53,7 @@ def test_issue_from_dict_defaults_comments_to_empty_list():
 
 
 def test_no_comments_produces_empty_section_regression():
-    # #2639 has no comments field at all -- confirms issues with zero
-    # comments add no comments section to the prompt.
+    # #2639 has no comments, so the prompt gets no comments section.
     issue = _load_issue(2639)
     assert issue.comments == []
     assert _format_comments(issue, DEFAULT_MAX_COMMENT_CHARS) == ""
@@ -63,10 +62,8 @@ def test_no_comments_produces_empty_section_regression():
 
 
 def test_real_2045_comment_is_attributed_as_other():
-    # Real GitHub data (a verbatim API capture, in
-    # fixtures/issues/2045.json): a follow-up
-    # comment from james-garner-canonical, who is not the issue's reporter
-    # (tonyandrewmeyer) -- the "third-party follow-up" shape.
+    # A verbatim API capture with a follow-up from someone other than the
+    # reporter.
     issue = _load_issue(2045)
     assert len(issue.comments) == 1
     comment = issue.comments[0]
@@ -78,11 +75,8 @@ def test_real_2045_comment_is_attributed_as_other():
 
 
 def test_scope_redirecting_reply_is_flagged_as_issue_author():
-    # Modeled on canonical/operator#2185's real body ("EDIT: see the first
-    # reply for the new scope of this issue"). The reply body below is INVENTED
-    # for this test, not real GitHub content; only the body's EDIT-pointer text
-    # and the general shape (reporter narrows their own issue's scope in the
-    # first reply) come from the real issue.
+    # Modelled on canonical/operator#2185, where the reporter narrows the
+    # issue's scope in the first reply. The reply body here is invented.
     issue = Issue(
         number=99101,
         title="Don't include private-address in the default Scenario database when mocking Juju 4",
@@ -115,10 +109,8 @@ def test_scope_redirecting_reply_is_flagged_as_issue_author():
 
 
 def test_irrelevant_chatty_reply_is_still_included_verbatim():
-    # Extraction doesn't pre-filter comment relevance -- that's the LLM's
-    # job (per the updated _SCHEMA_INSTRUCTIONS). A chatty, non-scope-
-    # bearing reply should still reach the prompt so the model can decide
-    # it's irrelevant, rather than the harness silently deciding for it.
+    # Extraction doesn't pre-filter comment relevance; the model decides, so
+    # even an irrelevant reply must reach the prompt.
     issue = Issue(
         number=99102,
         title="some bug",

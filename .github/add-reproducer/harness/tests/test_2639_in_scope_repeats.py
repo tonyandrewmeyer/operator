@@ -48,9 +48,7 @@ def test_eight_repeats_recorded_for_each_variant():
 
 
 def test_2639_in_scope_false_drop_rate_is_high_without_comments():
-    # The headline finding: this is not the earlier n=1 sample's noise --
-    # 6/8 repeats drop the project's only-ever-reproduced flagship case when
-    # comments aren't read at all.
+    # Without comments, the flagship case is usually dropped.
     summary = _load_summary()
     assert summary["without_comments"]["n"] == 8
     assert summary["without_comments"]["dropped"] == 6
@@ -58,10 +56,8 @@ def test_2639_in_scope_false_drop_rate_is_high_without_comments():
 
 
 def test_2639_in_scope_false_drop_rate_drops_but_does_not_vanish_with_comments():
-    # Reading the real comment thread substantially reduces the false-drop
-    # rate (implicitly: comments add context the tightened in_scope prompt
-    # otherwise reads as "no concrete broken promise") but does not close it
-    # -- 2/8 repeats still drop it even with the full real thread.
+    # Reading the comment thread reduces the false-drop rate but doesn't
+    # eliminate it.
     summary = _load_summary()
     assert summary["with_comments"]["n"] == 8
     assert summary["with_comments"]["dropped"] == 2
@@ -76,10 +72,7 @@ def test_2639_is_dropped_at_least_once_in_every_variant():
 
 
 def test_2639_confidence_is_never_high_across_any_repeat():
-    # Every recorded repeat (both variants, dropped or kept) landed on
-    # low/medium confidence, never high -- worth carrying alongside the
-    # false-drop rate itself: even the runs that correctly keep #2639
-    # in_scope don't do so with strong confidence.
+    # Even the repeats that keep #2639 in scope don't do so with high confidence.
     runs = _load_runs()
     confidences = {r["without_comments"]["confidence"] for r in runs} | {r["with_comments"]["confidence"] for r in runs}
     assert confidences <= {"low", "medium"}

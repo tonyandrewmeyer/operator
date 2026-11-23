@@ -31,12 +31,9 @@ from static_test_check import check, faked_hook_tools
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
-# The test from `#2709`'s thread, in the shape the prompt asks for: it fails
-# on an assertion on ops 3.8.3 and passes with the fix
-# (`test_the_fake_tool_test_fails_only_on_its_assertion` runs it). Its
-# `relation-list` fake must not print `[]`: that makes ops run
-# `relation-list --app`, get `[]` back as the application name, and fail
-# with `TypeError` on both versions.
+# The test from `#2709`'s thread: it fails on an assertion before the fix and
+# passes after. Its `relation-list` fake must not print `[]`, or ops reads
+# `[]` as the application name and fails with `TypeError` on both versions.
 _FAKE_TOOL_TEST = '''\
 import os
 

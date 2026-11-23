@@ -50,12 +50,9 @@ def test_2327_skipped_stale_full_pipeline(pipeline):
 
 
 def test_2484_low_confidence_stays_silent_in_production_mode(pipeline):
-    # #2484's fixture carries a `ci_run_url` with no self-contained snippet,
-    # so it routes to `k8s-clone` -- a branch that DOES execute `commands[]`
-    # (`runner_stage.COMMAND_EXECUTING_BRANCHES`), unlike `k8s-scratch`
-    # (see the #2639 tests below). The confidence gate still has to fire
-    # here: this pins that the scratch-branch exemption is scoped to
-    # branches that don't execute `commands[]`, not to "any k8s hypothesis".
+    # #2484 routes to `k8s-clone`, which does execute `commands[]`, so the
+    # confidence gate still applies: the scratch-branch exemption must not
+    # cover every k8s hypothesis.
     result = pipeline.run_for_issue(_load_issue(2484))
     assert result.stage_reached == "extraction"
     assert result.outcome is None
@@ -69,14 +66,8 @@ def test_2484_calibration_mode_reaches_classifier(pipeline):
 
 
 def test_2639_confidence_gate_exempt_on_scratch_branch(pipeline):
-    # #2639 is `substrate: k8s` with no `ci_run_url`, so it routes to
-    # `k8s-scratch` -- a branch that builds its reproduction sequence from
-    # `surface`, never from `commands[]`, which is exactly what the
-    # extractor's `confidence` field is calibrated against (extraction.py:
-    # "if you cannot produce a sequence like that ... set confidence to
-    # low"). `pipeline.py` does not gate that branch on confidence, so
-    # production mode behaves the same as calibration mode for this case:
-    # #2639 reproduces end-to-end, and a confidence gate would silence it.
+    # #2639 routes to `k8s-scratch`, which builds from `surface`, not
+    # `commands[]`, so low confidence must not silence it.
     result = pipeline.run_for_issue(_load_issue(2639), run_id="test-run", timestamp="2026-07-23T00:00:00Z")
     if result.stage_reached == "scaffold":
         pytest.skip(f"scratch-charm render needs network access for `uv lock`, unavailable here: {result.reason}")
@@ -95,11 +86,8 @@ def test_2639_calibration_mode_reproduces(pipeline):
 
 
 def test_confidence_gate_still_silences_none_substrate(pipeline, monkeypatch):
-    # The scratch-branch exemption above is scoped to branches that don't
-    # execute `commands[]` at all. A `substrate: none` hypothesis (where
-    # `commands[]` IS the whole reproduction) must still stay silent at
-    # `confidence: low` -- this pins that the exemption didn't quietly widen
-    # into "confidence gate does nothing".
+    # A `substrate: none` hypothesis, where `commands[]` is the whole
+    # reproduction, must still stay silent at `confidence: low`.
     from models import Hypothesis
 
     hyp = Hypothesis.from_dict(
@@ -121,11 +109,9 @@ def test_confidence_gate_still_silences_none_substrate(pipeline, monkeypatch):
 
 
 def test_2045_calibration_mode_composed_comment_includes_synthesized_test_file(pipeline):
-    # #2045 is the real case whose commands[] has no runnable pytest
-    # invocation, so run_for_issue() synthesizes a test file before running.
-    # The composed comment (compose_template, since no compositions/2045.json
-    # fixture exists) must show that file's body, not just reference its name
-    # in the commands block.
+    # #2045's commands[] has no runnable pytest invocation, so a test file is
+    # synthesised. The composed comment must show that file's body, not just
+    # its name.
     result = pipeline.run_for_issue(_load_issue(2045), calibration_mode=True, run_id="test-run", timestamp="2026-07-30T00:00:00Z")
     assert result.comment is not None
     assert "test_issue_2045_repro.py" in result.comment
@@ -134,12 +120,8 @@ def test_2045_calibration_mode_composed_comment_includes_synthesized_test_file(p
 
 
 def test_2107_skipped_stale_full_pipeline(pipeline):
-    # The real #2107 (the only substrate:lxd extraction in the corpus,
-    # see fixtures/extractions/2107.json's _provenance) is CLOSED with
-    # repo_version null -- caught by the stale gate before ever
-    # reaching branch dispatch, same as #2341/#2327. Confirms the full
-    # pipeline doesn't crash on a real substrate:lxd issue and that the
-    # gate short-circuits it exactly as it does for k8s/none hypotheses.
+    # #2107 is substrate:lxd but CLOSED with repo_version null, so the stale
+    # gate stops it before branch dispatch, as it does for other substrates.
     result = pipeline.run_for_issue(_load_issue(2107), calibration_mode=True)
     assert result.outcome == Outcome.SKIPPED_STALE
     assert result.comment is None
@@ -171,13 +153,8 @@ class _StaticRunner:
 
 
 def test_lxd_scratch_reaches_classifier_via_full_pipeline(tmp_path):
-    # Demonstrates the fix end-to-end at the Pipeline level: before
-    # seams/runner.py grew `_run_lxd_scratch`, any substrate:lxd hypothesis
-    # that made it this far crashed with `ValueError: unknown branch
-    # 'lxd-scratch'`. Issue number 1 here is deliberately synthetic (not a
-    # real GitHub issue, per the task's instruction not to invent one for
-    # the fixture corpus) -- OPEN with repo_version set so it clears the
-    # stale gate, which #2107 (the one real lxd extraction) does not.
+    # A substrate:lxd hypothesis must dispatch to `lxd-scratch`. Issue 1 is
+    # synthetic, OPEN, and has repo_version set, so it clears the stale gate.
     llm = _StaticLLM(
         extraction={
             "in_scope": True,
@@ -187,10 +164,8 @@ def test_lxd_scratch_reaches_classifier_via_full_pipeline(tmp_path):
             "observed": "it does not",
             "confidence": "high",
         },
-        # A complete `pebble_service`: with `user`/`command` missing, the
-        # no-stimulus gate stops this before the runner (correctly --
-        # such a run deploys a charm and pokes nothing), and this test is
-        # about lxd-scratch *dispatch*, not that gate.
+        # A complete `pebble_service`, so the no-stimulus gate doesn't stop the
+        # run before the dispatch this test is about.
         surface={
             "charm_name": "repro-i1-x",
             "pebble_service": {"service": "workload", "user": "ubuntu", "command": "pebble notify x"},

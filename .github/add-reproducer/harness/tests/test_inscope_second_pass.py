@@ -105,10 +105,8 @@ def extractor():
 
 
 def test_skips_second_pass_when_first_pass_already_keeps(extractor):
-    # #2639's extraction fixture has in_scope: true. If TwoPassExtractor
-    # ran the second pass anyway, this would raise (no
-    # fixtures/inscope_second_pass/2639.json exists) -- so a passing test
-    # is itself proof the gate was honoured.
+    # No second-pass fixture exists for #2639 (in_scope: true), so the test
+    # would raise if the gate were ignored.
     hyp = extractor.extract(_load_issue(2639))
     assert hyp.in_scope is True
     assert extractor.last_second_pass is None
@@ -123,10 +121,8 @@ def test_stays_dropped_when_second_pass_finds_no_concrete_defect(extractor):
 
 
 def test_recovers_when_second_pass_finds_a_concrete_defect(extractor):
-    # #9002 (fully synthetic): first pass drops with blank observed/expected
-    # -- the exact failure mode this module exists for -- and the second
-    # pass, given the full issue body, finds the concrete defect and
-    # re-extracts a full hypothesis.
+    # #9002 (synthetic): the first pass drops with blank observed/expected, and
+    # the second pass recovers a full hypothesis.
     hyp = extractor.extract(_load_issue(9002))
     assert hyp.in_scope is True
     assert extractor.last_second_pass["concrete_defect"] is True

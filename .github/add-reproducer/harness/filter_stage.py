@@ -16,22 +16,13 @@ _DROP_ISSUE_TYPES_LOWER = {t.lower() for t in DROP_ISSUE_TYPES}
 DROP_LABELS = {
     "docs", "documentation", "question", "discussion", "epic", "tracking",
     "enhancement", "feature", "feature-request", "meta", "chore",
-    # `operator`'s real label vocabulary barely overlaps the set above (only
-    # `docs` matched across 400 issues). `refactoring` is added because every
-    # hand-labelled issue carrying it is in `hand-labels.json`'s
-    # `screened_only` list, i.e. accepted as a correct (non-bug) drop.
+    # Every hand-labelled issue carrying `refactoring` is a correct non-bug drop.
     "refactoring",
 }
 
-# `needs design` and `roadmap` are also label-vocabulary candidates, but are
-# deliberately NOT in DROP_LABELS: `hand-labels.json` records `#1109` as a real
-# bug (`label: true`) carrying `roadmap` alone, and `fixtures/issues/2639.json`
-# -- a hypothesis confirmed to reproduce end-to-end -- carries *both* `needs
-# design` and `roadmap`. Both labels mark a triage/planning state, not
-# bug-vs-not-bug; adding either would false-drop a hand-verified real bug and a
-# validated end-to-end reproduction. `next release` is excluded for the same
-# reason: `#1775` is a hand-labelled real bug (`ops fails when a charm has no
-# config options`) carrying only that label -- it marks scheduling, not scope.
+# `needs design`, `roadmap` and `next release` are deliberately NOT in
+# DROP_LABELS: they mark triage or scheduling state, not bug-vs-not-bug, and
+# hand-labelled real bugs carry them (including the #2639 fixture).
 
 TITLE_DROP_PATTERNS = [
     (re.compile(r"^\s*RFC[:\s]", re.I), "title RFC marker"),

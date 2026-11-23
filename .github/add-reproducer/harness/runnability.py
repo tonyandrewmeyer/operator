@@ -33,12 +33,8 @@ import re
 import shutil
 import subprocess
 
-# Tools the runner is documented to provide: the host scratch directory for
-# `substrate: none` plus the multipass VM's
-# concierge/juju/charmcraft for `lxd|k8s`. Kept as an explicit allowlist
-# rather than probing PATH, so the verdict is identical on this box, in the
-# VM, and on a GHA runner -- a `which`-only check would call `juju` prose
-# when run locally.
+# Tools the runner is documented to provide. An explicit allowlist rather
+# than a PATH probe, so the verdict is the same on every machine.
 RUNNER_TOOLS = frozenset(
     {
         # python / packaging

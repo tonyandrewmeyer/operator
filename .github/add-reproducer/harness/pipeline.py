@@ -55,15 +55,12 @@ class PipelineResult:
     branch: str | None = None
     hypothesis: object | None = None
     surface: SurfaceInference | None = None
-    # What extraction did, on every run that got as far as extraction --
-    # including the ones that stop at the in-scope gate, which are the runs
-    # that most need explaining. `None` means the run
-    # never reached extraction (a filter drop). See `extraction_record.py`.
+    # What extraction did, including on runs that stop at the in-scope gate.
+    # `None` means the run never reached extraction. See `extraction_record.py`.
     extraction_record: dict | None = None
-    # Set when `override_substrate()` ran the answer as `substrate: none`
-    # against its own field: `{"from": <the field>, "to": "none",
-    # "faked_hook_tools": [...]}`. `None` for every other run, a native
-    # `none` included, so an overridden run can be told from one.
+    # Set when `override_substrate()` ran the answer as `substrate: none`:
+    # `{"from": <the field>, "to": "none", "faked_hook_tools": [...]}`. `None`
+    # otherwise, including for a native `none`.
     substrate_override: dict | None = None
 
 
@@ -183,10 +180,8 @@ def _scratch_root(work_dir: Path) -> Path:
         return work_dir
     relocated = Path(tempfile.mkdtemp(prefix="add-reproducer-scratch-")).resolve()
     if _enclosing_python_project(relocated) is not None:
-        # A `TMPDIR` inside a project would put us straight back where we
-        # started. Nothing can be done about it here, and failing the run over
-        # a scratch path would be worse than the contamination, so keep the
-        # caller's directory and let the run proceed.
+        # A `TMPDIR` inside a project can't help, and failing the run over a scratch
+        # path would be worse than the contamination, so keep the caller's directory.
         return work_dir
     return relocated
 
@@ -195,33 +190,23 @@ class Pipeline:
     def __init__(self, llm: LLMSeam, runner: RunnerSeam, *, work_dir: Path | None = None):
         self.llm = llm
         self.runner = runner
-        # `.resolve()`, not just `Path(...)`: `charm_dir` below is built
-        # under `work_dir` and then embedded verbatim into shell command
-        # strings (`seams/runner.py`'s `_scratch_sequence` -- `juju deploy
-        # -m <target> {charm_dir}/*.charm ...`), which run with `cwd` set to
-        # the *issue's* directory, not the process's. A relative `work_dir`
-        # -- the CLI default (`add-reproducer-out`) is one -- therefore
-        # produces a `charm_dir` that resolves against the wrong directory
-        # at execution time; juju 4 additionally refuses a local-charm path
-        # that isn't absolute or `./`-prefixed outright ("... is ambiguous").
+        # Resolved because `charm_dir` is built under `work_dir` and embedded in
+        # shell commands that run with `cwd` set to the issue's directory, so a
+        # relative path (such as the CLI default) would point at the wrong place.
+        # Juju 4 also rejects a local-charm path that isn't absolute or `./`-prefixed.
         self.work_dir = (Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="add-reproducer-"))).resolve()
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        # Where per-issue scratch directories go: usually `work_dir` itself,
-        # and somewhere outside every Python project when `work_dir` is inside
-        # one. Resolved on first use rather than here, so constructing a
-        # pipeline that never reaches the `none` branch creates no directory.
-        # See `_scratch_root()`.
+        # Where per-issue scratch directories go: `work_dir`, or somewhere outside
+        # every Python project when `work_dir` is inside one. Resolved lazily so a
+        # run that never needs it creates no directory. See `_scratch_root()`.
         self._scratch_root: Path | None = None
         # A second, narrower-question pass on every first-pass drop, which
         # recovers in-scope reports the first pass was too blunt for.
         self.extractor = TwoPassExtractor(llm)
         self.surface_inferrer = SurfaceInferrer(llm)
         self.composer = Composer(llm)
-        # Set by `_run_for_issue` as soon as extraction returns, and stamped
-        # onto whatever `PipelineResult` comes back. Held here rather than
-        # threaded through every return because `_run_for_issue` has nine of
-        # them past extraction, and a record that only some paths carried
-        # would be worse than none.
+        # Set as soon as extraction returns and stamped onto whichever
+        # `PipelineResult` comes back, so every return path carries it.
         self._extraction_record: dict | None = None
         # Same reason: set once, stamped onto whatever comes back.
         self._substrate_override: dict | None = None
@@ -321,8 +306,7 @@ class Pipeline:
         )
 
         if not hypothesis.in_scope and not ignore_in_scope:
-            # The reason names what the second pass did, instead of
-            # asserting a "second opinion" the log could not support -- see
+            # The reason names what the second pass did. See
             # `extraction_record.in_scope_drop_reason()`.
             return PipelineResult(
                 issue.number,
@@ -332,20 +316,6 @@ class Pipeline:
                 None,
             )
 
-        # Branch is decided here, ahead of its other use below, because the
-        # confidence gate needs it: `extraction.py`'s own instructions tie
-        # "low confidence" to "I could not write a self-contained commands[]
-        # recipe" (empty commands[] + confidence=low is the documented
-        # fallback). That's a meaningful signal on the branches that actually
-        # execute commands[] (`runner_stage.COMMAND_EXECUTING_BRANCHES`), and
-        # not connected to anything on `runner_stage.SCRATCH_BRANCHES`, which
-        # build their reproduction sequence from `surface`, never from
-        # `commands[]`. Gating scratch-branch hypotheses on it would silence
-        # `#2639` -- the project's one end-to-end-confirmed reproduction --
-        # most of the time, for a reason unconnected to whether the
-        # reproduction would work. Every in-scope, confidence=low, k8s/lxd
-        # hypothesis recorded so far that routes to a scratch branch is a
-        # real bug, so the exemption has no known false keep.
         # Before anything reads `substrate`. See `override_substrate()`.
         hypothesis, self._substrate_override = override_substrate(hypothesis)
         if self._extraction_record is not None:
@@ -365,6 +335,10 @@ class Pipeline:
                 branch=branch,
                 hypothesis=hypothesis,
             )
+        # Low confidence means the model could not write a self-contained
+        # `commands[]` recipe. That only matters on branches that run
+        # `commands[]`; scratch branches build from `surface`, so gating them
+        # would silence real reproductions.
         if (
             not calibration_mode
             and hypothesis.confidence == "low"
@@ -372,19 +346,10 @@ class Pipeline:
         ):
             return PipelineResult(issue.number, "extraction", None, "confidence=low, staying silent", None)
 
-        # A model-written pytest file that fails the static check is not run.
-        # The extractor re-asks once and keeps the second answer whatever its
-        # check says, and without this gate that answer would go to the
-        # runner. If it then failed on an exception, rung 1c would keep it
-        # silent; if it failed on an assertion it would compose "The bug
-        # reproduced": a re-ask can compare the handler's cwd with
-        # `ctx.charm_root` (`None`, unset), which fails with or without the
-        # fix. The check rejects
-        # no valid test in its calibration, so skipping the run loses nothing
-        # and saves a runner job. Only where `commands[]` is what runs, and
-        # only when pytest runs the file: the check's rules are about pytest
-        # files, and a reporter's `python repro.py` script is allowed to have
-        # no test function.
+        # A model-written test file that fails the static check is not run: the
+        # re-asked answer is kept whatever its check says, and a broken test can
+        # fail with or without the fix. Only checked when pytest runs the file,
+        # since a plain script needs no test function.
         if branch in runner_stage.COMMAND_EXECUTING_BRANCHES:
             test_check = static_test_check.check_commands(hypothesis.commands)
             if (
@@ -426,17 +391,12 @@ class Pipeline:
                 surface = self.surface_inferrer.infer(issue, hypothesis)
             except SurfaceInferenceInvalid as exc:
                 return PipelineResult(issue.number, "surface_inference", None, f"invalid surface inference: {exc}", None)
-            # `expected_signal` is decided by the charm template, not by the
-            # model: `scaffold.expected_signal_for()` reads render.py's own
-            # table. A guessed string can only match by luck: an invented one
-            # is scored against a charm that emits something else entirely.
-            # Applied before the gates below so they see the real value.
+            # `expected_signal` comes from the charm template, not the model: a guessed
+            # string would be scored against a charm that emits something else. Set
+            # before the gates below so they see the real value.
             surface = dataclasses.replace(surface, expected_signal=expected_signal_for(surface))
-            # Before rendering or packing anything: a scratch branch with no
-            # stimulus deploys a charm, pokes nothing, and produces a verdict
-            # about an experiment that never happened. Checked here rather
-            # than after the run, so it costs an LLM call instead of a
-            # substrate bootstrap.
+            # A scratch branch with no stimulus would deploy a charm and poke nothing.
+            # Checked before rendering so it costs an LLM call, not a substrate bootstrap.
             has_stimulus, no_stimulus_reason = runner_stage.check_stimulus(branch, surface)
             if not has_stimulus:
                 return PipelineResult(
@@ -450,9 +410,9 @@ class Pipeline:
                     hypothesis=hypothesis,
                 )
 
-        # Pre-run gate: commands[] that aren't shell exit 127 on contact with one, and
-        # the classifier reads that as evidence of a reproduction. Checked
-        # after synthesis, which can repair the sequence.
+        # Pre-run gate: non-shell `commands[]` exit 127, which the classifier would
+        # read as evidence of a reproduction. Checked after synthesis, which can
+        # repair the sequence.
         runnable, unrunnable_reason = runner_stage.check_runnable(hypothesis, branch)
         if not runnable:
             return PipelineResult(
@@ -474,25 +434,15 @@ class Pipeline:
 
     def _execute_plan(self, plan: RunPlan) -> PipelineResult:
         issue, branch, hypothesis, surface = plan.issue, plan.branch, plan.hypothesis, plan.surface
-        # Per-issue scratch dir. With one shared workdir, a batch would run
-        # `uv init` in an already-initialised project for all but the first
-        # issue (exit 2, "Project is already initialized"), which the
-        # classifier scores as `partial` -- a comment claiming partial
-        # reproduction off a setup collision. It would also put every
-        # synthesised test file in one pytest rootdir, so unrelated issues'
-        # tests shared a collection.
-        # `scratch_root`, not `work_dir`: the commands that run in here are
-        # `uv init`/`uv add`, and uv walks up out of any directory that sits
-        # inside a Python project. See `_scratch_root()`.
+        # One scratch dir per issue, so a batch doesn't run `uv init` in an
+        # already-initialised project or share one pytest rootdir across issues.
+        # Under `scratch_root` rather than `work_dir` because uv walks up out of any
+        # directory inside a Python project. See `_scratch_root()`.
         issue_dir = self.scratch_root / f"issue-{issue.number}"
         if branch == "none":
-            # The only branch whose commands are run with `cwd` set here, and
-            # so the only one uv's workspace discovery can reach out of. It
-            # gets a private workspace root one level up from where it runs.
-            # Scoped rather than applied to every branch on purpose: a
-            # `k8s-clone` run clones a repository into this directory, and
-            # giving that checkout an enclosing workspace root would change
-            # what its own tests run against.
+            # The only branch whose commands run with `cwd` here, so it gets a private
+            # uv workspace root one level up. Not applied to `k8s-clone`, where an
+            # enclosing workspace would change what the cloned repo's tests run against.
             scratch_environment = runner_stage.scratch_environment(issue_dir)
             issue_dir = runner_stage.prepare_scratch_project(issue_dir)
         else:
@@ -500,9 +450,8 @@ class Pipeline:
             issue_dir.mkdir(parents=True, exist_ok=True)
         context = {"issue_number": issue.number, "repo": issue.repo, "workdir": str(issue_dir)}
         if scratch_environment is not None:
-            # Which virtualenv this issue's uv commands write to, named rather
-            # than left to whatever `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT` the
-            # harness itself was started with. See
+            # Name this issue's virtualenv explicitly rather than inherit the harness's
+            # own `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT`. See
             # `seams/runner.py:scratch_command_env()`.
             context["uv_project_environment"] = str(scratch_environment)
 

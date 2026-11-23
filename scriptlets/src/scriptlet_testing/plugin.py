@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """pytest plugin: a ``scriptlet_ctx`` fixture, versions in the header, and a step-budget check."""
 
 from __future__ import annotations
@@ -7,7 +10,7 @@ import json
 import pathlib
 import subprocess
 from collections.abc import Generator, Iterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -59,6 +62,7 @@ _STATE = pytest.StashKey[_State]()
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add the plugin's ini settings and command-line options."""
     parser.addini(
         'scriptlet_charm',
         'charm directory or .charm file for scriptlet_ctx, relative to the ini file',
@@ -103,6 +107,7 @@ def _fraction(config: pytest.Config) -> float | None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    """Register the marker and set up the budget report."""
     config.addinivalue_line(
         'markers',
         'scriptlet_charm(path): the charm scriptlet_ctx loads, relative to the test file',
@@ -113,6 +118,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_report_header(config: pytest.Config) -> list[str]:
+    """Report the runner's Juju, starform and starlark versions."""
     try:
         runner = find_runner()
     except RunnerError as e:
@@ -138,7 +144,9 @@ def pytest_report_header(config: pytest.Config) -> list[str]:
 
 
 def _charm_path(request: pytest.FixtureRequest) -> pathlib.Path:
-    marker = request.node.get_closest_marker('scriptlet_charm')
+    # pytest doesn't annotate FixtureRequest.node.
+    node = cast('pytest.Item', request.node)  # pyright: ignore[reportUnknownMemberType]
+    marker = node.get_closest_marker('scriptlet_charm')
     if marker is not None:
         if len(marker.args) != 1:
             raise pytest.UsageError('scriptlet_charm takes one argument, the charm path')
@@ -161,6 +169,7 @@ def scriptlet_ctx(request: pytest.FixtureRequest) -> Iterator[Context]:
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
+    """Record the steps each run used, and fail the test if one is over the budget fraction."""
     state = item.config.stash[_STATE]
     records: list[_Record] = []
 
@@ -201,6 +210,7 @@ def _record_worst(records: list[_Record]) -> _Record:
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """List every measured run in a step budget summary."""
     state = terminalreporter.config.stash.get(_STATE, None)
     if state is None or not state.records:
         return

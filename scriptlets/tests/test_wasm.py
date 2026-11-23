@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """The private wasm backend gives the same answers as the native runner."""
 
 from __future__ import annotations
@@ -11,7 +14,6 @@ import zipfile
 from typing import Any
 
 import pytest
-
 from scriptlet_testing import (
     AllocLimitError,
     BuiltinArgumentError,
@@ -111,9 +113,11 @@ def test_charm_outside_preopen_is_invisible(tmp_path: pathlib.Path):
     # Only the charm's own directory is preopened, so the guest can't read
     # a sibling path.
     with wasm(TESTDATA / 'set_status') as ctx:
-        resp = ctx._backend.request(
-            {'op': 'run', 'charm': str(TESTDATA / 'step_limit'), 'event': {'name': 'start_up'}}
-        )
+        resp = ctx._backend.request({
+            'op': 'run',
+            'charm': str(TESTDATA / 'step_limit'),
+            'event': {'name': 'start_up'},
+        })
     assert resp['error']['kind'] == 'invalid_input'
 
 

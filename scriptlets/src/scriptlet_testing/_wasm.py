@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """The WASI backend (a spike): ``runner serve`` built for wasip1, run in-process by wasmtime.
 
 wasmtime-py can send the guest's stdout to a callback but can only read

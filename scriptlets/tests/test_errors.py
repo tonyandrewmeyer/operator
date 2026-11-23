@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """Every runner error kind becomes its own exception class."""
 
 from __future__ import annotations
@@ -7,7 +10,6 @@ import pathlib
 import re
 
 import pytest
-
 from scriptlet_testing import (
     KIND_TO_EXCEPTION,
     AllocLimitError,

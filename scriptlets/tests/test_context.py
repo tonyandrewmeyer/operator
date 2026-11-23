@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """The raw layer against the runner's fixture charms."""
 
 from __future__ import annotations
@@ -12,7 +15,6 @@ import zipfile
 from typing import Any
 
 import pytest
-
 from scriptlet_testing import (
     Context,
     Intent,

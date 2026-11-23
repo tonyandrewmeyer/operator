@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """Exceptions raised by the raw layer.
 
 Each runner error kind maps to one class, through the single table

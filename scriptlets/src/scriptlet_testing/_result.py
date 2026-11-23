@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """Result types for the raw layer, built from the runner's JSON."""
 
 from __future__ import annotations

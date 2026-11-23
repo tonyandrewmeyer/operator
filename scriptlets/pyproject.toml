@@ -1,10 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
 [project]
-name = "scriptlet-testing"
+name = "ops-testing-scriptlets"
 version = "0.0.1.dev0"
-description = "Unit-test Juju scriptlet (unitless) charms with Juju's own executor (prototype)"
+description = "Unit-test Juju scriptlet (unitless) charms with Juju's own executor code."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+authors = [
+    {name="The Charm Tech team at Canonical Ltd."},
+]
+keywords = ["juju", "test", "starlark"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = []
 
 [project.optional-dependencies]
@@ -14,12 +32,20 @@ wasm = ["wasmtime>=36"]
 [project.entry-points.pytest11]
 scriptlet_testing = "scriptlet_testing.plugin"
 
-[dependency-groups]
-dev = ["pytest>=8.1", "pyright", "ruff", "wasmtime>=36"]
+[project.urls]
+"Repository" = "https://github.com/canonical/operator"
+"Issues" = "https://github.com/canonical/operator/issues"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[dependency-groups]
+lint = [
+    "ruff==0.17.2",
+    "codespell==2.4.2",
+    "pyright~=1.1",
+]
+unit = [
+    "pytest~=9.0",
+    "wasmtime>=36",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scriptlet_testing"]
@@ -28,25 +54,15 @@ packages = ["src/scriptlet_testing"]
 testpaths = ["tests"]
 addopts = ["-p", "pytester"]
 
-[tool.ruff]
-line-length = 99
-target-version = "py310"
-
-[tool.ruff.format]
-quote-style = "single"
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "Q"]
-
-[tool.ruff.lint.flake8-quotes]
-inline-quotes = "single"
-
 [tool.pyright]
-include = ["src", "tests", "benchmarks"]
-pythonVersion = "3.10"
+include = ["src", "tests"]
+exclude = [".tox", ".venv"]
+pythonVersion = "3.10"  # Check that no Python > 3.10 features are used.
+pythonPlatform = "All"
 typeCheckingMode = "strict"
 reportPrivateUsage = false
 
-[tool.ruff.lint.per-file-ignores]
-# The mutation table holds long exact source snippets.
-"benchmarks/mutate.py" = ["E501"]
+[tool.codespell]
+# The copies of Juju's code keep Juju's spelling.
+skip = './.venv,./.tox,./runner/go.sum,*/runner/internal/unitless/*'
+quiet-level = 3

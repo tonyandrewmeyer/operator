@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """The runner process: one ``runner serve`` per context, newline-delimited JSON."""
 
 from __future__ import annotations
@@ -77,7 +80,7 @@ class NativeProcess:
         self._lock = threading.Lock()
         self._next_id = 0
         # A file, not a pipe, so a chatty runner can't fill a pipe nobody reads.
-        self._stderr = tempfile.TemporaryFile()  # noqa: SIM115 (closed in close())
+        self._stderr = tempfile.TemporaryFile()  # ruff: ignore[open-file-with-context-handler] (closed in close())
         try:
             self._proc = subprocess.Popen(
                 [str(runner), 'serve'],

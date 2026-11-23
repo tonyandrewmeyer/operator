@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """The raw layer: run one event through the runner and return what it did."""
 
 from __future__ import annotations
@@ -158,9 +161,12 @@ class Context:
                 raise InvalidInputError(
                     f'event attributes are not JSON: {e}', kind='invalid_input', phase='input'
                 ) from e
-        resp = self._backend.request(
-            {'op': 'run', 'charm': str(self.charm_path), 'event': event, 'options': options}
-        )
+        resp = self._backend.request({
+            'op': 'run',
+            'charm': str(self.charm_path),
+            'event': event,
+            'options': options,
+        })
         self._check_protocol(resp)
         return resp
 
@@ -168,13 +174,11 @@ class Context:
         # The runner's load op: read the charm, load the sources and run
         # every init(), with no event. The runner caches the loaded script
         # set, so the first run_raw() with the same options reuses it.
-        resp = self._backend.request(
-            {
-                'op': 'load',
-                'charm': str(self.charm_path),
-                'options': self._options(None, None, None),
-            }
-        )
+        resp = self._backend.request({
+            'op': 'load',
+            'charm': str(self.charm_path),
+            'options': self._options(None, None, None),
+        })
         self._check_protocol(resp)
         err = cast('dict[str, Any] | None', resp.get('error'))
         if err is not None:
@@ -203,7 +207,7 @@ class Context:
         """
         resp = self._run(event_name, attrs, self._options(measure, max_steps, max_allocs))
         result = RawResult._from_json(resp)
-        for observer in list(_run_observers):
+        for observer in _run_observers:
             observer(self, result)
         err = resp.get('error')
         if err is not None:

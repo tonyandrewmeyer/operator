@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """Unit-test Juju scriptlet (unitless) charms with Juju's own executor code.
 
 The raw layer runs an event by name with a dict of attributes,

@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """The pytest plugin, run through pytester."""
 
 from __future__ import annotations
@@ -108,14 +111,12 @@ def test_fixture_closes_runner(pytester: pytest.Pytester):
 def test_header_has_versions(pytester: pytest.Pytester):
     pytester.makepyfile('def test_it(): pass')
     result = pytester.runpytest()
-    result.stdout.fnmatch_lines(
-        [
-            'scriptlet runner: *runner',
-            'scriptlet runner versions: juju 4.2-beta1 (145ae4877aba, untagged), '
-            'starform v0.0.0-*, '
-            'starlark v0.0.0-*, go1.*, protocol 1',
-        ]
-    )
+    result.stdout.fnmatch_lines([
+        'scriptlet runner: *runner',
+        'scriptlet runner versions: juju 4.2-beta1 (145ae4877aba, untagged), '
+        'starform v0.0.0-*, '
+        'starlark v0.0.0-*, go1.*, protocol 1',
+    ])
 
 
 def test_header_without_runner(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch):
@@ -152,12 +153,10 @@ def test_it(scriptlet_ctx):
     )
     result = pytester.runpytest()
     result.assert_outcomes(passed=1)
-    result.stdout.fnmatch_lines(
-        [
-            '*scriptlet step budget*',
-            '*test_it: 5,545 of 100,000 steps (5.5%), relation_changed event',
-        ]
-    )
+    result.stdout.fnmatch_lines([
+        '*scriptlet step budget*',
+        '*test_it: 5,545 of 100,000 steps (5.5%), relation_changed event',
+    ])
 
 
 @pytest.mark.parametrize(
@@ -185,9 +184,10 @@ def test_it(scriptlet_ctx):
     result.assert_outcomes(**{outcome: 1})
     result.stdout.fnmatch_lines(['*5,545 of 100,000 steps (5.5%)*'])
     if outcome == 'failed':
-        result.stdout.fnmatch_lines(
-            ['*scriptlet step budget: over 5% of the limit*', '*relation_changed (event): 5,545*']
-        )
+        result.stdout.fnmatch_lines([
+            '*scriptlet step budget: over 5% of the limit*',
+            '*relation_changed (event): 5,545*',
+        ])
 
 
 def test_budget_ignores_expected_failures(pytester: pytest.Pytester):
@@ -207,9 +207,9 @@ def test_budget_ignores_expected_failures(pytester: pytest.Pytester):
     )
     result = pytester.runpytest('--scriptlet-budget-fraction=0.5')
     result.assert_outcomes(passed=1)
-    result.stdout.fnmatch_lines(
-        ['*110,046 of 100,000 steps (110.0%), relation_changed event, failed']
-    )
+    result.stdout.fnmatch_lines([
+        '*110,046 of 100,000 steps (110.0%), relation_changed event, failed'
+    ])
 
 
 def test_budget_covers_contexts_made_in_the_test(pytester: pytest.Pytester):

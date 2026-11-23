@@ -1,3 +1,6 @@
+# Copyright 2026 Canonical Ltd.
+# See LICENSE file for licensing details.
+
 """Build the runner (native and wasip1) once per session unless the environment names one."""
 
 from __future__ import annotations
@@ -9,7 +12,6 @@ import subprocess
 import tempfile
 
 import pytest
-
 from scriptlet_testing._process import RUNNER_ENV, WASM_ENV
 
 HERE = pathlib.Path(__file__).parent

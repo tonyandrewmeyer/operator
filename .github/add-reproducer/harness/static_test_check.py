@@ -39,6 +39,7 @@ import re
 import shlex
 import subprocess
 import typing
+from collections.abc import Callable
 
 from models import StaticCheckResult, embedded_test_file, runs_under_pytest_after
 
@@ -787,11 +788,11 @@ def instance_attributes(cls: type) -> frozenset[str] | None:
     return frozenset(names)
 
 
-def _getter_returns_self_attribute(func: object) -> str | None:
+def _getter_returns_self_attribute(func: Callable[..., object]) -> str | None:
     """`x` when a property's getter is, after its docstring, `return self.x`."""
-    func = inspect.unwrap(func)  # type: ignore[arg-type]
+    func = inspect.unwrap(func)
     try:
-        source = inspect.getsource(func)  # type: ignore[arg-type]
+        source = inspect.getsource(func)
         tree = ast.parse(inspect.cleandoc("\n" + source) if source[:1].isspace() else source)
     except (OSError, TypeError, SyntaxError):
         return None

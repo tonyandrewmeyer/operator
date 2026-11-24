@@ -73,8 +73,9 @@ Installed with the package (entry point `pytest11`). It adds:
   header.
 - `scriptlet_budget_fraction` (ini) or `--scriptlet-budget-fraction`: off by
   default. When set, `scriptlet_ctx` measures, every measured run is listed
-  in a "scriptlet step budget" summary, and a test fails if a run that
-  succeeded used more than that fraction of the step limit (load or event).
+  in a "scriptlet budget" summary, and a test fails if a run that succeeded
+  used more than that fraction of the step or allocation limit (load or
+  event).
   `scriptlet_measure = true` measures and reports without failing anything.
 
 ## Licence

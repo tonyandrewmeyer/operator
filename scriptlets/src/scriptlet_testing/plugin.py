@@ -1,7 +1,7 @@
 # Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 
-"""pytest plugin: a ``scriptlet_ctx`` fixture, versions in the header, and a step-budget check."""
+"""pytest plugin: a ``scriptlet_ctx`` fixture, versions in the header, and a budget check."""
 
 from __future__ import annotations
 
@@ -23,9 +23,10 @@ from .errors import RunnerError
 
 @dataclasses.dataclass(frozen=True)
 class _Record:
-    """One measured run: which phase came closest to its step limit."""
+    """One limit of one measured run, in the phase that came closest to it."""
 
     event: str
+    unit: str  # 'steps' or 'bytes'
     phase: str  # 'event' or 'load'
     used: int | None
     limit: int
@@ -35,20 +36,55 @@ class _Record:
     def fraction(self) -> float | None:
         return None if self.used is None else self.used / self.limit
 
+    @property
+    def rank(self) -> float:
+        # A phase that hit the cap (used is None) ranks above everything.
+        return float('inf') if self.fraction is None else self.fraction
 
-def _record(result: RawResult) -> _Record | None:
-    candidates: list[_Record] = []
-    if result.step_budget is not None and result.step_budget.measured:
-        b = result.step_budget
-        candidates.append(_Record(result.event, 'event', b.used, b.limit, result.ok))
-    if result.load is not None and result.load.step_budget is not None:
-        b = result.load.step_budget
-        if b.measured:
-            candidates.append(_Record(result.event, 'load', b.used, b.limit, result.ok))
-    if not candidates:
-        return None
-    # A phase that hit the cap (used is None) ranks above everything.
-    return max(candidates, key=lambda r: float('inf') if r.fraction is None else r.fraction)
+    @property
+    def usage(self) -> str:
+        if self.used is None:
+            return f'over {self.limit:,} {self.unit} (search cap hit)'
+        return f'{self.used:,} of {self.limit:,} {self.unit} ({self.used / self.limit:.1%})'
+
+    @property
+    def source(self) -> str:
+        return f'{self.event} {self.phase}' + ('' if self.ok else ', failed')
+
+
+def _record(result: RawResult) -> list[_Record]:
+    """The steps and allocations of a measured run, or nothing if it wasn't measured."""
+    load = result.load
+    phases = {
+        'steps': {
+            'event': result.step_budget,
+            'load': load.step_budget if load else None,
+        },
+        'bytes': {
+            'event': result.alloc_budget,
+            'load': load.alloc_budget if load else None,
+        },
+    }
+    records: list[_Record] = []
+    for unit, budgets in phases.items():
+        candidates = [
+            _Record(result.event, unit, phase, b.used, b.limit, result.ok)
+            for phase, b in budgets.items()
+            if b is not None and b.measured
+        ]
+        if candidates:
+            records.append(_worst(candidates))
+    return records
+
+
+def _worst(records: list[_Record]) -> _Record:
+    return max(records, key=lambda r: r.rank)
+
+
+def _worst_by_unit(records: list[_Record]) -> list[_Record]:
+    """The worst record for steps, then for bytes."""
+    by_unit = {unit: [r for r in records if r.unit == unit] for unit in ('steps', 'bytes')}
+    return [_worst(rs) for rs in by_unit.values() if rs]
 
 
 @dataclasses.dataclass
@@ -76,7 +112,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     parser.addini(
         'scriptlet_budget_fraction',
-        'fail a test whose scriptlet run used more than this fraction of the step limit',
+        'fail a test whose scriptlet run used more than this fraction of the step or '
+        'allocation limit',
         default='',
     )
     group = parser.getgroup('scriptlet', 'scriptlet charm testing')
@@ -85,8 +122,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type=float,
         default=None,
         metavar='F',
-        help='fail a test whose scriptlet run used more than F (0 < F <= 1) of the step limit; '
-        'turns measuring on for scriptlet_ctx',
+        help='fail a test whose scriptlet run used more than F (0 < F <= 1) of the step or '
+        'allocation limit; turns measuring on for scriptlet_ctx',
     )
 
 
@@ -169,14 +206,12 @@ def scriptlet_ctx(request: pytest.FixtureRequest) -> Iterator[Context]:
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
-    """Record the steps each run used, and fail the test if one is over the budget fraction."""
+    """Record what each run used, and fail the test if one is over the budget fraction."""
     state = item.config.stash[_STATE]
     records: list[_Record] = []
 
     def observe(_ctx: Context, result: RawResult) -> None:
-        record = _record(result)
-        if record is not None:
-            records.append(record)
+        records.extend(_record(result))
 
     _context._run_observers.append(observe)
     try:
@@ -185,44 +220,36 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
         _context._run_observers.remove(observe)
         if records:
             state.records[item.nodeid] = records
-            worst = _record_worst(records)
-            item.user_properties.append(('scriptlet_max_step_fraction', worst.fraction))
+            for worst in _worst_by_unit(records):
+                name = 'step' if worst.unit == 'steps' else 'alloc'
+                item.user_properties.append((f'scriptlet_max_{name}_fraction', worst.fraction))
     if state.fraction is not None:
         over = [
             r for r in records if r.ok and r.fraction is not None and r.fraction > state.fraction
         ]
         if over:
-            lines = [
-                f'{r.event} ({r.phase}): {r.used:,} of {r.limit:,} steps ({r.fraction:.1%})'
-                for r in over
-                if r.used is not None and r.fraction is not None
-            ]
+            lines = [f'{r.event} ({r.phase}): {r.usage}' for r in over]
             pytest.fail(
-                f'scriptlet step budget: over {state.fraction:.0%} of the limit\n  '
+                f'scriptlet budget: over {state.fraction:.0%} of the limit\n  '
                 + '\n  '.join(lines),
                 pytrace=False,
             )
     return outcome
 
 
-def _record_worst(records: list[_Record]) -> _Record:
-    return max(records, key=lambda r: float('inf') if r.fraction is None else r.fraction)
-
-
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
-    """List every measured run in a step budget summary."""
+    """List every measured run in a budget summary."""
     state = terminalreporter.config.stash.get(_STATE, None)
     if state is None or not state.records:
         return
-    terminalreporter.section('scriptlet step budget')
+    terminalreporter.section('scriptlet budget')
     rows = sorted(
-        ((nodeid, _record_worst(rs)) for nodeid, rs in state.records.items()),
-        key=lambda row: -(float('inf') if row[1].fraction is None else row[1].fraction),
+        ((nodeid, _worst_by_unit(rs)) for nodeid, rs in state.records.items()),
+        key=lambda row: -_worst(row[1]).rank,
     )
-    for nodeid, r in rows:
-        if r.used is None:
-            usage = f'over {r.limit:,} steps (search cap hit)'
+    for nodeid, worst in rows:
+        if len({r.source for r in worst}) == 1:
+            text = ', '.join([*(r.usage for r in worst), worst[0].source])
         else:
-            usage = f'{r.used:,} of {r.limit:,} steps ({r.used / r.limit:.1%})'
-        note = '' if r.ok else ', failed'
-        terminalreporter.write_line(f'{nodeid}: {usage}, {r.event} {r.phase}{note}')
+            text = '; '.join(f'{r.usage}, {r.source}' for r in worst)
+        terminalreporter.write_line(f'{nodeid}: {text}')

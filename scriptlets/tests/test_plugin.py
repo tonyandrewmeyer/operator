@@ -38,7 +38,7 @@ def test_fixture_from_ini(pytester: pytest.Pytester):
     result = pytester.runpytest()
     result.assert_outcomes(passed=1)
     # Not measuring, so no budget report.
-    result.stdout.no_fnmatch_line('*scriptlet step budget*')
+    result.stdout.no_fnmatch_line('*scriptlet budget*')
 
 
 def test_ini_path_is_relative_to_ini_file(pytester: pytest.Pytester):
@@ -140,7 +140,7 @@ def test_it(scriptlet_ctx):
     )
     result = pytester.runpytest()
     result.assert_outcomes(passed=1)
-    result.stdout.no_fnmatch_line('*scriptlet step budget*')
+    result.stdout.no_fnmatch_line('*scriptlet budget*')
 
 
 def test_measure_ini_reports(pytester: pytest.Pytester):
@@ -155,8 +155,9 @@ def test_it(scriptlet_ctx):
     result = pytester.runpytest()
     result.assert_outcomes(passed=1)
     result.stdout.fnmatch_lines([
-        '*scriptlet step budget*',
-        '*test_it: 5,545 of 100,000 steps (5.5%), relation_changed event',
+        '*scriptlet budget*',
+        '*test_it: 5,545 of 100,000 steps (5.5%), 46,344 of 10,485,760 bytes (0.4%), '
+        'relation_changed event',
     ])
 
 
@@ -186,7 +187,7 @@ def test_it(scriptlet_ctx):
     result.stdout.fnmatch_lines(['*5,545 of 100,000 steps (5.5%)*'])
     if outcome == 'failed':
         result.stdout.fnmatch_lines([
-            '*scriptlet step budget: over 5% of the limit*',
+            '*scriptlet budget: over 5% of the limit*',
             '*relation_changed (event): 5,545*',
         ])
 
@@ -209,7 +210,8 @@ def test_budget_ignores_expected_failures(pytester: pytest.Pytester):
     result = pytester.runpytest('--scriptlet-budget-fraction=0.5')
     result.assert_outcomes(passed=1)
     result.stdout.fnmatch_lines([
-        '*110,046 of 100,000 steps (110.0%), relation_changed event, failed'
+        '*110,046 of 100,000 steps (110.0%), 867,144 of 10,485,760 bytes (8.3%), '
+        'relation_changed event, failed'
     ])
 
 
@@ -246,6 +248,123 @@ def test_budget_checks_load_phase(pytester: pytest.Pytester):
     result = pytester.runpytest('--scriptlet-budget-fraction=0.2')
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines(['*start_up (load):*of 10,000 steps*'])
+
+
+# Each call allocates about 2,500 bytes and takes 10 steps, so this uses far
+# more of the allocation limit than of the step limit.
+ALLOCATING_HOOK = """
+def h(event):
+    for i in range(3000):
+        juju.set_status("active", "m")
+
+def init():
+    juju.observe("start_up", h)
+"""
+
+
+def _allocating_charm(pytester: pytest.Pytester) -> None:
+    charm = pytester.path / 'charm'
+    (charm / 'scriptlets').mkdir(parents=True)
+    (charm / 'charmcraft.yaml').write_text('assumes: [unitless]\n')
+    (charm / 'scriptlets' / 'hook.star').write_text(ALLOCATING_HOOK)
+    pytester.makeini('[pytest]\nscriptlet_charm = charm\n')
+
+
+@pytest.mark.parametrize('fraction,outcome', [('0.5', 'failed'), ('0.9', 'passed')])
+def test_budget_checks_allocations(pytester: pytest.Pytester, fraction: str, outcome: str):
+    _allocating_charm(pytester)
+    pytester.makepyfile(
+        """
+        def test_it(scriptlet_ctx):
+            out = scriptlet_ctx.run_raw('start_up')
+            assert out.steps < 0.4 * scriptlet_ctx.max_steps
+        """
+    )
+    result = pytester.runpytest(f'--scriptlet-budget-fraction={fraction}')
+    result.assert_outcomes(**{outcome: 1})
+    if outcome == 'failed':
+        result.stdout.fnmatch_lines([
+            '*scriptlet budget: over 50% of the limit*',
+            '*start_up (event): * of 10,485,760 bytes (*%)*',
+        ])
+        # The steps are under the fraction, so they aren't listed as over it.
+        result.stdout.no_fnmatch_line('*start_up (event): * steps*')
+
+
+def test_budget_ignores_expected_alloc_failures(pytester: pytest.Pytester):
+    _allocating_charm(pytester)
+    pytester.makepyfile(
+        """
+        import pytest
+        from scriptlet_testing import AllocLimitError
+
+        def test_too_big(scriptlet_ctx):
+            with pytest.raises(AllocLimitError):
+                scriptlet_ctx.run_raw('start_up', max_allocs=1_000_000)
+        """
+    )
+    result = pytester.runpytest('--scriptlet-budget-fraction=0.5')
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(['*of 1,000,000 bytes*start_up event, failed'])
+
+
+def test_budget_checks_load_allocations(pytester: pytest.Pytester):
+    charm = pytester.path / 'charm'
+    (charm / 'scriptlets').mkdir(parents=True)
+    (charm / 'charmcraft.yaml').write_text('assumes: [unitless]\n')
+    (charm / 'scriptlets' / 'hook.star').write_text(
+        'def h(event):\n    pass\n\n'
+        'def init():\n    x = [[i, i] for i in range(400)]\n    juju.observe("start_up", h)\n'
+    )
+    pytester.makeini('[pytest]\nscriptlet_charm = charm\n')
+    pytester.makepyfile(
+        """
+        def test_it(scriptlet_ctx):
+            scriptlet_ctx.run_raw('start_up', max_allocs=100_000)
+        """
+    )
+    result = pytester.runpytest('--scriptlet-budget-fraction=0.1')
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(['*start_up (load):*of 100,000 bytes*'])
+
+
+def test_user_properties_are_in_junit_xml(pytester: pytest.Pytester):
+    pytester.makeini(f'[pytest]\nscriptlet_charm = {STEP_LIMIT}\nscriptlet_measure = true\n')
+    pytester.makepyfile(
+        RELATION_100
+        + """
+def test_it(scriptlet_ctx):
+    scriptlet_ctx.run_raw(*relation_changed_100())
+"""
+    )
+    pytester.runpytest('--junitxml=junit.xml', '-o', 'junit_family=xunit1')
+    xml = (pytester.path / 'junit.xml').read_text()
+    assert f'name="scriptlet_max_step_fraction" value="{5545 / 100_000}"' in xml
+    assert f'name="scriptlet_max_alloc_fraction" value="{46344 / 10_485_760}"' in xml
+
+
+def test_summary_when_steps_and_allocations_peak_in_different_phases(
+    pytester: pytest.Pytester,
+):
+    charm = pytester.path / 'charm'
+    (charm / 'scriptlets').mkdir(parents=True)
+    (charm / 'charmcraft.yaml').write_text('assumes: [unitless]\n')
+    # The event takes more steps than the load, but allocates less.
+    (charm / 'scriptlets' / 'hook.star').write_text(
+        'def h(event):\n    n = 0\n    for i in range(2000):\n        n = n + 0\n\n'
+        'def init():\n    x = [[i, i] for i in range(400)]\n'
+        '    juju.observe("start_up", h)\n'
+    )
+    pytester.makeini('[pytest]\nscriptlet_charm = charm\nscriptlet_measure = true\n')
+    pytester.makepyfile(
+        """
+        def test_it(scriptlet_ctx):
+            scriptlet_ctx.run_raw('start_up')
+        """
+    )
+    result = pytester.runpytest()
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(['*steps (*), start_up event; * bytes (*), start_up load'])
 
 
 def test_observer_removed_after_each_test(pytester: pytest.Pytester):

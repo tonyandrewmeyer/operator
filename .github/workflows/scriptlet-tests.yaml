@@ -73,8 +73,33 @@ jobs:
       # The tests build the runner (native and wasip1) from the checkout.
       - run: cd scriptlets && tox -e py${{ matrix.python-version }}-unit
 
+  build-wheels:
+    name: Build the wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: scriptlets/runner/go.mod
+          cache-dependency-path: scriptlets/runner/go.sum
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+
+      # The same script that the Publish workflow runs, so the wheels tested
+      # below are built as the published ones are.
+      - name: Build the sdist and wheels
+        run: scriptlets/scripts/build-wheels.sh dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: scriptlet-wheels
+          path: dist/
+          retention-days: 7
+
   wheel:
     name: Wheel (${{ matrix.platform }})
+    needs: build-wheels
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -93,29 +118,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
-        with:
-          go-version-file: scriptlets/runner/go.mod
-          cache-dependency-path: scriptlets/runner/go.sum
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: scriptlet-wheels
+          path: dist
 
-      # Builds the sdist, then the wheel from the sdist, so this checks both.
-      - name: Build the sdist and wheel
-        run: uv build --package ops-testing-scriptlets --out-dir dist
-
-      - name: Check the wheel's platform tag
+      - name: Install the platform's wheel in a fresh environment
         env:
           TAG: ${{ matrix.tag }}
         run: |
           set -xueo pipefail
-          ls dist
-          test -f "dist/ops_testing_scriptlets-$(uv version --package ops-testing-scriptlets --short)-py3-none-$TAG.whl"
-
-      - name: Install the wheel in a fresh environment
-        run: |
-          set -xueo pipefail
+          wheel="dist/ops_testing_scriptlets-$(uv version --package ops-testing-scriptlets --short)-py3-none-$TAG.whl"
+          test -f "$wheel"
           uv venv --python 3.12 .wheel-venv
-          uv pip install --python .wheel-venv dist/*.whl 'pytest~=9.0'
+          uv pip install --python .wheel-venv "$wheel" 'pytest~=9.0'
 
       # SCRIPTLET_TESTING_BUNDLED makes the tests use the wheel's runner
       # rather than building one from the checkout.
@@ -133,12 +150,6 @@ jobs:
         with:
           name: scriptlet-budgets-${{ matrix.platform }}
           path: budgets-${{ matrix.platform }}.json
-          retention-days: 7
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: scriptlet-wheel-${{ matrix.platform }}
-          path: dist/*.whl
           retention-days: 7
 
   compare-budgets:

@@ -319,7 +319,9 @@ Run the ["Propose a release"](https://github.com/canonical/operator/actions/work
 
 > The version comes from the last tag, and never from `ops/version.py`. Between releases that file holds a development version left behind by the last post-release bump, which is a guess rather than something we shipped. The tag is also where the changelog starts, so the two can't drift apart.
 
-The workflow writes the `CHANGES.md` entry, updates the version strings across `ops`, `ops-scenario`, `ops-tracing` and the tool-versions table, runs `uv lock`, drafts the release title and notes, and opens a draft PR from a `release-prep-X.Y.Z` branch, titled "chore: update changelog and versions for X.Y.Z release". The PR's description lists the next steps, with the PR's number ready for the next workflow.
+The workflow writes the `CHANGES.md` entry, updates the version strings across `ops`, `ops-scenario`, `ops-tracing`, `ops-testing-scriptlets` and the tool-versions table, runs `uv lock`, drafts the release title and notes, and opens a draft PR from a `release-prep-X.Y.Z` branch, titled "chore: update changelog and versions for X.Y.Z release". The PR's description lists the next steps, with the PR's number ready for the next workflow.
+
+> `ops-testing-scriptlets` is released with every Ops release, even when it hasn't changed, but has its own version number. `SCRIPTLETS_BASE` in [`update-release-versions.py`](.github/release/update-release-versions.py) says which of its minor versions goes with which Ops minor version. Change it when the package goes to 1.0, and when Ops changes major version. The workflow stops if the scriptlet runner isn't built from a Juju release.
 
 The PR is a draft so that you can tidy it up before asking anyone else to look: resolve the **Unsure:** notes the model left, cut anything a reader doesn't need, and fix the changelog entry if it needs it. Then mark it ready for review and ask for one.
 
@@ -349,7 +351,7 @@ This is where somebody reads the notes as a reader will see them, which is a dif
 
 ### 3. Publishing does the rest
 
-Publishing the draft starts the [Publish](https://github.com/canonical/operator/actions/workflows/publish.yaml) workflow, which builds the three packages and uploads them to PyPI ([ops](https://pypi.org/project/ops/), [ops-scenario](https://pypi.org/project/ops-scenario), and [ops-tracing](https://pypi.org/project/ops-tracing/)), attests what it built, and runs the "SBOM and secscan" workflow. It sometimes takes a while for the new releases to show up on PyPI.
+Publishing the draft starts the [Publish](https://github.com/canonical/operator/actions/workflows/publish.yaml) workflow, which builds the four packages and uploads them to PyPI ([ops](https://pypi.org/project/ops/), [ops-scenario](https://pypi.org/project/ops-scenario), [ops-tracing](https://pypi.org/project/ops-tracing/), and [ops-testing-scriptlets](https://pypi.org/project/ops-testing-scriptlets/)), attests what it built, and runs the "SBOM and secscan" workflow. It sometimes takes a while for the new releases to show up on PyPI.
 
 Two things are still yours to do by hand:
 
@@ -383,7 +385,7 @@ Two things live in the repository settings, so no PR can add them.
 
     A release doesn't wait on this. With any of the three missing, "Propose a release" writes a placeholder in place of the notes - a line saying none were drafted, and an instruction to write them before merging - and carries on. Write them yourself in the PR description; everything after that works the same way.
 
-- A trusted publisher on Test PyPI pointing at `publish.yaml`. PyPI matches a trusted publisher against the workflow's *file name*.
+- A trusted publisher on Test PyPI pointing at `publish.yaml`. PyPI matches a trusted publisher against the workflow's *file name*. A new package also needs a pending trusted publisher, on both PyPI and Test PyPI, before its first upload.
 
 ### If something fails partway
 

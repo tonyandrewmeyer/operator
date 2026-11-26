@@ -10,7 +10,7 @@ outside it.
 Prepares the ${version} release from `${branch}`.
 
 * `CHANGES.md` has a new entry for ${version}.
-* The version strings are updated across ops, ops-scenario, ops-tracing and the tool-versions table.
+* The version strings are updated across ops, ops-scenario, ops-tracing, ops-testing-scriptlets and the tool-versions table.
 * [Commits since ${previous}](${repo_url}/compare/${previous}...${branch})
 
 The GitHub release is titled `${version}: ` followed by the summary under "Release title", and its body is the notes under "Release notes". Edit both here: this description is where they are read from. Each is wrapped in hidden markers, which you will see when you edit; keep them.

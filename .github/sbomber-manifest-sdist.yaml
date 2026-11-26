@@ -32,3 +32,11 @@ artifacts:
         name: 'ops-tracing'
         version: ''
         channel: 'stable'
+
+  - name: 'ops-testing-scriptlets'
+    type: 'sdist'
+    compression: 'gz'
+    ssdlc_params:
+        name: 'ops-testing-scriptlets'
+        version: ''
+        channel: 'stable'

@@ -37,6 +37,11 @@ jobs:
             run: |
               sudo snap install canonical-secscan-client
               sudo snap connect canonical-secscan-client:home system:home
+          - name: Install Go
+            # Downloading the ops-testing-scriptlets sdist builds its metadata,
+            # which compiles the runner.
+            if: ${{ matrix.manifest == 'sdist' }}
+            run: sudo snap install go --classic
           - name: Prepare the artifacts
             run: |
               cd scanner

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import shutil
 import types
 
 import pytest
@@ -61,6 +62,10 @@ TREE = {
         '[project]\nname = "ops-tracing"\nversion = "3.8.2"\ndependencies = [\n'
         '    "ops==3.8.2",\n]\n'
     ),
+    'scriptlets/pyproject.toml': (
+        '[project]\nname = "ops-testing-scriptlets"\nversion = "0.1.2"\ndependencies = []\n'
+    ),
+    'scriptlets/runner/main.go': 'package main\n\nconst JujuTag = "v4.2.0"\n',
     'docs/explanation/versions.md': (
         '| Version | Status | Released | EOL |\n'
         '| Ops 2.23 (LTS) | Active | 2023-01-25 | 2038-01-25 |\n'
@@ -77,14 +82,18 @@ def tree(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Pat
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     monkeypatch.chdir(tmp_path)
+    # The real pair starts at a later ops than the one in this tree.
+    monkeypatch.setattr(update, 'SCRIPTLETS_BASE', ((3, 8), (0, 1)))
     return tmp_path
 
 
 @pytest.fixture
 def lts_tree(tree: pathlib.Path) -> pathlib.Path:
     """The same tree, at the versions a 2.23 LTS release left behind."""
+    # The branch is from before ops-testing-scriptlets existed.
+    shutil.rmtree(tree / 'scriptlets')
     for name in TREE:
-        if name.endswith('.md'):
+        if name.endswith('.md') or name.startswith('scriptlets/'):
             continue
         path = tree / name
         path.write_text(path.read_text().replace('3.8.2', '2.23.5').replace('8.8.2', '7.23.5'))
@@ -95,7 +104,7 @@ class TestPostRelease:
     """update-release-versions.py in its post-release shape."""
 
     def test_it_writes_every_version_file_and_leaves_the_doc(self, tree: pathlib.Path):
-        """The five files it rewrites, and the one it does not."""
+        """The six files it rewrites, and the one it does not."""
         assert update.main(['--version', '3.9.0.dev0', '--post-release']) == 0
 
         assert "version: str = '3.9.0.dev0'" in (tree / 'ops/version.py').read_text()
@@ -114,6 +123,9 @@ class TestPostRelease:
         assert 'version = "3.9.0.dev0"' in tracing
         assert 'ops==3.9.0.dev0' in tracing
 
+        scriptlets = (tree / 'scriptlets/pyproject.toml').read_text()
+        assert 'version = "0.2.0.dev0"' in scriptlets
+
         # The one difference from a release: the tool-versions table records
         # releases, and a bump back to a development version is not one.
         assert (tree / 'docs/explanation/versions.md').read_text() == (
@@ -121,12 +133,13 @@ class TestPostRelease:
         )
 
     def test_the_maintenance_shape(self, lts_tree: pathlib.Path):
-        """The LTS branch's patch bump, over the same five files."""
+        """The LTS branch's patch bump, which has no scriptlets package."""
         assert update.main(['--version', '2.23.6.dev0', '--post-release']) == 0
         assert "version: str = '2.23.6.dev0'" in (lts_tree / 'ops/version.py').read_text()
         scenario = (lts_tree / 'testing/src/scenario/_version.py').read_text()
         assert "version: str = '7.23.6.dev0'" in scenario
         assert 'ops==2.23.6.dev0' in (lts_tree / 'testing/pyproject.toml').read_text()
+        assert not (lts_tree / 'scriptlets').exists()
         assert (lts_tree / 'docs/explanation/versions.md').read_text() == (
             TREE['docs/explanation/versions.md']
         )
@@ -159,13 +172,14 @@ class TestPostRelease:
             for path, content in before.items()
             if path.read_text() != content
         }
-        # uv.lock is the sixth, and the workflow writes it in its own step.
+        # uv.lock is the seventh, and the workflow writes it in its own step.
         assert changed == {
             'ops/version.py',
             'testing/src/scenario/_version.py',
             'pyproject.toml',
             'testing/pyproject.toml',
             'tracing/pyproject.toml',
+            'scriptlets/pyproject.toml',
         }
 
 
@@ -221,3 +235,64 @@ class TestRelease:
         assert update.main(['--version', '3.9.0', '--date', '2028-02-29']) == 0
         doc = (tree / 'docs/explanation/versions.md').read_text()
         assert '| Ops 3.9 | Active | 2028-02-29 | 2029-03-01 |' in doc
+
+
+class TestScriptlets:
+    """The ops-testing-scriptlets version, and what stops its release."""
+
+    @pytest.mark.parametrize(
+        'ops_version,expected',
+        [
+            ('3.8.0', '0.1.0'),
+            ('3.8.2', '0.1.2'),
+            ('3.9.0', '0.2.0'),
+            ('3.21.1', '0.14.1'),
+            ('3.9.0rc1', '0.2.0rc1'),
+            ('3.9.0.dev0', '0.2.0.dev0'),
+        ],
+    )
+    def test_the_version_follows_ops(self, tree: pathlib.Path, ops_version: str, expected: str):
+        """A minor for each ops minor, with the patch and suffix carried across."""
+        assert update.scriptlets_version(ops_version) == expected
+
+    def test_a_base_of_1_0(self, monkeypatch: pytest.MonkeyPatch):
+        """What changing the pair for 1.0 does."""
+        monkeypatch.setattr(update, 'SCRIPTLETS_BASE', ((3, 20), (1, 0)))
+        assert update.scriptlets_version('3.20.0') == '1.0.0'
+        assert update.scriptlets_version('3.22.3') == '1.2.3'
+
+    @pytest.mark.parametrize('version', ['3.7.9', '4.0.0'])
+    def test_an_ops_version_with_no_scriptlets_version(
+        self, tree: pathlib.Path, capsys: pytest.CaptureFixture[str], version: str
+    ):
+        """Nothing is written, and the message says what to change."""
+        assert update.main(['--version', version]) == 1
+        assert 'update SCRIPTLETS_BASE' in capsys.readouterr().err
+        for name, content in TREE.items():
+            assert (tree / name).read_text() == content
+
+    def test_a_release_needs_a_juju_tag(
+        self, tree: pathlib.Path, capsys: pytest.CaptureFixture[str]
+    ):
+        """A runner that isn't from a Juju release stops the release, before any write."""
+        runner = tree / 'scriptlets/runner/main.go'
+        runner.write_text(runner.read_text().replace('"v4.2.0"', '""'))
+        assert update.main(['--version', '3.9.0']) == 1
+        assert 'not built from a Juju release' in capsys.readouterr().err
+        assert "version: str = '3.8.2'" in (tree / 'ops/version.py').read_text()
+
+    def test_a_post_release_bump_does_not(self, tree: pathlib.Path):
+        """The bump after a release goes ahead whatever the runner is built from."""
+        runner = tree / 'scriptlets/runner/main.go'
+        runner.write_text(runner.read_text().replace('"v4.2.0"', '""'))
+        assert update.main(['--version', '3.9.0.dev0', '--post-release']) == 0
+
+    def test_a_release_updates_the_version(self, tree: pathlib.Path):
+        """With a Juju tag, the version is written."""
+        assert update.main(['--version', '3.9.0', '--date', '2026-09-30']) == 0
+        assert 'version = "0.2.0"' in (tree / 'scriptlets/pyproject.toml').read_text()
+
+    def test_the_juju_tag_is_where_the_script_looks(self):
+        """The real runner still has the line that the script reads."""
+        root = HERE.parent.parent
+        assert update.JUJU_TAG.search((root / update.JUJU_TAG_FILE).read_text())

@@ -12,8 +12,8 @@ not decide the version, run git, or talk to GitHub, and it deliberately does
 not run `uv lock` either, so that the lockfile update is a visible workflow
 step rather than something buried in here.
 
-The ops-to-scenario relationship and the fan-out over the four packages are
-the parts of the release that are specific to this repository, so they stay
+The relationships between the packages' versions, and the fan-out over the
+packages, are the parts of the release that are specific to this repository, so they stay
 here rather than moving to the shared changelog package.
 
 Reads nothing but the files it rewrites:
@@ -49,6 +49,7 @@ VERSION_FILES = {
     'testing/src': pathlib.Path('testing/src/scenario/_version.py'),
     'testing': pathlib.Path('testing/pyproject.toml'),
     'tracing': pathlib.Path('tracing/pyproject.toml'),
+    'scriptlets': pathlib.Path('scriptlets/pyproject.toml'),
     'versions_doc': pathlib.Path('docs/explanation/versions.md'),
 }
 
@@ -56,6 +57,19 @@ VERSION_FILES = {
 # ops 3.1.2 is scenario 8.1.2, and any pre-release or dev suffix is carried
 # across unchanged.
 SCENARIO_MAJOR_OFFSET = 5
+
+# Which ops-testing-scriptlets minor version goes with which ops minor version.
+# It's released with ops, every time, but has its own version: each ops minor
+# release is a scriptlets minor release, and the patch number and any
+# pre-release or dev suffix are carried across. For the pair here, ops 3.12.1
+# is scriptlets 0.2.1. Change the pair when scriptlets goes to 1.0, and when
+# ops changes major version.
+SCRIPTLETS_BASE = ((3, 11), (0, 1))
+
+# Where the runner's Juju release is recorded. It's empty while the runner is
+# built from a Juju commit that isn't in a release.
+JUJU_TAG_FILE = pathlib.Path('scriptlets/runner/main.go')
+JUJU_TAG = re.compile(r'^const JujuTag = "([^"]*)"$', re.MULTILINE)
 
 
 def scenario_version(ops_version: str) -> str:
@@ -65,6 +79,33 @@ def scenario_version(ops_version: str) -> str:
         raise ValueError(f'Not a version this script can take apart: {ops_version!r}')
     major, minor, patch, pre, dev = match.groups()
     return f'{int(major) + SCENARIO_MAJOR_OFFSET}.{minor}.{patch}{pre or ""}{dev or ""}'
+
+
+def scriptlets_version(ops_version: str) -> str:
+    """Return the ops-testing-scriptlets version that goes with an ops version."""
+    match = VERSION.match(ops_version)
+    if not match:
+        raise ValueError(f'Not a version this script can take apart: {ops_version!r}')
+    major, minor, patch, pre, dev = match.groups()
+    (ops_major, ops_minor), (base_major, base_minor) = SCRIPTLETS_BASE
+    if int(major) != ops_major or int(minor) < ops_minor:
+        raise ValueError(
+            f'No ops-testing-scriptlets version goes with ops {ops_version}: '
+            f'update SCRIPTLETS_BASE, which starts at ops {ops_major}.{ops_minor}'
+        )
+    return f'{base_major}.{base_minor + int(minor) - ops_minor}.{patch}{pre or ""}{dev or ""}'
+
+
+def check_juju_tag() -> None:
+    """Refuse a release whose runner isn't built from a Juju release."""
+    match = JUJU_TAG.search(JUJU_TAG_FILE.read_text())
+    if not match:
+        raise ValueError(f'No JujuTag in {JUJU_TAG_FILE}')
+    if not match.group(1):
+        raise ValueError(
+            f'The scriptlet runner is not built from a Juju release: JujuTag is empty in '
+            f'{JUJU_TAG_FILE}'
+        )
 
 
 def update_pyproject(path: pathlib.Path, version: str | None, deps: dict[str, str]) -> None:
@@ -130,6 +171,19 @@ def update_tracing(ops_version: str) -> None:
     update_pyproject(VERSION_FILES['tracing'], ops_version, deps={'ops': ops_version})
 
 
+def update_scriptlets(version: str | None) -> None:
+    """Rewrite scriptlets/pyproject.toml.
+
+    The version is None on a maintenance branch from before the package
+    existed. The package doesn't pin, and isn't pinned by, the others.
+    """
+    path = VERSION_FILES['scriptlets']
+    if version is None:
+        print(f'{path}: not present, skipping')
+        return
+    update_pyproject(path, version, deps={})
+
+
 def update_versions_doc(ops_version: str, released: datetime.date) -> None:
     """Rewrite this major version's row in the tool-versions table.
 
@@ -176,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         '--version',
         required=True,
         metavar='X.Y.Z',
-        help='The ops version being released. The scenario version follows from it.',
+        help='The ops version being released. The other versions follow from it.',
     )
     parser.add_argument(
         '--date',
@@ -195,9 +249,16 @@ def main(argv: list[str] | None = None) -> int:
     released = args.date or datetime.datetime.now(datetime.timezone.utc).date()
     try:
         testing_version = scenario_version(args.version)
+        # Both of these are checked before anything is written.
+        scriptlets = None
+        if VERSION_FILES['scriptlets'].exists():
+            scriptlets = scriptlets_version(args.version)
+            if not args.post_release:
+                check_juju_tag()
         update_ops(args.version, testing_version)
         update_testing(args.version, testing_version)
         update_tracing(args.version)
+        update_scriptlets(scriptlets)
         if args.post_release:
             print(f'{VERSION_FILES["versions_doc"]}: post-release, leaving it alone')
         else:

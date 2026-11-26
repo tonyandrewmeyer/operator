@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ops-testing-scriptlets"
+version = "0.0.1.dev0"
+description = "Unit-test Juju scriptlet (unitless) charms with Juju's own executor code."
+readme = "README.md"
+requires-python = ">=3.10"
+# The Python package is Apache-2.0; the runner binary that the wheels bundle
+# is a separate program under the AGPLv3, because it contains Juju's code.
+license = "Apache-2.0 AND AGPL-3.0-only"
+license-files = ["LICENSE.txt", "runner/LICENSE"]
+authors = [
+    {name="The Charm Tech team at Canonical Ltd."},
+]
+keywords = ["juju", "test", "starlark"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+pytest = ["pytest>=8.1"]
+wasm = ["wasmtime>=36"]
+
+[project.entry-points.pytest11]
+scriptlet_testing = "scriptlet_testing.plugin"
+
+[project.urls]
+"Repository" = "https://github.com/canonical/operator"
+"Issues" = "https://github.com/canonical/operator/issues"
+
+[dependency-groups]
+lint = [
+    "ruff==0.17.2",
+    "codespell==2.4.2",
+    "pyright~=1.1",
+]
+unit = [
+    "pytest~=9.0",
+    "wasmtime>=36",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scriptlet_testing"]
+
+# Compiles the runner into the wheel and sets the platform tag; needs Go.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+# Everything the wheel build needs: the Go source as well as the Python.
+include = [
+    "/src",
+    "/tests",
+    "/runner",
+    "/hatch_build.py",
+    "/tox.ini",
+    "/README.md",
+    "/LICENSE.txt",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-p", "pytester"]
+
+[tool.pyright]
+include = ["src", "tests", "scripts"]
+exclude = [".tox", ".venv"]
+pythonVersion = "3.10"  # Check that no Python > 3.10 features are used.
+pythonPlatform = "All"
+typeCheckingMode = "strict"
+reportPrivateUsage = false
+
+[tool.codespell]
+# The copies of Juju's code keep Juju's spelling.
+skip = './.venv,./.tox,./runner/go.sum,*/runner/internal/unitless/*'
+quiet-level = 3

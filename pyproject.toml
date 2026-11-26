@@ -110,12 +110,13 @@ include = [
 packages = ["ops"]
 
 [tool.uv.workspace]
-members = ["tracing", "testing"]
+members = ["tracing", "testing", "scriptlets"]
 
 [tool.uv.sources]
 ops = { workspace = true }
 ops-scenario = { workspace = true }
 ops-tracing = { workspace = true }
+ops-testing-scriptlets = { workspace = true }
 
 # Testing tools configuration
 [tool.coverage.run]
@@ -230,6 +231,12 @@ exclude = ["tracing/ops_tracing/vendor/*"]
     # All documentation linting.
     "D",
 ]
+"scriptlets/tests/*" = [
+    # All documentation linting.
+    "D",
+    "start-process-with-partial-path",  # S607: Builds the runner with whichever `go` is on the PATH.
+    "try-except-in-loop",  # PERF203: Limit searches try one limit per iteration.
+]
 "testing/src/scenario/_charmcraft_extensions.py" = [
     "line-too-long",  # E501: Auto-generated file; long description strings are unavoidable.
 ]
@@ -286,6 +293,8 @@ builtins-ignorelist = ["id", "min", "map", "range", "type", "TimeoutError", "Con
 include = [".github/release", "ops", "test", "testing"]
 exclude = [
     "tracing/*",
+    # Checked by its own tox environment, which installs wasmtime.
+    "scriptlets/*",
     # Legacy, and not yet clean.
     "ops/lib",
     # A symlink to ops, which is already checked as itself.
@@ -310,5 +319,5 @@ disableBytesTypePromotions = true
 stubPath = ""
 
 [tool.codespell]
-skip = './docs/_build,./docs/_dev,.venv,venv,build,examples,uv.lock'
+skip = './docs/_build,./docs/_dev,.venv,venv,build,examples,uv.lock,*/runner/internal/unitless/*'
 quiet-level = 3

@@ -185,6 +185,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
         ) as charm:
@@ -205,6 +206,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
         ) as charm:
@@ -223,6 +225,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
         ) as charm:
@@ -239,6 +242,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
                 'requires': {
                     'ingress': {'interface': 'custom-ingress', 'limit': 5},
@@ -257,6 +261,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
                 'requires': {
                     'my-custom-relation': {'interface': 'custom'},
@@ -279,6 +284,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
             config={
@@ -302,6 +308,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
             config={
@@ -328,6 +335,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
             actions={
@@ -347,6 +355,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
             actions={
@@ -369,6 +378,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
                 'assumes': ['juju >= 3.1'],
             },
@@ -387,6 +397,7 @@ class TestExtensions:
                 'name': 'my-django',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['django-framework'],
             },
         ) as charm:
@@ -394,6 +405,76 @@ class TestExtensions:
             assert spec.actions is not None
             assert 'create-superuser' in spec.actions
             assert 'rotate-secret-key' in spec.actions
+
+    def test_extension_v2_on_26_04(self, tmp_path: Path):
+        """On 26.04, an extension expands the way charmcraft's V2 does."""
+        with create_tempcharm(
+            tmp_path,
+            meta={
+                'type': 'charm',
+                'name': 'my-django',
+                'summary': 'foo',
+                'description': 'foo',
+                'base': 'ubuntu@26.04',
+                'extensions': ['django-framework'],
+            },
+        ) as charm:
+            spec = _CharmSpec.autoload(charm)
+            assert set(spec.meta['containers']) == {'app'}
+            assert set(spec.meta['peers']) == {'peers'}
+            assert 'app-image' in spec.meta['resources']
+            assert spec.config is not None
+            options = spec.config['options']
+            assert options['app-secret-key']['type'] == 'secret'
+            assert 'django-secret-key' not in options
+            assert 'django-secret-key-id' not in options
+            assert spec.actions is not None
+            assert 'create-superuser' in spec.actions
+
+    def test_extension_without_base_uses_newest(self, tmp_path: Path):
+        """With no base to go on, use the newest variant, as charmcraft does."""
+        with create_tempcharm(
+            tmp_path,
+            meta={
+                'type': 'charm',
+                'name': 'my-flask',
+                'summary': 'foo',
+                'description': 'foo',
+                'extensions': ['flask-framework'],
+            },
+        ) as charm:
+            spec = _CharmSpec.autoload(charm)
+            assert set(spec.meta['containers']) == {'app'}
+
+    @pytest.mark.parametrize(
+        'bases',
+        [
+            {'base': 'ubuntu@22.04'},
+            {'base': 'ubuntu@24.04', 'platforms': {'amd64': None}},
+            {'platforms': {'ubuntu@24.04:amd64': None}},
+            {'platforms': {'mine': {'build-on': ['amd64'], 'build-for': ['ubuntu@22.04:amd64']}}},
+            {'bases': [{'name': 'ubuntu', 'channel': '22.04'}]},
+            {'bases': [{'build-on': [{'name': 'ubuntu', 'channel': '22.04'}], 'run-on': []}]},
+            # Charmcraft uses V1 if any of the bases is one that V1 supports.
+            {'platforms': {'ubuntu@24.04:amd64': None, 'ubuntu@26.04:amd64': None}},
+        ],
+    )
+    def test_extension_v1_bases(self, tmp_path: Path, bases: dict[str, Any]):
+        """Each way of declaring a V1 base gets the V1 expansion."""
+        with create_tempcharm(
+            tmp_path,
+            meta={
+                'type': 'charm',
+                'name': 'my-flask',
+                'summary': 'foo',
+                'description': 'foo',
+                'extensions': ['flask-framework'],
+                **bases,
+            },
+        ) as charm:
+            spec = _CharmSpec.autoload(charm)
+            assert set(spec.meta['containers']) == {'flask-app'}
+            assert 'secret-storage' in spec.meta['peers']
 
     def test_unknown_extension_warns(self, tmp_path: Path):
         """An unknown extension name emits a warning and is skipped."""
@@ -421,6 +502,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
         ) as charm:
@@ -436,6 +518,7 @@ class TestExtensions:
                 'name': 'my-flask',
                 'summary': 'foo',
                 'description': 'foo',
+                'base': 'ubuntu@24.04',
                 'extensions': ['flask-framework'],
             },
         ) as charm:

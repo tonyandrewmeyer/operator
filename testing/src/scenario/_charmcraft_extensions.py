@@ -20,408 +20,666 @@ class _ExtensionMetadata(TypedDict, total=False):
     resources: dict[str, Any]
 
 
-# Metadata added by each charmcraft extension.
-METADATA: dict[str, _ExtensionMetadata] = {
+# The bases each charmcraft extension supports, oldest first, mapped to the
+# variant (keyed by its oldest base) that charmcraft expands for that base.
+BASES: dict[str, dict[str, str]] = {
     'django-framework': {
-        'assumes': ['k8s-api'],
-        'containers': {'django-app': {'resource': 'django-app-image'}},
-        'peers': {'secret-storage': {'interface': 'secret-storage'}},
-        'provides': {
-            'grafana-dashboard': {'interface': 'grafana_dashboard'},
-            'metrics-endpoint': {'interface': 'prometheus_scrape'},
+        'ubuntu@22.04': 'ubuntu@22.04',
+        'ubuntu@24.04': 'ubuntu@22.04',
+        'ubuntu@26.04': 'ubuntu@26.04',
+    },
+    'expressjs-framework': {'ubuntu@24.04': 'ubuntu@24.04', 'ubuntu@26.04': 'ubuntu@26.04'},
+    'fastapi-framework': {'ubuntu@24.04': 'ubuntu@24.04', 'ubuntu@26.04': 'ubuntu@26.04'},
+    'flask-framework': {
+        'ubuntu@22.04': 'ubuntu@22.04',
+        'ubuntu@24.04': 'ubuntu@22.04',
+        'ubuntu@26.04': 'ubuntu@26.04',
+    },
+    'go-framework': {'ubuntu@24.04': 'ubuntu@24.04', 'ubuntu@26.04': 'ubuntu@26.04'},
+    'spring-boot-framework': {'ubuntu@24.04': 'ubuntu@24.04', 'ubuntu@26.04': 'ubuntu@26.04'},
+}
+
+# Metadata added by each variant of each charmcraft extension.
+METADATA: dict[str, dict[str, _ExtensionMetadata]] = {
+    'django-framework': {
+        'ubuntu@22.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'django-app': {'resource': 'django-app-image'}},
+            'peers': {'secret-storage': {'interface': 'secret-storage'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'django-app-image': {
+                    'description': 'django application image.',
+                    'type': 'oci-image',
+                }
+            },
         },
-        'requires': {
-            'ingress': {'interface': 'ingress', 'limit': 1},
-            'logging': {'interface': 'loki_push_api'},
-        },
-        'resources': {
-            'django-app-image': {'description': 'django application image.', 'type': 'oci-image'}
+        'ubuntu@26.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'peers': {'interface': 'peers'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'django application image.', 'type': 'oci-image'}
+            },
         },
     },
     'expressjs-framework': {
-        'assumes': ['k8s-api'],
-        'containers': {'app': {'resource': 'app-image'}},
-        'peers': {'secret-storage': {'interface': 'secret-storage'}},
-        'provides': {
-            'grafana-dashboard': {'interface': 'grafana_dashboard'},
-            'metrics-endpoint': {'interface': 'prometheus_scrape'},
+        'ubuntu@24.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'secret-storage': {'interface': 'secret-storage'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'expressjs application image.', 'type': 'oci-image'}
+            },
         },
-        'requires': {
-            'ingress': {'interface': 'ingress', 'limit': 1},
-            'logging': {'interface': 'loki_push_api'},
-        },
-        'resources': {
-            'app-image': {'description': 'expressjs application image.', 'type': 'oci-image'}
+        'ubuntu@26.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'peers': {'interface': 'peers'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'expressjs application image.', 'type': 'oci-image'}
+            },
         },
     },
     'fastapi-framework': {
-        'assumes': ['k8s-api'],
-        'containers': {'app': {'resource': 'app-image'}},
-        'peers': {'secret-storage': {'interface': 'secret-storage'}},
-        'provides': {
-            'grafana-dashboard': {'interface': 'grafana_dashboard'},
-            'metrics-endpoint': {'interface': 'prometheus_scrape'},
+        'ubuntu@24.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'secret-storage': {'interface': 'secret-storage'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'fastapi application image.', 'type': 'oci-image'}
+            },
         },
-        'requires': {
-            'ingress': {'interface': 'ingress', 'limit': 1},
-            'logging': {'interface': 'loki_push_api'},
-        },
-        'resources': {
-            'app-image': {'description': 'fastapi application image.', 'type': 'oci-image'}
+        'ubuntu@26.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'peers': {'interface': 'peers'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'fastapi application image.', 'type': 'oci-image'}
+            },
         },
     },
     'flask-framework': {
-        'assumes': ['k8s-api'],
-        'containers': {'flask-app': {'resource': 'flask-app-image'}},
-        'peers': {'secret-storage': {'interface': 'secret-storage'}},
-        'provides': {
-            'grafana-dashboard': {'interface': 'grafana_dashboard'},
-            'metrics-endpoint': {'interface': 'prometheus_scrape'},
+        'ubuntu@22.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'flask-app': {'resource': 'flask-app-image'}},
+            'peers': {'secret-storage': {'interface': 'secret-storage'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'flask-app-image': {'description': 'flask application image.', 'type': 'oci-image'}
+            },
         },
-        'requires': {
-            'ingress': {'interface': 'ingress', 'limit': 1},
-            'logging': {'interface': 'loki_push_api'},
-        },
-        'resources': {
-            'flask-app-image': {'description': 'flask application image.', 'type': 'oci-image'}
+        'ubuntu@26.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'peers': {'interface': 'peers'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'flask application image.', 'type': 'oci-image'}
+            },
         },
     },
     'go-framework': {
-        'assumes': ['k8s-api'],
-        'containers': {'app': {'resource': 'app-image'}},
-        'peers': {'secret-storage': {'interface': 'secret-storage'}},
-        'provides': {
-            'grafana-dashboard': {'interface': 'grafana_dashboard'},
-            'metrics-endpoint': {'interface': 'prometheus_scrape'},
+        'ubuntu@24.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'secret-storage': {'interface': 'secret-storage'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'go application image.', 'type': 'oci-image'}
+            },
         },
-        'requires': {
-            'ingress': {'interface': 'ingress', 'limit': 1},
-            'logging': {'interface': 'loki_push_api'},
+        'ubuntu@26.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'peers': {'interface': 'peers'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'go application image.', 'type': 'oci-image'}
+            },
         },
-        'resources': {'app-image': {'description': 'go application image.', 'type': 'oci-image'}},
     },
     'spring-boot-framework': {
-        'assumes': ['k8s-api'],
-        'containers': {'app': {'resource': 'app-image'}},
-        'peers': {'secret-storage': {'interface': 'secret-storage'}},
-        'provides': {
-            'grafana-dashboard': {'interface': 'grafana_dashboard'},
-            'metrics-endpoint': {'interface': 'prometheus_scrape'},
+        'ubuntu@24.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'secret-storage': {'interface': 'secret-storage'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'spring-boot application image.', 'type': 'oci-image'}
+            },
         },
-        'requires': {
-            'ingress': {'interface': 'ingress', 'limit': 1},
-            'logging': {'interface': 'loki_push_api'},
-        },
-        'resources': {
-            'app-image': {'description': 'spring-boot application image.', 'type': 'oci-image'}
+        'ubuntu@26.04': {
+            'assumes': ['k8s-api'],
+            'containers': {'app': {'resource': 'app-image'}},
+            'peers': {'peers': {'interface': 'peers'}},
+            'provides': {
+                'grafana-dashboard': {'interface': 'grafana_dashboard'},
+                'metrics-endpoint': {'interface': 'prometheus_scrape'},
+            },
+            'requires': {
+                'ingress': {'interface': 'ingress', 'limit': 1},
+                'logging': {'interface': 'loki_push_api'},
+            },
+            'resources': {
+                'app-image': {'description': 'spring-boot application image.', 'type': 'oci-image'}
+            },
         },
     },
 }
 
-# Config options added by each charmcraft extension.
-CONFIG: dict[str, dict[str, Any]] = {
+# Config options added by each variant of each charmcraft extension.
+CONFIG: dict[str, dict[str, dict[str, Any]]] = {
     'django-framework': {
-        'django-allowed-hosts': {
-            'description': 'A comma-separated list of host/domain names that this Django site can serve. This '
-            'configuration will set the DJANGO_ALLOWED_HOSTS environment variable with its '
-            'content being a JSON encoded list.',
-            'type': 'string',
+        'ubuntu@22.04': {
+            'django-allowed-hosts': {
+                'description': 'A comma-separated list of host/domain names that this Django site can serve. This configuration will set the DJANGO_ALLOWED_HOSTS environment variable with its content being a JSON encoded list.',
+                'type': 'string',
+            },
+            'django-debug': {
+                'default': False,
+                'description': 'Whether Django debug mode is enabled.',
+                'type': 'boolean',
+            },
+            'django-secret-key': {
+                'description': 'The secret key used for securely signing the session cookie and for any other security related needs by your Django application. This configuration will set the DJANGO_SECRET_KEY environment variable.',
+                'type': 'string',
+            },
+            'django-secret-key-id': {
+                'description': 'This configuration is similar to `django-secret-key`, but instead accepts a Juju user secret ID. The secret should contain a single key, "value", which maps to the actual Django secret key. To create the secret, run the following command: `juju add-secret my-django-secret-key value=<secret-string> && juju grant-secret my-django-secret-key django-k8s`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'webserver-keepalive': {
+                'description': 'Time in seconds for webserver to wait for requests on a Keep-Alive connection.',
+                'type': 'int',
+            },
+            'webserver-threads': {
+                'description': 'Run each webserver worker with the specified number of threads.',
+                'type': 'int',
+            },
+            'webserver-timeout': {
+                'description': 'Time in seconds to kill and restart silent webserver workers.',
+                'type': 'int',
+            },
+            'webserver-worker-class': {
+                'description': "The webserver worker process class for handling requests. Can be either 'gevent' or 'sync'.",
+                'type': 'string',
+            },
+            'webserver-workers': {
+                'description': 'The number of webserver worker processes for handling requests.',
+                'type': 'int',
+            },
         },
-        'django-debug': {
-            'default': False,
-            'description': 'Whether Django debug mode is enabled.',
-            'type': 'boolean',
-        },
-        'django-secret-key': {
-            'description': 'The secret key used for securely signing the session cookie and for any other '
-            'security related needs by your Django application. This configuration will set '
-            'the DJANGO_SECRET_KEY environment variable.',
-            'type': 'string',
-        },
-        'django-secret-key-id': {
-            'description': 'This configuration is similar to `django-secret-key`, but instead accepts a Juju '
-            'user secret ID. The secret should contain a single key, "value", which maps to '
-            'the actual Django secret key. To create the secret, run the following command: '
-            '`juju add-secret my-django-secret-key value=<secret-string> && juju grant-secret '
-            'my-django-secret-key django-k8s`, and use the output secret ID to configure this '
-            'option.',
-            'type': 'secret',
-        },
-        'webserver-keepalive': {
-            'description': 'Time in seconds for webserver to wait for requests on a Keep-Alive connection.',
-            'type': 'int',
-        },
-        'webserver-threads': {
-            'description': 'Run each webserver worker with the specified number of threads.',
-            'type': 'int',
-        },
-        'webserver-timeout': {
-            'description': 'Time in seconds to kill and restart silent webserver workers.',
-            'type': 'int',
-        },
-        'webserver-worker-class': {
-            'description': "The webserver worker process class for handling requests. Can be either 'gevent' "
-            "or 'sync'.",
-            'type': 'string',
-        },
-        'webserver-workers': {
-            'description': 'The number of webserver worker processes for handling requests.',
-            'type': 'int',
+        'ubuntu@26.04': {
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'django-allowed-hosts': {
+                'description': 'A comma-separated list of host/domain names that this Django site can serve. This configuration will set the DJANGO_ALLOWED_HOSTS environment variable with its content being a JSON encoded list.',
+                'type': 'string',
+            },
+            'django-debug': {
+                'default': False,
+                'description': 'Whether Django debug mode is enabled.',
+                'type': 'boolean',
+            },
+            'webserver-keepalive': {
+                'description': 'Time in seconds for webserver to wait for requests on a Keep-Alive connection.',
+                'type': 'int',
+            },
+            'webserver-threads': {
+                'description': 'Run each webserver worker with the specified number of threads.',
+                'type': 'int',
+            },
+            'webserver-timeout': {
+                'description': 'Time in seconds to kill and restart silent webserver workers.',
+                'type': 'int',
+            },
+            'webserver-worker-class': {
+                'description': "The webserver worker process class for handling requests. Can be either 'gevent' or 'sync'.",
+                'type': 'string',
+            },
+            'webserver-workers': {
+                'description': 'The number of webserver worker processes for handling requests.',
+                'type': 'int',
+            },
         },
     },
     'expressjs-framework': {
-        'app-port': {
-            'default': 8080,
-            'description': 'Default port where the application will listen on.',
-            'type': 'int',
+        'ubuntu@24.04': {
+            'app-port': {
+                'default': 8080,
+                'description': 'Default port where the application will listen on.',
+                'type': 'int',
+            },
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units',
+                'type': 'string',
+            },
+            'app-secret-key-id': {
+                'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju user secret ID. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'metrics-path': {
+                'default': '/metrics',
+                'description': 'Path where the prometheus metrics will be scraped.',
+                'type': 'string',
+            },
+            'metrics-port': {
+                'default': 8080,
+                'description': 'Port where the prometheus metrics will be scraped.',
+                'type': 'int',
+            },
         },
-        'app-secret-key': {
-            'description': 'Long secret you can use for sessions, csrf or any other thing where you need a '
-            'random secret shared by all units',
-            'type': 'string',
-        },
-        'app-secret-key-id': {
-            'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju '
-            'user secret ID. The secret should contain a single key, "value", which maps to '
-            'the actual application secret key. To create the secret, run the following '
-            'command: `juju add-secret my-app-secret-key value=<secret-string> && juju '
-            'grant-secret my-app-secret-key my-app`, and use the output secret ID to configure '
-            'this option.',
-            'type': 'secret',
-        },
-        'metrics-path': {
-            'default': '/metrics',
-            'description': 'Path where the prometheus metrics will be scraped.',
-            'type': 'string',
-        },
-        'metrics-port': {
-            'default': 8080,
-            'description': 'Port where the prometheus metrics will be scraped.',
-            'type': 'int',
+        'ubuntu@26.04': {
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            }
         },
     },
     'fastapi-framework': {
-        'app-secret-key': {
-            'description': 'Long secret you can use for sessions, csrf or any other thing where you need a '
-            'random secret shared by all units',
-            'type': 'string',
+        'ubuntu@24.04': {
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units',
+                'type': 'string',
+            },
+            'app-secret-key-id': {
+                'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju user secret ID. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'metrics-path': {
+                'default': '/metrics',
+                'description': 'Path where the prometheus metrics will be scraped.',
+                'type': 'string',
+            },
+            'metrics-port': {
+                'default': 8080,
+                'description': 'Port where the prometheus metrics will be scraped.',
+                'type': 'int',
+            },
+            'webserver-log-level': {
+                'default': 'info',
+                'description': "Set the log level. Options: 'critical', 'error', 'warning', 'info', 'debug', 'trace'. Sets the env variable UVICORN_LOG_LEVEL.",
+                'type': 'string',
+            },
+            'webserver-port': {
+                'default': 8080,
+                'description': 'Bind to a socket with this port. Default: 8080. Sets env variable  UVICORN_PORT.',
+                'type': 'int',
+            },
+            'webserver-workers': {
+                'default': 1,
+                'description': 'Number of workers for uvicorn. Sets env variable WEB_CONCURRENCY. See https://www.uvicorn.org/#command-line-options.',
+                'type': 'int',
+            },
         },
-        'app-secret-key-id': {
-            'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju '
-            'user secret ID. The secret should contain a single key, "value", which maps to '
-            'the actual application secret key. To create the secret, run the following '
-            'command: `juju add-secret my-app-secret-key value=<secret-string> && juju '
-            'grant-secret my-app-secret-key my-app`, and use the output secret ID to configure '
-            'this option.',
-            'type': 'secret',
-        },
-        'metrics-path': {
-            'default': '/metrics',
-            'description': 'Path where the prometheus metrics will be scraped.',
-            'type': 'string',
-        },
-        'metrics-port': {
-            'default': 8080,
-            'description': 'Port where the prometheus metrics will be scraped.',
-            'type': 'int',
-        },
-        'webserver-log-level': {
-            'default': 'info',
-            'description': "Set the log level. Options: 'critical', 'error', 'warning', 'info', 'debug', "
-            "'trace'. Sets the env variable UVICORN_LOG_LEVEL.",
-            'type': 'string',
-        },
-        'webserver-port': {
-            'default': 8080,
-            'description': 'Bind to a socket with this port. Default: 8000. Sets env variable  UVICORN_PORT.',
-            'type': 'int',
-        },
-        'webserver-workers': {
-            'default': 1,
-            'description': 'Number of workers for uvicorn. Sets env variable WEB_CONCURRENCY. See '
-            'https://www.uvicorn.org/#command-line-options.',
-            'type': 'int',
+        'ubuntu@26.04': {
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'webserver-log-level': {
+                'default': 'info',
+                'description': "Set the log level. Options: 'critical', 'error', 'warning', 'info', 'debug', 'trace'. Sets the env variable UVICORN_LOG_LEVEL.",
+                'type': 'string',
+            },
+            'webserver-workers': {
+                'default': 1,
+                'description': 'Number of workers for uvicorn. Sets env variable WEB_CONCURRENCY. See https://www.uvicorn.org/#command-line-options.',
+                'type': 'int',
+            },
         },
     },
     'flask-framework': {
-        'flask-application-root': {
-            'description': 'Path in which the application / web server is mounted. This configuration will '
-            'set the FLASK_APPLICATION_ROOT environment variable. Run '
-            '`app.config.from_prefixed_env()` in your Flask application in order to receive '
-            'this configuration.',
-            'type': 'string',
+        'ubuntu@22.04': {
+            'flask-application-root': {
+                'description': 'Path in which the application / web server is mounted. This configuration will set the FLASK_APPLICATION_ROOT environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'string',
+            },
+            'flask-debug': {
+                'description': 'Whether Flask debug mode is enabled.',
+                'type': 'boolean',
+            },
+            'flask-env': {
+                'description': "What environment the Flask app is running in, by default it's 'production'.",
+                'type': 'string',
+            },
+            'flask-permanent-session-lifetime': {
+                'description': 'Time in seconds for the cookie to expire in the Flask application permanent sessions. This configuration will set the FLASK_PERMANENT_SESSION_LIFETIME environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'int',
+            },
+            'flask-preferred-url-scheme': {
+                'default': 'HTTPS',
+                'description': 'Scheme for generating external URLs when not in a request context in the Flask application. By default, it\'s "HTTPS". This configuration will set the FLASK_PREFERRED_URL_SCHEME environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'string',
+            },
+            'flask-secret-key': {
+                'description': 'The secret key used for securely signing the session cookie and for any other security related needs by your Flask application. This configuration will set the FLASK_SECRET_KEY environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'string',
+            },
+            'flask-secret-key-id': {
+                'description': 'This configuration is similar to `flask-secret-key`, but instead accepts a Juju user secret ID. The secret should contain a single key, "value", which maps to the actual Flask secret key. To create the secret, run the following command: `juju add-secret my-flask-secret-key value=<secret-string> && juju grant-secret my-flask-secret-key flask-k8s`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'flask-session-cookie-secure': {
+                'description': 'Set the secure attribute in the Flask application cookies. This configuration will set the FLASK_SESSION_COOKIE_SECURE environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'boolean',
+            },
+            'webserver-keepalive': {
+                'description': 'Time in seconds for webserver to wait for requests on a Keep-Alive connection.',
+                'type': 'int',
+            },
+            'webserver-threads': {
+                'description': 'Run each webserver worker with the specified number of threads.',
+                'type': 'int',
+            },
+            'webserver-timeout': {
+                'description': 'Time in seconds to kill and restart silent webserver workers.',
+                'type': 'int',
+            },
+            'webserver-worker-class': {
+                'description': "The webserver worker process class for handling requests. Can be either 'gevent' or 'sync'.",
+                'type': 'string',
+            },
+            'webserver-workers': {
+                'description': 'The number of webserver worker processes for handling requests.',
+                'type': 'int',
+            },
         },
-        'flask-debug': {'description': 'Whether Flask debug mode is enabled.', 'type': 'boolean'},
-        'flask-env': {
-            'description': "What environment the Flask app is running in, by default it's 'production'.",
-            'type': 'string',
-        },
-        'flask-permanent-session-lifetime': {
-            'description': 'Time in seconds for the cookie to expire in the Flask application permanent '
-            'sessions. This configuration will set the FLASK_PERMANENT_SESSION_LIFETIME '
-            'environment variable. Run `app.config.from_prefixed_env()` in your Flask '
-            'application in order to receive this configuration.',
-            'type': 'int',
-        },
-        'flask-preferred-url-scheme': {
-            'default': 'HTTPS',
-            'description': 'Scheme for generating external URLs when not in a request context in the Flask '
-            'application. By default, it\'s "HTTPS". This configuration will set the '
-            'FLASK_PREFERRED_URL_SCHEME environment variable. Run '
-            '`app.config.from_prefixed_env()` in your Flask application in order to receive '
-            'this configuration.',
-            'type': 'string',
-        },
-        'flask-secret-key': {
-            'description': 'The secret key used for securely signing the session cookie and for any other '
-            'security related needs by your Flask application. This configuration will set the '
-            'FLASK_SECRET_KEY environment variable. Run `app.config.from_prefixed_env()` in '
-            'your Flask application in order to receive this configuration.',
-            'type': 'string',
-        },
-        'flask-secret-key-id': {
-            'description': 'This configuration is similar to `flask-secret-key`, but instead accepts a Juju '
-            'user secret ID. The secret should contain a single key, "value", which maps to '
-            'the actual Flask secret key. To create the secret, run the following command: '
-            '`juju add-secret my-flask-secret-key value=<secret-string> && juju grant-secret '
-            'my-flask-secret-key flask-k8s`, and use the output secret ID to configure this '
-            'option.',
-            'type': 'secret',
-        },
-        'flask-session-cookie-secure': {
-            'description': 'Set the secure attribute in the Flask application cookies. This configuration '
-            'will set the FLASK_SESSION_COOKIE_SECURE environment variable. Run '
-            '`app.config.from_prefixed_env()` in your Flask application in order to receive '
-            'this configuration.',
-            'type': 'boolean',
-        },
-        'webserver-keepalive': {
-            'description': 'Time in seconds for webserver to wait for requests on a Keep-Alive connection.',
-            'type': 'int',
-        },
-        'webserver-threads': {
-            'description': 'Run each webserver worker with the specified number of threads.',
-            'type': 'int',
-        },
-        'webserver-timeout': {
-            'description': 'Time in seconds to kill and restart silent webserver workers.',
-            'type': 'int',
-        },
-        'webserver-worker-class': {
-            'description': "The webserver worker process class for handling requests. Can be either 'gevent' "
-            "or 'sync'.",
-            'type': 'string',
-        },
-        'webserver-workers': {
-            'description': 'The number of webserver worker processes for handling requests.',
-            'type': 'int',
+        'ubuntu@26.04': {
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'flask-application-root': {
+                'description': 'Path in which the application / web server is mounted. This configuration will set the FLASK_APPLICATION_ROOT environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'string',
+            },
+            'flask-debug': {
+                'description': 'Whether Flask debug mode is enabled.',
+                'type': 'boolean',
+            },
+            'flask-env': {
+                'description': "What environment the Flask app is running in, by default it's 'production'.",
+                'type': 'string',
+            },
+            'flask-permanent-session-lifetime': {
+                'description': 'Time in seconds for the cookie to expire in the Flask application permanent sessions. This configuration will set the FLASK_PERMANENT_SESSION_LIFETIME environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'int',
+            },
+            'flask-preferred-url-scheme': {
+                'default': 'HTTPS',
+                'description': 'Scheme for generating external URLs when not in a request context in the Flask application. By default, it\'s "HTTPS". This configuration will set the FLASK_PREFERRED_URL_SCHEME environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'string',
+            },
+            'flask-session-cookie-secure': {
+                'description': 'Set the secure attribute in the Flask application cookies. This configuration will set the FLASK_SESSION_COOKIE_SECURE environment variable. Run `app.config.from_prefixed_env()` in your Flask application in order to receive this configuration.',
+                'type': 'boolean',
+            },
+            'webserver-keepalive': {
+                'description': 'Time in seconds for webserver to wait for requests on a Keep-Alive connection.',
+                'type': 'int',
+            },
+            'webserver-threads': {
+                'description': 'Run each webserver worker with the specified number of threads.',
+                'type': 'int',
+            },
+            'webserver-timeout': {
+                'description': 'Time in seconds to kill and restart silent webserver workers.',
+                'type': 'int',
+            },
+            'webserver-worker-class': {
+                'description': "The webserver worker process class for handling requests. Can be either 'gevent' or 'sync'.",
+                'type': 'string',
+            },
+            'webserver-workers': {
+                'description': 'The number of webserver worker processes for handling requests.',
+                'type': 'int',
+            },
         },
     },
     'go-framework': {
-        'app-port': {
-            'default': 8080,
-            'description': 'Default port where the application will listen on.',
-            'type': 'int',
+        'ubuntu@24.04': {
+            'app-port': {
+                'default': 8080,
+                'description': 'Default port where the application will listen on.',
+                'type': 'int',
+            },
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units',
+                'type': 'string',
+            },
+            'app-secret-key-id': {
+                'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju user secret ID. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'metrics-path': {
+                'default': '/metrics',
+                'description': 'Path where the prometheus metrics will be scraped.',
+                'type': 'string',
+            },
+            'metrics-port': {
+                'default': 8080,
+                'description': 'Port where the prometheus metrics will be scraped.',
+                'type': 'int',
+            },
         },
-        'app-secret-key': {
-            'description': 'Long secret you can use for sessions, csrf or any other thing where you need a '
-            'random secret shared by all units',
-            'type': 'string',
-        },
-        'app-secret-key-id': {
-            'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju '
-            'user secret ID. The secret should contain a single key, "value", which maps to '
-            'the actual application secret key. To create the secret, run the following '
-            'command: `juju add-secret my-app-secret-key value=<secret-string> && juju '
-            'grant-secret my-app-secret-key my-app`, and use the output secret ID to configure '
-            'this option.',
-            'type': 'secret',
-        },
-        'metrics-path': {
-            'default': '/metrics',
-            'description': 'Path where the prometheus metrics will be scraped.',
-            'type': 'string',
-        },
-        'metrics-port': {
-            'default': 8080,
-            'description': 'Port where the prometheus metrics will be scraped.',
-            'type': 'int',
+        'ubuntu@26.04': {
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            }
         },
     },
     'spring-boot-framework': {
-        'app-port': {
-            'default': 8080,
-            'description': 'Default port where the application will listen on.',
-            'type': 'int',
+        'ubuntu@24.04': {
+            'app-port': {
+                'default': 8080,
+                'description': 'Default port where the application will listen on.',
+                'type': 'int',
+            },
+            'app-profiles': {
+                'description': 'Comma-separated list of Spring Boot active profiles.',
+                'type': 'string',
+            },
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units',
+                'type': 'string',
+            },
+            'app-secret-key-id': {
+                'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju user secret ID. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
+            'metrics-path': {
+                'default': '/actuator/prometheus',
+                'description': 'Path where the prometheus metrics will be scraped.',
+                'type': 'string',
+            },
+            'metrics-port': {
+                'default': 8080,
+                'description': 'Port where the prometheus metrics will be scraped.',
+                'type': 'int',
+            },
         },
-        'app-secret-key': {
-            'description': 'Long secret you can use for sessions, csrf or any other thing where you need a '
-            'random secret shared by all units',
-            'type': 'string',
-        },
-        'app-secret-key-id': {
-            'description': 'This configuration is similar to `app-secret-key`, but instead accepts a Juju '
-            'user secret ID. The secret should contain a single key, "value", which maps to '
-            'the actual application secret key. To create the secret, run the following '
-            'command: `juju add-secret my-app-secret-key value=<secret-string> && juju '
-            'grant-secret my-app-secret-key my-app`, and use the output secret ID to configure '
-            'this option.',
-            'type': 'secret',
-        },
-        'metrics-path': {
-            'default': '/actuator/prometheus',
-            'description': 'Path where the prometheus metrics will be scraped.',
-            'type': 'string',
-        },
-        'metrics-port': {
-            'default': 8080,
-            'description': 'Port where the prometheus metrics will be scraped.',
-            'type': 'int',
+        'ubuntu@26.04': {
+            'app-profiles': {
+                'description': 'Comma-separated list of Spring Boot active profiles.',
+                'type': 'string',
+            },
+            'app-secret-key': {
+                'description': 'Long secret you can use for sessions, csrf or any other thing where you need a random secret shared by all units. The secret should contain a single key, "value", which maps to the actual application secret key. To create the secret, run the following command: `juju add-secret my-app-secret-key value=<secret-string> && juju grant-secret my-app-secret-key my-app`, and use the output secret ID to configure this option.',
+                'type': 'secret',
+            },
         },
     },
 }
 
-# Actions added by each charmcraft extension.
-ACTIONS: dict[str, dict[str, Any]] = {
+# Actions added by each variant of each charmcraft extension.
+ACTIONS: dict[str, dict[str, dict[str, Any]]] = {
     'django-framework': {
-        'create-superuser': {
-            'description': 'Create a new Django superuser account.',
-            'params': {'email': {'type': 'string'}, 'username': {'type': 'string'}},
-            'required': ['username', 'email'],
+        'ubuntu@22.04': {
+            'create-superuser': {
+                'description': 'Create a new Django superuser account.',
+                'params': {'email': {'type': 'string'}, 'username': {'type': 'string'}},
+                'required': ['username', 'email'],
+            },
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            },
         },
-        'rotate-secret-key': {
-            'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful '
-            'if a security breach occurs.'
+        'ubuntu@26.04': {
+            'create-superuser': {
+                'description': 'Create a new Django superuser account.',
+                'params': {'email': {'type': 'string'}, 'username': {'type': 'string'}},
+                'required': ['username', 'email'],
+            },
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            },
         },
     },
     'expressjs-framework': {
-        'rotate-secret-key': {
-            'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful '
-            'if a security breach occurs.'
+        'ubuntu@24.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
+        },
+        'ubuntu@26.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
         },
     },
     'fastapi-framework': {
-        'rotate-secret-key': {
-            'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful '
-            'if a security breach occurs.'
+        'ubuntu@24.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
+        },
+        'ubuntu@26.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
         },
     },
     'flask-framework': {
-        'rotate-secret-key': {
-            'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful '
-            'if a security breach occurs.'
+        'ubuntu@22.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
+        },
+        'ubuntu@26.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
         },
     },
     'go-framework': {
-        'rotate-secret-key': {
-            'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful '
-            'if a security breach occurs.'
+        'ubuntu@24.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
+        },
+        'ubuntu@26.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
         },
     },
     'spring-boot-framework': {
-        'rotate-secret-key': {
-            'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful '
-            'if a security breach occurs.'
+        'ubuntu@24.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
+        },
+        'ubuntu@26.04': {
+            'rotate-secret-key': {
+                'description': 'Rotate the secret key. Users will be forced to log in again. This might be useful if a security breach occurs.'
+            }
         },
     },
 }

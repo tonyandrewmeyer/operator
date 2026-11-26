@@ -2244,12 +2244,85 @@ def _is_valid_charmcraft_25_metadata(meta: dict[str, Any]):
     return True
 
 
+def _parse_base(value: object) -> str | None:
+    """Return the ``name@channel`` base from a base or platform string, if it has one.
+
+    For example, ``ubuntu@24.04`` and ``ubuntu@24.04:amd64`` both give
+    ``ubuntu@24.04``, and ``amd64`` gives ``None``.
+    """
+    if not isinstance(value, str):
+        return None
+    base = value.partition(':')[0]
+    name, sep, channel = base.partition('@')
+    if not sep or not name or not channel:
+        return None
+    return base
+
+
+def _project_bases(meta: Mapping[str, Any]) -> set[str]:
+    """Return the bases a charmcraft.yaml targets, as ``name@channel`` strings.
+
+    This mirrors ``get_project_bases`` in charmcraft's extension support: it
+    looks at ``base``, the ``platforms`` labels (or their ``build-for`` when the
+    label isn't a base), and the legacy ``bases`` in both its short and long
+    forms.
+    """
+    bases: set[str] = set()
+    if base := _parse_base(meta.get('base')):
+        bases.add(base)
+    platforms: Any = meta.get('platforms') or {}
+    if isinstance(platforms, dict):
+        for label, data in cast('dict[str, Any]', platforms).items():
+            if base := _parse_base(label):
+                bases.add(base)
+            elif isinstance(data, dict):
+                build_for: Any = cast('dict[str, Any]', data).get('build-for')
+                items = cast(
+                    'list[Any]', build_for if isinstance(build_for, list) else [build_for]
+                )
+                bases.update(b for item in items if (b := _parse_base(item)))
+    legacy_bases: Any = meta.get('bases') or []
+    if isinstance(legacy_bases, list):
+        for legacy in cast('list[Any]', legacy_bases):
+            if not isinstance(legacy, dict):
+                continue
+            legacy = cast('dict[str, Any]', legacy)
+            # The long form lists build-on bases; the short form is itself a base.
+            entries: list[Any] = (
+                (legacy.get('build-on') or []) if 'build-on' in legacy else [legacy]
+            )
+            for entry in entries:
+                if isinstance(entry, dict) and 'name' in entry and 'channel' in entry:
+                    bases.add(f'{entry["name"]}@{entry["channel"]}')
+    return bases
+
+
+def _extension_variant(ext_name: str, meta: Mapping[str, Any]) -> str | None:
+    """Return the key of the variant of an extension that charmcraft would use.
+
+    Charmcraft picks how to expand an extension from the charm's bases: for
+    example, a 12-factor extension expands as V1 if any of the charm's bases is
+    one that V1 supports, and as V2 otherwise. The generated data maps each base
+    to its variant, so use the variant for the oldest matching base, and the
+    newest variant if no base matches (including when the charm has no base).
+    """
+    ext_bases = _charmcraft_extensions.BASES.get(ext_name)
+    if not ext_bases:
+        return None
+    project_bases = _project_bases(meta)
+    for base, variant in ext_bases.items():
+        if base in project_bases:
+            return variant
+    return list(ext_bases.values())[-1]
+
+
 def _apply_extensions(meta: dict[str, Any], extensions: list[str]) -> None:
     """Merge charmcraft extension defaults into the charm metadata in place.
 
     Extension defaults are applied first, then the local charmcraft.yaml
     values are merged on top, simulating what ``charmcraft expand-extensions``
-    does.
+    does. As with charmcraft, the charm's bases decide which variant of an
+    extension is used.
 
     Raises:
         ValueError: if the local charmcraft.yaml defines keys that overlap
@@ -2257,9 +2330,14 @@ def _apply_extensions(meta: dict[str, Any], extensions: list[str]) -> None:
             behaviour).
     """
     for ext_name in extensions:
-        ext_meta = _charmcraft_extensions.METADATA.get(ext_name, {})
-        ext_config = _charmcraft_extensions.CONFIG.get(ext_name, {})
-        ext_actions = _charmcraft_extensions.ACTIONS.get(ext_name, {})
+        variant = _extension_variant(ext_name, meta)
+        ext_meta: Mapping[str, Any] = {}
+        ext_config: dict[str, Any] = {}
+        ext_actions: dict[str, Any] = {}
+        if variant is not None:
+            ext_meta = _charmcraft_extensions.METADATA.get(ext_name, {}).get(variant, {})
+            ext_config = _charmcraft_extensions.CONFIG.get(ext_name, {}).get(variant, {})
+            ext_actions = _charmcraft_extensions.ACTIONS.get(ext_name, {}).get(variant, {})
 
         if not ext_meta and not ext_config and not ext_actions:
             warnings.warn(

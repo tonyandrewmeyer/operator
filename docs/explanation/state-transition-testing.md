@@ -296,6 +296,11 @@ state = ctx.run(
 )
 ```
 
+As with `charmcraft pack`, the charm's base decides which version of the extension is
+used. For example, the 12-factor extensions expand differently for a charm on Ubuntu
+26.04 than for one on 22.04 or 24.04: on 26.04, the workload container is called `app`
+and the peer relation is called `peers`.
+
 If your `charmcraft.yaml` defines keys that overlap with what the extension
 provides (for example, a config option or relation with the same name), both
 `charmcraft pack` and the testing framework will raise an error. Rename or
